@@ -1,0 +1,19 @@
+[package]
+name = "fae-agent"
+version = "0.1.0"
+description = "Agent engine for free-agent system."
+edition.workspace = true
+authors.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wd_log = { workspace = true }
+wd_tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
