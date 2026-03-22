@@ -1,0 +1,21 @@
+[workspace.package]
+edition = "2024"
+authors = ["Teshin <1443965173@qq.com>"]
+name = "free-agent-engine"
+description = "Agent engine for free-agent system"
+repository = "https://github.com/woshihaoren4/free-agent-engine"
+license = "Apache-2.0"
+readme = "README.md"
+
+[workspace]
+members = ["crates/fae-agent"]
+
+[workspace.dependencies]
+wd_log = "0.1.8"
+wd_tools = { version = "0.14.15", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.50", features = ["full"] }
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+async-trait = "0.1.89"
