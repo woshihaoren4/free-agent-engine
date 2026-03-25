@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("NoSupport error: {0}")]
+    NoSupport(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     
