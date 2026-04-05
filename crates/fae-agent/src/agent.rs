@@ -12,28 +12,15 @@ use crate::Error;
 pub enum EnvEvent{
     #[default]
     None,
-    Heartbeat,
+    Heartbeat(String),
     KV(String,Value),
     Custom(String),
-    Any(Box<dyn Any + Send>),
+    Any(Box<dyn Any + Send + Sync + 'static>),
 }
 
 #[async_trait::async_trait]
-pub trait Env:Sync{
+pub trait EnvWatch:Sync{
     async fn watch(&self) -> Channel<EnvEvent>;
-    async fn push(&self,event:EnvEvent)-> anyhow::Result<()>;
-}
-
-#[derive(Default,Debug)]
-pub enum Command{
-    #[default]
-    None,
-    Reset(String),
-    Set(String,Value),
-    ClearSession,
-    Stop,
-    Custom(String),
-    Any(Box<dyn Any + Send>),
 }
 
 #[derive(Default,Debug)]
@@ -42,9 +29,9 @@ pub enum Message{
     None,
     Text(String),
     Binary(Vec<u8>),
-    Json(Value),
+    Value(Value),
     Command(Command),
-    Any(Box<dyn Any + Send>),
+    Any(Box<dyn Any + Send + Sync + 'static>),
 }
 
 #[async_trait::async_trait]
@@ -66,12 +53,57 @@ pub trait Session:Sync{
     }
 }
 
+#[derive(Default,Debug)]
+pub enum Command{
+    #[default]
+    None,
+    SystemReset,
+    SystemExit,
+    UserCustomCommand(String),
+    Any(Box<dyn Any + Send + Sync + 'static>),
+}
+
+#[derive(Default,Debug)]
+pub enum Event{
+    #[default]
+    None,
+    Session(Message),
+    EnvEvent(EnvEvent),
+    TaskOver(Task)
+}
+
+#[derive(Default,Debug)]
+pub enum Task{
+    #[default]
+    None,
+    Module(String),
+    Tool(String),
+    Agent(String),
+    Skill(String),
+    Custom(String),
+    Output(String),
+    Error(String),
+    Over,
+    Any(Box<dyn Any + Send + Sync + 'static>),
+}
+
+#[derive(Default,Debug)]
+pub struct Context{
+
+}
 
 #[async_trait::async_trait]
-pub trait Agent{
-    async fn on_env(&self,event:EnvEvent)-> anyhow::Result<()>;
-    async fn on_session(&self,session_id:&str)-> anyhow::Result<Arc<dyn Session+Send+'static>>;
-    async fn on_option(&self)-> Result<(), Error>;
+pub trait AgentPlanning{
+    async fn start(&self,event:&Event)-> anyhow::Result<Arc<dyn Any + Send + Sync + 'static>>;
+    async fn next_step(&self,ctx:Arc<dyn Any + Send + Sync + 'static>,event:Event)-> anyhow::Result<Vec<Task>>;
+    async fn over(&self,ctx:Arc<dyn Any + Send + Sync + 'static>)->anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+pub trait Agent {
+    async fn on_env(&self, event: &EnvEvent) -> anyhow::Result<()>;
+    async fn on_session(&self) -> anyhow::Result<Box<dyn Session + Send + Sync + 'static>>;
+    async fn on_command(&self, cmd: Command) -> anyhow::Result<()>;
 }
 
 #[cfg(test)]

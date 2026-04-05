@@ -196,6 +196,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fae-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fae-agent",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "wd_log",
+ "wd_tools",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

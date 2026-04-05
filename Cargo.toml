@@ -1,14 +1,13 @@
 [workspace.package]
 edition = "2024"
 authors = ["Teshin <1443965173@qq.com>"]
-name = "free-agent-engine"
 description = "Agent engine for free-agent system"
 repository = "https://github.com/woshihaoren4/free-agent-engine"
 license = "Apache-2.0"
 readme = "README.md"
 
 [workspace]
-members = ["crates/fae-agent"]
+members = ["crates/fae-agent", "crates/fae-engine"]
 
 [workspace.dependencies]
 wd_log = "0.1.8"
