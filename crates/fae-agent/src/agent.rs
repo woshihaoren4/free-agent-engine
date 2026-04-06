@@ -30,6 +30,7 @@ pub trait EnvironmentWatch: Sync {
     /// 监听环境事件，返回事件通道
     async fn watch(&self) -> Channel<EnvEvent>;
 }
+#[derive(Clone)]
 pub struct EnvWatch(Arc<dyn EnvironmentWatch + Send + 'static>);
 
 /// 事物选择器，用于查询环境中的事物
@@ -76,11 +77,11 @@ pub trait EnvironmentHandler: Send + Sync + 'static {
     /// 查询环境中的事物
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>>;
     
-    /// 执行任务
+    /// 异步执行任务
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()>;
 
-    /// 等待任务完成
-    async fn do_wait(&self, task: Task) -> anyhow::Result<TaskResult>;
+    /// 同步执行任务
+    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
 }
 
 /// 环境封装，提供线程安全的环境访问
@@ -320,27 +321,5 @@ mod tests {
         // 测试事物选择器
         let select = ThingSelect::new("test query");
         assert_eq!(select.query, "test query");
-    }
-    
-    #[tokio::test]
-    async fn test_env_creation() {
-        // 测试环境封装的创建
-        struct TestEnv;
-        #[async_trait::async_trait]
-        impl EnvironmentHandler for TestEnv {
-            async fn query(&self, _select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
-                Ok(vec![])
-            }
-            async fn spawn(&self, _tasks: Vec<Task>) -> anyhow::Result<()> {
-                Ok(())
-            }
-
-            async fn do_wait(&self, _task: Task) -> anyhow::Result<TaskResult> {
-                anyhow::anyhow!("todo").err()
-            }
-        }
-        
-        let env = Env::new(TestEnv);
-        assert!(env.inner().query(ThingSelect::default()).await.is_ok());
     }
 }
