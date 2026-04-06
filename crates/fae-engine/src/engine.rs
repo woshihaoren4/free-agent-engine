@@ -1,16 +1,17 @@
-use fae_agent::{Agent, Session};
+use std::sync::Arc;
+use fae_agent::{Agent, AgentRef, Env, EnvWatch, EnvironmentWatch, Session};
 
 #[async_trait::async_trait]
-pub trait AgentLoader{
-    async fn load_agent(&self, agent_id: &str) -> anyhow::Result<Box<dyn Agent + Send + Sync + 'static>>;
+pub trait AgentLoader:Sync{
+    async fn load_agent(&self, agent_name: &str) -> anyhow::Result<AgentRef>;
 }
 
-
-#[async_trait::async_trait]
-pub trait Gateway{
-    async fn new_session(&self) -> anyhow::Result<Box<dyn Session + Send + Sync + 'static>>;
+pub struct EngineEnvLayer{
+    loader: Arc<dyn AgentLoader + Send + 'static>,
+    env : Env,
+    env_watch: EnvWatch,
 }
 
 pub struct AgentsEngine {
-
+    layers: Vec<EngineEnvLayer>,
 }
