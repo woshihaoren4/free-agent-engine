@@ -7,6 +7,7 @@ use tokio_stream::Stream;
 use wd_tools::channel::Channel;
 use wd_tools::PFErr;
 use crate::Error;
+use crate::task::{Task, TaskResult};
 
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
@@ -24,27 +25,16 @@ pub enum EnvEvent {
     Any(Box<dyn Any + Send + Sync + 'static>),
 }
 
-/// 环境监控 trait，用于监听环境事件
-#[async_trait::async_trait]
-pub trait EnvironmentWatch: Sync {
-    /// 监听环境事件，返回事件通道
-    async fn watch(&self) -> Channel<EnvEvent>;
-}
-#[derive(Clone)]
-pub struct EnvWatch(Arc<dyn EnvironmentWatch + Send + 'static>);
-
 /// 事物选择器，用于查询环境中的事物
 #[derive(Default, Debug, Clone)]
-pub struct ThingSelect {
+pub enum ThingSelect {
+    /// 无选择器
+    #[default]
+    None,
+    /// 环境变量
+    EnvVar(String),
     /// 查询语句
-    pub query: String,
-}
-
-impl ThingSelect {
-    /// 创建新的事物选择器
-    pub fn new(query: impl Into<String>) -> Self {
-        Self { query: query.into() }
-    }
+    Query(String),
 }
 
 /// 事物类型，表示环境中的各种对象
@@ -73,7 +63,17 @@ pub enum Thing {
 
 /// 环境 trait，定义智能体运行的环境接口
 #[async_trait::async_trait]
-pub trait EnvironmentHandler: Send + Sync + 'static {
+pub trait Environment: Send + Sync + 'static {
+    /// 当前环境的唯一标识
+    fn id(&self) -> &'static str;
+
+    /// 父子环境嵌套
+    async fn register_parent_env(&mut self, env:Env);
+
+    /// 监听环境事件，返回事件通道
+    /// 注意：事件是不是所有消费者共享的，A消费了这个事件则B不会收到这个事件
+    async fn watch(&self) -> Channel<EnvEvent>;
+
     /// 查询环境中的事物
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>>;
     
@@ -86,21 +86,21 @@ pub trait EnvironmentHandler: Send + Sync + 'static {
 
 /// 环境封装，提供线程安全的环境访问
 #[derive(Clone)]
-pub struct Env(Arc<dyn EnvironmentHandler + Send + 'static>);
-impl From<Arc<dyn EnvironmentHandler + Send + 'static>> for Env {
-    fn from(env: Arc<dyn EnvironmentHandler + Send + 'static>) -> Self {
+pub struct Env(Arc<dyn Environment + Send + 'static>);
+impl From<Arc<dyn Environment + Send + 'static>> for Env {
+    fn from(env: Arc<dyn Environment + Send + 'static>) -> Self {
         Self(env)
     }
 }
 
 impl Env {
     /// 创建新的环境封装
-    pub fn new(env: impl EnvironmentHandler) -> Self {
+    pub fn new(env: impl Environment) -> Self {
         Self(Arc::new(env))
     }
     
     /// 获取内部环境引用
-    pub fn inner(&self) -> Arc<dyn EnvironmentHandler> {
+    pub fn inner(&self) -> Arc<dyn Environment> {
         self.0.clone()
     }
 }
@@ -203,52 +203,6 @@ pub enum Event {
     TaskOver(Task)
 }
 
-/// 任务类型，表示智能体需要执行的任务
-#[derive(Default, Debug)]
-pub enum Task {
-    /// 无任务
-    #[default]
-    None,
-    /// 执行模块
-    Module(String),
-    /// 执行工具
-    Tool(String),
-    /// 执行智能体
-    Agent(String),
-    /// 执行技能
-    Skill(String),
-    /// 执行自定义任务
-    Custom(String),
-    /// 输出结果
-    Output(String),
-    /// 错误信息
-    Error(String),
-    /// 任务完成
-    Over,
-    /// 任意类型任务，用于扩展
-    Any(Box<dyn Any + Send + Sync + 'static>),
-}
-impl PartialEq for Task {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Task::None, Task::None) => true,
-            (Task::Module(a), Task::Module(b)) => a == b,
-            (Task::Tool(a), Task::Tool(b)) => a == b,
-            (Task::Agent(a), Task::Agent(b)) => a == b,
-            (Task::Skill(a), Task::Skill(b)) => a == b,
-            (Task::Custom(a), Task::Custom(b)) => a == b,
-            (Task::Output(a), Task::Output(b)) => a == b,
-            (Task::Error(a), Task::Error(b)) => a == b,
-            (Task::Over, Task::Over) => true,
-            (Task::Any(_), Task::Any(_)) => false, // 无法比较Any类型
-            _ => false,
-        }
-    }
-}
-#[derive(Default, Debug)]
-pub struct  TaskResult{
-    pub result: String,
-}
 
 /// 上下文，用于存储智能体执行过程中的状态
 #[derive(Debug, Clone)]
@@ -302,24 +256,5 @@ pub struct AgentRef(Arc<dyn Agent + Send + Sync + 'static>);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
-    #[test]
-    fn test_enum_derives() {
-        // 测试枚举的派生特性
-        let msg1 = Message::Text("hello".to_string());
-        let msg2 = Message::Text("hello".to_string());
-        assert_eq!(msg1, msg2);
-        
-        let task1 = Task::Tool("test".to_string());
-        let task2 = Task::Tool("test".to_string());
-        assert_eq!(task1, task2);
-    }
-    
-    #[test]
-    fn test_thing_select() {
-        // 测试事物选择器
-        let select = ThingSelect::new("test query");
-        assert_eq!(select.query, "test query");
-    }
 }

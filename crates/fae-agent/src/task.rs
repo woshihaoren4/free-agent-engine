@@ -1,0 +1,109 @@
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+
+/// 任务类型，表示智能体需要执行的任务
+#[derive(Debug,Serialize, Deserialize)]
+pub struct Task{
+    pub id: String,
+    pub r#type: TaskType,
+    pub args: Value,
+}
+impl Task {
+    pub fn new(id: String, r#type: TaskType, args: Value) -> Self {
+        Self { id, r#type, args }
+    }
+    pub fn set_id<T:Into<String>>(mut self, id: T)->Self {
+        self.id = id.into();
+        self
+    }
+    pub fn set_type<T:Into<TaskType>>(mut self, t: T) -> Self {
+        self.r#type = t.into();
+        self
+    }
+    pub fn set_args<T:Into<Value>>(mut self, args: T) -> Self {
+        self.args = args.into();
+        self
+    }
+    pub fn set_args_json<T:Serialize>(mut self, args: T) -> Result<Self,serde_json::Error>{
+        self.args = serde_json::to_value(&args)?;
+        Ok(self)
+    }
+}
+impl Default for Task {
+    fn default() -> Self {
+        Self::new("".to_string(), TaskType::None, Value::Null)
+    }
+}
+
+/// 任务类型，表示智能体需要执行的任务
+#[derive(Default, PartialEq,Eq, Debug,Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskType {
+    /// 无任务
+    #[default]
+    None,
+    /// 执行模块
+    Module,
+    /// 执行工具
+    Tool,
+    /// 执行智能体
+    Agent,
+    /// 执行技能
+    Skill,
+    /// 执行自定义任务
+    Custom,
+    /// 输出结果
+    Output,
+    /// 错误信息
+    Error,
+    /// 任务完成
+    Over,
+    /// 任意类型
+    Any(String),
+}
+impl<'de> Deserialize<'de> for TaskType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(TaskType::from(s.as_str()))
+    }
+}
+impl From<&str> for TaskType {
+    fn from(s: &str) -> Self {
+        match s {
+            "none" => TaskType::None,
+            "module" => TaskType::Module,
+            "tool" => TaskType::Tool,
+            "agent" => TaskType::Agent,
+            "skill" => TaskType::Skill,
+            "custom" => TaskType::Custom,
+            "output" => TaskType::Output,
+            "error" => TaskType::Error,
+            "over" => TaskType::Over,
+            other => TaskType::Any(other.to_string()),
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct  TaskResult{
+    pub result: String,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_task_type_deserialize() {
+        let mut task = Task::default().set_id("123").set_type("tool").set_args_json(r#"{"input":"hello world"}"#).unwrap();
+        println!("{:?}",serde_json::to_string(&task).unwrap());
+        task = task.set_type("custom");
+        println!("{:?}",serde_json::to_string(&task).unwrap());
+        let t1= serde_json::from_str::<Task>(r#"{"id":"123","type":"custom","args":{"input":"hello world"}}"#).unwrap();
+        println!("{:?}",t1);
+        assert_eq!(task.r#type, t1.r#type);
+    }
+}
