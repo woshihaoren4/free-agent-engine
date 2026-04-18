@@ -36,7 +36,7 @@ impl Default for Task {
 }
 
 /// 任务类型，表示智能体需要执行的任务
-#[derive(Default, PartialEq,Eq, Debug,Serialize)]
+#[derive(Default,Debug, PartialEq,Eq,Clone,PartialOrd,Ord,Hash,Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskType {
     /// 无任务
@@ -89,9 +89,16 @@ impl From<&str> for TaskType {
 
 #[derive(Default, Debug)]
 pub struct  TaskResult{
-    pub result: String,
+    // 0:成功，其他:失败
+    pub code: i32,
+    pub msg : String,
+    pub data: Value,
 }
 
+#[async_trait::async_trait]
+pub trait TaskExecutor:Sync{
+    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
+}
 
 #[cfg(test)]
 mod tests {
