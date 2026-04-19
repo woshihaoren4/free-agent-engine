@@ -1,0 +1,21 @@
+[package]
+name = "fae-engine"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+
+[dependencies]
+wd_log = { workspace = true }
+wd_tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+
+fae-agent = {path = "../fae-agent", version = "0.1.0"}
