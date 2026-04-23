@@ -3,42 +3,109 @@ use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::channel::Channel;
 use wd_tools::PFErr;
-use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingSelect};
+use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 
 pub struct TaskRuntime {
+    events: Channel<EnvEvent>,
+    parent: Option<Env>,
     executors: HashMap<TaskType, Arc<dyn TaskExecutor+Send+'static>>,
 }
 
 impl TaskRuntime {
     pub fn new() -> Self {
-        Self { executors: HashMap::new()}
+        let events = Channel::with_cap(1024);
+        Self { events,  parent: None, executors: HashMap::new()}
+    }
+    pub fn raw_register_executor(&mut self, task_type: TaskType, executor: Arc<dyn TaskExecutor+Send+'static>) {
+        self.executors.insert(task_type, executor);
+    }
+    pub fn register_executor<T: TaskExecutor+Send+'static>(&mut self, task_type: TaskType, executor:T) {
+        self.raw_register_executor(task_type, Arc::new(executor));
+    }
+    pub async fn exec(executor: Arc<dyn TaskExecutor+Send>, task: Task) -> TaskResult {
+        let task_id = task.id.clone();
+        let agent_id = task.agent_id.clone();
+        match executor.execute(task).await{
+            Ok(result) => result,
+            Err(err) => {
+                TaskResult::new(fae_agent::error::TASK_ERROR_CODE_UNKNOWN,format!("{:?}", err),task_id,agent_id)
+            },
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl Environment for TaskRuntime{
     fn id(&self) -> &'static str {
-        "task_runtime"
+        "FAE_DEFAULT_TASK_EXECUTOR"
     }
 
     async fn register_parent_env(&mut self, env: Env) {
-        panic!("task_runtime not support register_parent_env");
+        self.parent = Some(env);
     }
 
-    async fn watch(&self) -> Channel<EnvEvent> {
-        panic!("task_runtime not support watch");
+    async fn watch(&self) -> EnvEvent {
+        if let Some(ref parent_env) = self.parent{
+            return parent_env.watch().await
+        }
+        EnvEvent::None
     }
 
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
-        panic!("task_runtime not support query");
+        if let ThingSelect::Executor(ref task_type) = select {
+            if let Some(e) = self.executors.get(task_type) {
+                return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::Executor(e.desc())).into_self()]);
+            }
+        }
+        if let Some(e) = self.parent.as_ref() {
+            return e.query(select).await
+        }
+        Ok(vec![])
     }
 
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
-        panic!("task_runtime not support spawn");
+        //先检查
+        for i in &tasks {
+            let list = self.query(ThingSelect::Executor(i.r#type.clone())).await?;
+            if list.is_empty() {
+                return anyhow::anyhow!("[TaskRuntime:spawn]task executor not found: {:?}", i.r#type).err();
+            }
+        }
+        //后执行
+        for task in tasks {
+            if let Some(e) = self.executors.get(&task.r#type) {
+                //优先自己执行
+                let events_channel = self.events.clone();
+                let executor = e.clone();
+                tokio::spawn(async move {
+                    let result = Self::exec(executor, task).await;
+                    if let Err(e) = events_channel.send(EnvEvent::TaskResult(result)).await{
+                        wd_log::log_error_ln!("[TaskRuntime:spawn] send task result error: {:?}",e);
+                    };
+                });
+            }else if let Some(e) = self.parent.as_ref() {
+                //再委托给父环境
+                e.spawn(vec![task]).await?;
+            }else{
+                //如果父环境也没有，就报错
+                return anyhow::anyhow!("[TaskRuntime:spawn] task executor not found: {:?}", task.r#type).err();
+            }
+        }
+        Ok(())
     }
 
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
-        panic!("task_runtime not support execute");
+        if let Some(e) = self.executors.get(&task.r#type) {
+            //优先自己执行
+            let result = Self::exec(e.clone(), task).await;
+            Ok(result)
+        }else if let Some(e) = self.parent.as_ref() {
+            //再委托给父环境
+            e.execute(task).await
+        }else{
+            //如果父环境也没有，就报错
+            return anyhow::anyhow!("[TaskRuntime:execute] task executor not found: {:?}", task.r#type).err();
+        }
     }
 }
 

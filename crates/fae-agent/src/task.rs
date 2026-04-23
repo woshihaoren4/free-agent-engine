@@ -5,12 +5,13 @@ use serde_json::Value;
 #[derive(Debug,Serialize, Deserialize)]
 pub struct Task{
     pub id: String,
+    pub agent_id: String,
     pub r#type: TaskType,
     pub args: Value,
 }
 impl Task {
-    pub fn new(id: String, r#type: TaskType, args: Value) -> Self {
-        Self { id, r#type, args }
+    pub fn new(id: String, agent_id: String, r#type: TaskType, args: Value) -> Self {
+        Self { id, agent_id, r#type, args }
     }
     pub fn set_id<T:Into<String>>(mut self, id: T)->Self {
         self.id = id.into();
@@ -28,10 +29,14 @@ impl Task {
         self.args = serde_json::to_value(&args)?;
         Ok(self)
     }
+    pub fn set_agent_id<T:Into<String>>(mut self, agent_id: T)->Self {
+        self.agent_id = agent_id.into();
+        self
+    }
 }
 impl Default for Task {
     fn default() -> Self {
-        Self::new("".to_string(), TaskType::None, Value::Null)
+        Self::new("".to_string(), "".to_string(),  TaskType::None, Value::Null)
     }
 }
 
@@ -93,10 +98,35 @@ pub struct  TaskResult{
     pub code: i32,
     pub msg : String,
     pub data: Value,
+    // 任务id
+    pub task_id: String,
+    // 任务所属agent
+    pub agent_id: String,
+}
+
+impl TaskResult {
+    pub fn new<M:Into<String>,T:Into<String>,A:Into<String>>(code:i32,msg:M,task_id: T,agent_id:A)->Self{
+        Self {
+            code,
+            msg: msg.into(),
+            data: Value::Null,
+            task_id: task_id.into(),
+            agent_id: agent_id.into(),
+        }
+    }
+    pub fn set_raw_data<T:Into<Value>>(mut self, data:T)->Self{
+        self.data = data.into();
+        self
+    }
+    pub fn must_set_json_data<T:Serialize>(mut self, data:T)->Self{
+        self.data = serde_json::to_value(&data).unwrap();
+        self
+    }
 }
 
 #[async_trait::async_trait]
 pub trait TaskExecutor:Sync{
+    fn desc(&self) -> String;
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
 }
 

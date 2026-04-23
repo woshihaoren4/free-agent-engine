@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::ops::Deref;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio_stream::Stream;
 use wd_tools::channel::Channel;
 use wd_tools::PFErr;
-use crate::Error;
+use crate::{Error, TaskType};
 use crate::task::{Task, TaskResult};
 
 /// 环境事件类型，用于表示环境中发生的各种事件
@@ -15,14 +16,14 @@ pub enum EnvEvent {
     /// 无事件
     #[default]
     None,
-    /// 心跳事件，携带心跳信息
-    Heartbeat(String),
-    /// 键值对事件，携带键和值
-    KV(String, Value),
-    /// 自定义事件，携带自定义信息
-    Custom(String),
-    /// 任意类型事件，用于扩展
-    Any(Box<dyn Any + Send + Sync + 'static>),
+    // 事件执行结果，
+    TaskResult(TaskResult),
+    // /// 键值对事件，携带键和值
+    // KV(String, Value),
+    // /// 自定义事件，携带自定义信息
+    // Custom(String),
+    // /// 任意类型事件，用于扩展
+    // Any(Box<dyn Any + Send + Sync + 'static>),
 }
 
 /// 事物选择器，用于查询环境中的事物
@@ -33,16 +34,35 @@ pub enum ThingSelect {
     None,
     /// 环境变量
     EnvVar(String),
-    /// 查询语句
-    Query(String),
+    /// 任务执行器
+    Executor(TaskType),
 }
 
 /// 事物类型，表示环境中的各种对象
 #[derive(Default, Debug)]
-pub enum Thing {
-    /// 无事物
+pub struct Thing {
+    pub source: String,
+    pub items: Vec<ThingItem>,
+}
+impl Thing {
+    pub fn new(source: String) -> Self {
+        Self { source, items: Vec::new() }
+    }
+    pub fn add_item<T:Into<ThingItem>>(&mut self, item: T)->&mut Self {
+        self.items.push(item.into());self
+    }
+    pub fn into_self(&mut self) -> Self {
+        let source = std::mem::take(&mut self.source);
+        let items = std::mem::take(&mut self.items);
+        Self { source, items }
+    }
+}
+#[derive(Default, Debug)]
+pub enum ThingItem{
     #[default]
     None,
+    /// 任务执行器,执行器描述
+    Executor(String),
     /// 模块
     Module(String),
     /// 工具
@@ -61,6 +81,7 @@ pub enum Thing {
     Any(Box<dyn Any + Send + Sync + 'static>),
 }
 
+
 /// 环境 trait，定义智能体运行的环境接口
 #[async_trait::async_trait]
 pub trait Environment: Send + Sync + 'static {
@@ -72,7 +93,7 @@ pub trait Environment: Send + Sync + 'static {
 
     /// 监听环境事件，返回事件通道
     /// 注意：事件是不是所有消费者共享的，A消费了这个事件则B不会收到这个事件
-    async fn watch(&self) -> Channel<EnvEvent>;
+    async fn watch(&self) -> EnvEvent;
 
     /// 查询环境中的事物
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>>;
@@ -92,7 +113,6 @@ impl From<Arc<dyn Environment + Send + 'static>> for Env {
         Self(env)
     }
 }
-
 impl Env {
     /// 创建新的环境封装
     pub fn new(env: impl Environment) -> Self {
@@ -102,6 +122,12 @@ impl Env {
     /// 获取内部环境引用
     pub fn inner(&self) -> Arc<dyn Environment> {
         self.0.clone()
+    }
+}
+impl Deref for Env {
+    type Target = Arc<dyn Environment + Send + 'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

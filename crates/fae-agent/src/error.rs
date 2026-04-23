@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+pub const TASK_ERROR_CODE_UNKNOWN: i32 = 999001001;
+
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("NoSupport error: {0}")]

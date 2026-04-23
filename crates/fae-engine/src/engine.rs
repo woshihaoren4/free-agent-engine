@@ -9,8 +9,8 @@ pub struct RecallAgentRef{
 
 #[async_trait::async_trait]
 pub trait AgentLoader:Sync{
-    async fn load(&self, agent_name: &str) -> anyhow::Result<AgentRef>;
-    async fn recall(&self, task_desc: &str,limit: usize) -> anyhow::Result<Vec<RecallAgentRef>>;
+    async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef>;
+    async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>>;
 }
 
 
@@ -22,11 +22,11 @@ pub struct EngineEnvLayer{
 
 pub struct AgentsEngine {
     layers: Vec<EngineEnvLayer>,
-    executor: TaskRuntimeRef,
+    runtime: TaskRuntimeRef,
 }
 
 impl AgentsEngine {
-    pub fn new<RT:Into<TaskRuntimeRef>>(executor: RT) -> Self {
-        Self { layers: Vec::new(), executor:executor.into() }
+    pub fn new<RT:Into<TaskRuntimeRef>>(runtime: RT) -> Self {
+        Self { layers: Vec::new(), runtime: runtime.into() }
     }
 }

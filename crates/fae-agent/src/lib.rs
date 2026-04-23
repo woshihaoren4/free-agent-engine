@@ -1,5 +1,5 @@
 mod agent;
-mod error;
+pub mod error;
 mod task;
 
 pub use error::Error;
