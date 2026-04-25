@@ -52,11 +52,19 @@ impl Environment for TaskRuntime{
     }
 
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+        //为空时，查询所有任务执行器
+        if select.is_none() {
+            let items = self.executors.iter().map(|(_,e)|ThingItem::Executor(e.desc())).collect();
+            let thing = Thing::new(self.id().to_string()).set_items(items).into_self();
+            return Ok(vec![thing]);
+        }
+        //根据任务类型查询
         if let ThingSelect::Executor(ref task_type) = select {
             if let Some(e) = self.executors.get(task_type) {
                 return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::Executor(e.desc())).into_self()]);
             }
         }
+        //如果父环境也没有，就返回空
         if let Some(e) = self.parent.as_ref() {
             return e.query(select).await
         }
@@ -113,6 +121,11 @@ impl Environment for TaskRuntime{
 // TaskRuntimeRef is a reference to TaskRuntime.
 #[derive(Clone)]
 pub struct TaskRuntimeRef(Arc<TaskRuntime>);
+impl TaskRuntimeRef {
+    pub fn as_env(&self) -> Env {
+        Env::from(self.0.clone() as Arc<dyn Environment+Send+'static>)
+    }
+}
 impl From<TaskRuntime> for TaskRuntimeRef {
     fn from(runtime: TaskRuntime) -> Self {Self(Arc::new(runtime))}
 }

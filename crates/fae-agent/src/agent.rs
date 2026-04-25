@@ -27,7 +27,7 @@ pub enum EnvEvent {
 }
 
 /// 事物选择器，用于查询环境中的事物
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Clone)]
 pub enum ThingSelect {
     /// 无选择器
     #[default]
@@ -36,6 +36,11 @@ pub enum ThingSelect {
     EnvVar(String),
     /// 任务执行器
     Executor(TaskType),
+}
+impl ThingSelect {
+    pub fn is_none(&self) -> bool {
+        self == &ThingSelect::None
+    }
 }
 
 /// 事物类型，表示环境中的各种对象
@@ -50,6 +55,10 @@ impl Thing {
     }
     pub fn add_item<T:Into<ThingItem>>(&mut self, item: T)->&mut Self {
         self.items.push(item.into());self
+    }
+    pub fn set_items(&mut self, items: Vec<ThingItem>) -> &mut Self {
+        self.items = items;
+        self
     }
     pub fn into_self(&mut self) -> Self {
         let source = std::mem::take(&mut self.source);
@@ -118,7 +127,6 @@ impl Env {
     pub fn new(env: impl Environment) -> Self {
         Self(Arc::new(env))
     }
-    
     /// 获取内部环境引用
     pub fn inner(&self) -> Arc<dyn Environment> {
         self.0.clone()
