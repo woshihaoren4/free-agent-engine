@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use crate::{Task, TaskResult, TaskType};
 /// 环境事件类型，用于表示环境中发生的各种事件
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
 pub enum EnvEvent {
     /// 无事件
     #[default]
@@ -16,6 +16,11 @@ pub enum EnvEvent {
     // Custom(String),
     // /// 任意类型事件，用于扩展
     // Any(Box<dyn Any + Send + Sync + 'static>),
+}
+impl EnvEvent {
+    pub fn is_none(&self) -> bool {
+        self == &EnvEvent::None
+    }
 }
 
 /// 事物选择器，用于查询环境中的事物

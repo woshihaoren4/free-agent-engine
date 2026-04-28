@@ -92,7 +92,7 @@ impl From<&str> for TaskType {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
 pub struct  TaskResult{
     // 0:成功，其他:失败
     pub code: i32,

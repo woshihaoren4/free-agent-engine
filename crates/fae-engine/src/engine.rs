@@ -36,7 +36,12 @@ impl AgentsEngine {
     pub fn new<RT:Into<TaskRuntimeRef>>(runtime: RT) -> Self {
         Self { workspaces: HashMap::new(), runtime: runtime.into() }
     }
-    pub fn workspaces(&self,name:&str) -> Option<Workspace>{
+    pub fn workspace(&self,name:&str) -> Option<Workspace>{
         self.workspaces.get(name).cloned()
+    }
+    pub fn exit(&self) {
+        for (_, workspace) in self.workspaces.iter() {
+            workspace.exit();
+        }
     }
 }

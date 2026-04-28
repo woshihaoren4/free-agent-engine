@@ -146,7 +146,7 @@ pub trait AgentPlanning: Send + Sync + 'static {
 
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
-pub trait Agent: Send + Sync + 'static {
+pub trait Agent:Sync{
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
     
@@ -157,7 +157,21 @@ pub trait Agent: Send + Sync + 'static {
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
 }
 
-pub struct AgentRef(Arc<dyn Agent + Send + Sync + 'static>);
+pub struct AgentRef(Arc<dyn Agent + Send + 'static>);
+impl Deref for AgentRef {
+    type Target = Arc<dyn Agent + Send + 'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl<T> From<T> for AgentRef
+where T: Agent + Send + 'static
+{
+    fn from(agent: T) -> Self {
+        Self(Arc::new(agent))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
