@@ -92,6 +92,11 @@ pub trait Session: Sync{
     async fn stream(&self, input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
         Error::NoSupport("Session.stream".into()).err()
     }
+
+    /// 终止
+    async fn abort(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// 事件类型，表示系统中发生的各种事件
@@ -124,11 +129,18 @@ impl Context {
     }
 }
 
+#[derive(Debug,Clone)]
+pub struct SessionMetaUser{
+    pub user_id: String,
+}
+
 /// 会话元数据，用于传递会话相关信息
 #[derive(Debug)]
-pub enum SessionMeta {
+pub struct  SessionMeta {
+    // 使用者信息
+    user : SessionMetaUser,
     /// 任意类型元数据，用于扩展
-    Any(Box<dyn Any + Send + Sync + 'static>),
+    extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 
 /// 智能体规划 trait，定义智能体的规划逻辑

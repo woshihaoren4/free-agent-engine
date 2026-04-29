@@ -14,6 +14,9 @@ pub struct RecallAgentRef{
 pub trait AgentLoader:Sync{
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef>;
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>>;
+    async fn exit(&self) -> anyhow::Result<()>{
+        Ok(())
+    }
 }
 #[async_trait::async_trait]
 impl AgentLoader for () {
@@ -21,11 +24,9 @@ impl AgentLoader for () {
         anyhow::anyhow!("NotFound").err()
     }
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
-        anyhow::anyhow!("NotFound").err()
+        Ok(Vec::new())
     }
 }
-
-
 
 pub struct AgentsEngine {
     pub workspaces: HashMap<String, Workspace>,
