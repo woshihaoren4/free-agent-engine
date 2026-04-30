@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -47,8 +48,8 @@ pub enum TaskType {
     /// 无任务
     #[default]
     None,
-    /// 执行模块
-    Module,
+    /// 执行模型
+    Model,
     /// 执行工具
     Tool,
     /// 执行智能体
@@ -79,7 +80,7 @@ impl From<&str> for TaskType {
     fn from(s: &str) -> Self {
         match s {
             "none" => TaskType::None,
-            "module" => TaskType::Module,
+            "module" => TaskType::Model,
             "tool" => TaskType::Tool,
             "agent" => TaskType::Agent,
             "skill" => TaskType::Skill,
@@ -91,7 +92,11 @@ impl From<&str> for TaskType {
         }
     }
 }
-
+impl Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
 #[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
 pub struct  TaskResult{
     // 0:成功，其他:失败
@@ -127,6 +132,9 @@ impl TaskResult {
 #[async_trait::async_trait]
 pub trait TaskExecutor:Sync{
     fn desc(&self) -> String;
+    fn channel(&self) -> String{
+        "default".to_string()
+    }
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
 }
 

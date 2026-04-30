@@ -31,8 +31,8 @@ pub enum ThingSelect {
     None,
     /// 环境变量
     EnvVar(String),
-    /// 任务执行器
-    Executor(TaskType),
+    /// 任务执行器：任务类型,渠道
+    Executor(TaskType, String),
 }
 impl ThingSelect {
     pub fn is_none(&self) -> bool {

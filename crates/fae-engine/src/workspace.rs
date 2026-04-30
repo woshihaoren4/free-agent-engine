@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use fae_agent::{AgentRef, Env, EnvEvent, Environment};
+use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionMeta};
 use crate::engine::AgentLoader;
 
 // 0:初始化，1:运行中，2:已停止
@@ -73,6 +73,10 @@ impl Workspace {
     }
     pub fn get_env(&self) -> Env {
         self.env.clone()
+    }
+    pub async fn session<T:Into<SessionMeta>>(&self,agent:&str,meta:T) ->  anyhow::Result<Box<dyn Session + Send + 'static>> {
+        let agent = self.get_agent(agent).await?;
+        agent.on_session(self.env.clone(),meta.into()).await
     }
     pub async fn exit(&self) {
         self.status.set_stopped();

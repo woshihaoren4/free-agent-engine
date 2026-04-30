@@ -137,10 +137,12 @@ pub struct SessionMetaUser{
 /// 会话元数据，用于传递会话相关信息
 #[derive(Debug)]
 pub struct  SessionMeta {
-    // 使用者信息
-    user : SessionMetaUser,
+    /// 会话ID
+    pub session_id: String,
+    /// 使用者信息
+    pub user : SessionMetaUser,
     /// 任意类型元数据，用于扩展
-    extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
+    pub extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 
 /// 智能体规划 trait，定义智能体的规划逻辑
@@ -183,7 +185,6 @@ where T: Agent + Send + 'static
         Self(Arc::new(agent))
     }
 }
-
 
 #[cfg(test)]
 mod tests {

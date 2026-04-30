@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, Task
 pub struct TaskRuntime {
     events: Channel<EnvEvent>,
     parent: Option<Env>,
-    executors: HashMap<TaskType, Arc<dyn TaskExecutor+Send+'static>>,
+    executors: HashMap<String, Arc<dyn TaskExecutor+Send+'static>>,
 }
 
 impl TaskRuntime {
@@ -16,8 +17,12 @@ impl TaskRuntime {
         let events = Channel::with_cap(1024);
         Self { events,  parent: None, executors: HashMap::new()}
     }
+    pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
+        format!("{}-{}", task_type, channel)
+    }
     pub fn raw_register_executor(&mut self, task_type: TaskType, executor: Arc<dyn TaskExecutor+Send+'static>) {
-        self.executors.insert(task_type, executor);
+        let channel = executor.channel();
+        self.executors.insert(self.generate_executor_key(&task_type, &channel), executor);
     }
     pub fn register_executor<T: TaskExecutor+Send+'static>(&mut self, task_type: TaskType, executor:T) {
         self.raw_register_executor(task_type, Arc::new(executor));
@@ -58,9 +63,9 @@ impl Environment for TaskRuntime{
             let thing = Thing::new(self.id().to_string()).set_items(items).into_self();
             return Ok(vec![thing]);
         }
-        //根据任务类型查询
-        if let ThingSelect::Executor(ref task_type) = select {
-            if let Some(e) = self.executors.get(task_type) {
+        //根据任务类型和渠道查询
+        if let ThingSelect::Executor(ref task_type, ref channel) = select {
+            if let Some(e) = self.executors.get(&self.generate_executor_key(&task_type, channel)) {
                 return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::Executor(e.desc())).into_self()]);
             }
         }
