@@ -27,6 +27,9 @@ impl TaskRuntime {
     pub fn register_executor<T: TaskExecutor+Send+'static>(&mut self, task_type: TaskType, executor:T) {
         self.raw_register_executor(task_type, Arc::new(executor));
     }
+    pub fn get_executor(&self, task_type: &TaskType, channel: &str) -> Option<Arc<dyn TaskExecutor+Send>> {
+        self.executors.get(&self.generate_executor_key(task_type, channel)).cloned()
+    }
     pub async fn exec(executor: Arc<dyn TaskExecutor+Send>, task: Task) -> TaskResult {
         let task_id = task.id.clone();
         let agent_id = task.agent_id.clone();
@@ -79,14 +82,14 @@ impl Environment for TaskRuntime{
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
         //先检查
         for i in &tasks {
-            let list = self.query(ThingSelect::Executor(i.r#type.clone())).await?;
+            let list = self.query(ThingSelect::Executor(i.get_type().clone(),i.get_exec_channel().to_string())).await?;
             if list.is_empty() {
                 return anyhow::anyhow!("[TaskRuntime:spawn]task executor not found: {:?}", i.r#type).err();
             }
         }
         //后执行
         for task in tasks {
-            if let Some(e) = self.executors.get(&task.r#type) {
+            if let Some(e) = self.get_executor(task.get_type(), task.get_exec_channel()) {
                 //优先自己执行
                 let events_channel = self.events.clone();
                 let executor = e.clone();
@@ -108,7 +111,7 @@ impl Environment for TaskRuntime{
     }
 
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
-        if let Some(e) = self.executors.get(&task.r#type) {
+        if let Some(e) = self.get_executor(task.get_type(), task.get_exec_channel()) {
             //优先自己执行
             let result = Self::exec(e.clone(), task).await;
             Ok(result)

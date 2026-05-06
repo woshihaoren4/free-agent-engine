@@ -1,43 +1,70 @@
+use std::any::Any;
 use std::fmt::Display;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// 任务类型，表示智能体需要执行的任务
-#[derive(Debug,Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Task{
     pub id: String,
     pub agent_id: String,
     pub r#type: TaskType,
-    pub args: Value,
+    pub exec_channel: String,
+    pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 impl Task {
-    pub fn new(id: String, agent_id: String, r#type: TaskType, args: Value) -> Self {
-        Self { id, agent_id, r#type, args }
+    pub fn new<T: Any + Send + Sync + 'static>(id: String, agent_id: String, r#type: TaskType) -> Self {
+        Self { id, agent_id, r#type, args: None,exec_channel:"default".into() }
     }
     pub fn set_id<T:Into<String>>(mut self, id: T)->Self {
         self.id = id.into();
         self
     }
+    pub fn get_id(&self) -> &str { self.id.as_str() }
+    pub fn get_agent_id(&self) -> &str { self.agent_id.as_str() }
+    pub fn get_exec_channel(&self) -> &str { self.exec_channel.as_str() }
     pub fn set_type<T:Into<TaskType>>(mut self, t: T) -> Self {
         self.r#type = t.into();
         self
     }
-    pub fn set_args<T:Into<Value>>(mut self, args: T) -> Self {
-        self.args = args.into();
+    pub fn get_type(&self) -> &TaskType { &self.r#type }
+    pub fn set_exec_channel<T:Into<String>>(mut self, t: T) -> Self {
+        self.exec_channel = t.into();
         self
-    }
-    pub fn set_args_json<T:Serialize>(mut self, args: T) -> Result<Self,serde_json::Error>{
-        self.args = serde_json::to_value(&args)?;
-        Ok(self)
     }
     pub fn set_agent_id<T:Into<String>>(mut self, agent_id: T)->Self {
         self.agent_id = agent_id.into();
         self
     }
+    pub fn set_args<T:Any + Send + Sync + 'static>(mut self, args: T) -> Self {
+        self.args = Some(Box::new(args));
+        self
+    }
+    pub fn assert<T: Any>(&self) -> bool {
+        if let Some(ref args) = self.args {
+            args.downcast_ref::<T>().is_some()
+        }else{
+            false
+        }
+    }
+    pub fn into_inner<T: Any>(&mut self) -> Option<T> {
+        if let Some(args) = self.args.take() {
+            match args.downcast::<T>() {
+                Ok(t) => Some(*t),
+                Err(e) => {
+                    self.args = Some(e);
+                    None
+                },
+            }
+        }else{
+            None
+        }
+    }
 }
+
 impl Default for Task {
     fn default() -> Self {
-        Self::new("".to_string(), "".to_string(),  TaskType::None, Value::Null)
+        Self::new::<()>("".to_string(), "".to_string(), TaskType::None)
     }
 }
 
@@ -97,35 +124,54 @@ impl Display for TaskType {
         write!(f, "{}", self.to_string())
     }
 }
-#[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug)]
 pub struct  TaskResult{
-    // 0:成功，其他:失败
     pub code: i32,
-    pub msg : String,
-    pub data: Value,
+    pub msg: String,
     // 任务id
     pub task_id: String,
     // 任务所属agent
     pub agent_id: String,
+    // 任务结果数据
+    pub data: Option<Box<dyn Any + Send + 'static>>,
 }
 
 impl TaskResult {
     pub fn new<M:Into<String>,T:Into<String>,A:Into<String>>(code:i32,msg:M,task_id: T,agent_id:A)->Self{
         Self {
             code,
-            msg: msg.into(),
-            data: Value::Null,
+            msg:msg.into(),
+            data: None,
             task_id: task_id.into(),
             agent_id: agent_id.into(),
         }
     }
-    pub fn set_raw_data<T:Into<Value>>(mut self, data:T)->Self{
-        self.data = data.into();
+    pub fn success<T:Into<String>,A:Into<String>>(task_id: T,agent_id:A)->Self{
+        Self::new(0,"success",task_id,agent_id)
+    }
+    pub fn set_raw_data<T:Any + Send + 'static>(mut self, data:T)->Self{
+        self.data = Some(Box::new(data));
         self
     }
-    pub fn must_set_json_data<T:Serialize>(mut self, data:T)->Self{
-        self.data = serde_json::to_value(&data).unwrap();
-        self
+    pub fn assert<T:Any>(&self) -> bool {
+        if let Some(ref data) = self.data {
+            data.downcast_ref::<T>().is_some()
+        }else{
+            false
+        }
+    }
+    pub fn into_inner<T:Any>(&mut self) -> Option<T>{
+        if let Some(data) = self.data.take() {
+            match data.downcast::<T>() {
+                Ok(t) => Some(*t),
+                Err(e) => {
+                    self.data = Some(e);
+                    None
+                },
+            }
+        }else{
+            None
+        }
     }
 }
 
@@ -143,12 +189,6 @@ mod tests {
     use super::*;
     #[test]
     fn test_task_type_deserialize() {
-        let mut task = Task::default().set_id("123").set_type("tool").set_args_json(r#"{"input":"hello world"}"#).unwrap();
-        println!("{:?}",serde_json::to_string(&task).unwrap());
-        task = task.set_type("custom");
-        println!("{:?}",serde_json::to_string(&task).unwrap());
-        let t1= serde_json::from_str::<Task>(r#"{"id":"123","type":"custom","args":{"input":"hello world"}}"#).unwrap();
-        println!("{:?}",t1);
-        assert_eq!(task.r#type, t1.r#type);
+
     }
 }

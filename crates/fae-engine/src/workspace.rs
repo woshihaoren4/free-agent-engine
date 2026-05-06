@@ -51,7 +51,7 @@ impl Workspace {
                         let agent = match this.get_agent(result.agent_id.as_str()).await {
                             Ok(agent) => agent,
                             Err(e) => {
-                                wd_log::log_error_ln!("[Workspace::{}] load agent {} failed: {:?}",this.name,result.agent_id,e);
+                                wd_log::log_error_ln!("[Workspace::{}] load agent failed: {:?}",this.name,e);
                                 continue;
                             }
                         };

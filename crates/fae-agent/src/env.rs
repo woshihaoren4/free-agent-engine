@@ -3,7 +3,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use crate::{Task, TaskResult, TaskType};
 /// 环境事件类型，用于表示环境中发生的各种事件
-#[derive(Default, Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Default, Debug)]
 pub enum EnvEvent {
     /// 无事件
     #[default]
@@ -19,7 +19,11 @@ pub enum EnvEvent {
 }
 impl EnvEvent {
     pub fn is_none(&self) -> bool {
-        self == &EnvEvent::None
+        if let Self::None = *self {
+            true
+        } else {
+            false
+        }
     }
 }
 
