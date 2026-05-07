@@ -13,7 +13,9 @@ pub struct Task{
     pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 impl Task {
-    pub fn new<T: Any + Send + Sync + 'static>(id: String, agent_id: String, r#type: TaskType) -> Self {
+    pub fn new<I:Into<String>,A:Into<String>>(id: I, agent_id: A, r#type: TaskType) -> Self {
+        let id = id.into();
+        let agent_id = agent_id.into();
         Self { id, agent_id, r#type, args: None,exec_channel:"default".into() }
     }
     pub fn set_id<T:Into<String>>(mut self, id: T)->Self {
@@ -59,12 +61,6 @@ impl Task {
         }else{
             None
         }
-    }
-}
-
-impl Default for Task {
-    fn default() -> Self {
-        Self::new::<()>("".to_string(), "".to_string(), TaskType::None)
     }
 }
 

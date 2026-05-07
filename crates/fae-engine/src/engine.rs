@@ -40,9 +40,9 @@ impl AgentsEngine {
     pub fn workspace(&self,name:&str) -> Option<Workspace>{
         self.workspaces.get(name).cloned()
     }
-    pub fn exit(&self) {
+    pub async fn exit(&self) {
         for (_, workspace) in self.workspaces.iter() {
-            workspace.exit();
+            workspace.exit().await;
         }
     }
 }

@@ -38,6 +38,9 @@ impl ModelOpenAIApiExecutor {
         let resp     = self.client.chat().create(req).await?;
         Ok(resp)
     }
+    pub fn build_stream_chat_request<T>(req: T)->ModelOpenAIApiExecutorTaskConfig<T>{
+        ModelOpenAIApiExecutorTaskConfig{req,streaming:true}
+    }
 }
 
 #[async_trait::async_trait]
@@ -64,8 +67,72 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
             }else{
                 return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!").err();
             }
+        }else if task.assert::<CreateChatCompletionRequest>(){
+            if let Some(req) = task.into_inner::<CreateChatCompletionRequest>(){
+                let result = TaskResult::success(task.id,task.agent_id);
+                let resp = self.chat(req).await?;
+                Ok(result.set_raw_data(resp))
+            }else{
+                return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!").err();
+            }
         }else{
             return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] task args assert failed!").err();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests{
+    use async_openai::types::{ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
+    use tokio_stream::StreamExt;
+    use fae_agent::TaskType;
+    use super::*;
+
+    #[tokio::test]
+    async fn test_openai_execute(){
+        let model = std::env::var("OPENAI_DEFAULT_MODEL").unwrap();
+        let cfg = OpenAIConfig::new().with_api_base(std::env::var("OPENAI_API_URL").unwrap());
+
+        let executor = ModelOpenAIApiExecutor::with_config(cfg);
+
+        // ------------> 单次请求 <------------------
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model.as_str())
+            .max_tokens(512u32)
+            .messages([ChatCompletionRequestUserMessageArgs::default()
+                .content("简单介绍一下rust语言")
+                .build().expect("build message failed!")
+                .into()])
+            .build().expect("build request failed!");
+
+        let task = Task::new("1","assistant",TaskType::Model).set_args(request);
+
+        let mut result = executor.execute(task).await.expect("execute failed!");
+        let mut answer = result.into_inner::<CreateChatCompletionResponse>().expect("get response failed!");
+        println!("--->{:?}",answer.choices.remove(0).message.content.unwrap());
+
+        // ------------> 流式请求 <------------------
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(model.as_str())
+            .max_tokens(1024u32)
+            .messages([
+                ChatCompletionRequestSystemMessageArgs::default()
+                              .content("你是一个编程小助手")
+                              .build().expect("build message failed!")
+                              .into(),
+                ChatCompletionRequestUserMessageArgs::default()
+                .content("用rust写一个简单的hello world程序")
+                .build().expect("build message failed!")
+                .into()])
+            .build().expect("build request failed!");
+        let request = ModelOpenAIApiExecutor::build_stream_chat_request(request);
+        let task = Task::new("1","assistant",TaskType::Model).set_args(request);
+        let mut result = executor.execute(task).await.expect("execute failed!");
+        let mut answer = result.into_inner::<ChatCompletionResponseStream>().expect("get response failed!");
+        println!("---> start:");
+        while let Some(chunk) = answer.next().await {
+            print!("{}",chunk.unwrap().choices.remove(0).delta.content.unwrap());
+        }
+        println!("<--- end.");
     }
 }
