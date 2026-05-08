@@ -167,6 +167,11 @@ pub trait Agent:Sync{
     
     /// 处理命令
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
+
+    /// 退出
+    async fn exit(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct AgentRef(Arc<dyn Agent + Send + 'static>);
