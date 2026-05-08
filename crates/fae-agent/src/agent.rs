@@ -1,14 +1,12 @@
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
-use wd_tools::channel::Channel;
 use wd_tools::PFErr;
-use crate::{Env, EnvEvent, Error, TaskType};
-use crate::task::{Task, TaskResult};
+use crate::{Env, EnvEvent, Error};
+use crate::task::{Task};
 
 /// 消息类型，表示智能体间的通信内容
 #[derive(Default, Debug)]
@@ -74,22 +72,22 @@ impl PartialEq for Command {
 #[async_trait::async_trait]
 pub trait Session: Sync{
     /// 同步调用，返回单个消息
-    async fn call(&self, input: Message) -> anyhow::Result<Message, Error> {
+    async fn call(&self, _input: Message) -> anyhow::Result<Message, Error> {
         Error::NoSupport("Session.call".into()).err()
     }
 
     /// 调用并返回流
-    async fn call_stream(&self, input: Message) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
+    async fn call_stream(&self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
         Error::NoSupport("Session.call_stream".into()).err()
     }
 
     /// 流式调用，返回多个消息
-    async fn stream_call(&self, input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Vec<Message>, Error> {
+    async fn stream_call(&self, _input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Vec<Message>, Error> {
         Error::NoSupport("Session.stream_call".into()).err()
     }
 
     /// 双向流式调用
-    async fn stream(&self, input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
+    async fn stream(&self, _input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
         Error::NoSupport("Session.stream".into()).err()
     }
 

@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::fmt::Display;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Debug)]
@@ -178,13 +177,4 @@ pub trait TaskExecutor:Sync{
         "default".to_string()
     }
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_task_type_deserialize() {
-
-    }
 }

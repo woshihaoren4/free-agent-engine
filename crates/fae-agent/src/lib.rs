@@ -9,3 +9,4 @@ pub use error::Error;
 pub use agent::*;
 pub use task::*;
 pub use env::*;
+pub use memory::*;
