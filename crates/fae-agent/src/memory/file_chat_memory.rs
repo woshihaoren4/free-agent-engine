@@ -94,24 +94,6 @@ impl<T> Memory<T> for FileChatMemory<T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<String>> {
-        let store = self.store.read().await;
-        let mut sessions: Vec<_> = store
-            .iter()
-            .map(|(session_id, (_, items))| {
-                let latest_time = items.iter().map(|item| item.timestamp).max().unwrap_or_default();
-                (session_id.clone(), latest_time)
-            })
-            .collect();
-
-        sessions.sort_by(|a, b| b.1.cmp(&a.1));
-
-        let start = offset.min(sessions.len());
-        let end = (offset + limit).min(sessions.len());
-
-        Ok(sessions[start..end].iter().map(|(id, _)| id.clone()).collect())
-    }
-
     async fn load(
         &self,
         session_id: &str,
@@ -366,27 +348,6 @@ mod tests {
 
         assert!(loaded_s1_2.is_empty());
         assert_eq!(loaded_s2_2.len(), 1);
-
-        tokio::fs::remove_dir_all(dir_path).await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_session_list() {
-        let dir_path = get_temp_dir("test_session_list");
-        let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-
-        let mut item1 = mock_item("sess_1", "1", "msg 1");
-        item1.timestamp = 100;
-        mem.push(item1).await.unwrap();
-
-        let mut item2 = mock_item("sess_2", "1", "msg 2");
-        item2.timestamp = 200;
-        mem.push(item2).await.unwrap();
-
-        let list = mem.session_list(0, 10).await.unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0], "sess_2");
-        assert_eq!(list[1], "sess_1");
 
         tokio::fs::remove_dir_all(dir_path).await.ok();
     }

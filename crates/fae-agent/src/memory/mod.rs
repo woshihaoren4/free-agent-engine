@@ -1,4 +1,5 @@
 mod file_chat_memory;
+mod file_session_metadata;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,9 +35,6 @@ pub enum MemoryRole {
 
 #[async_trait::async_trait]
 pub trait Memory<T>: Sync {
-    /// session列表
-    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<String>>;
-    
     /// 加载/获取记忆
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<MemoryItem<T>>>;
 
@@ -54,4 +52,17 @@ pub trait Memory<T>: Sync {
 
     /// 刷新记忆，将缓存的内容刷新到磁盘中
     async fn flush(&self) -> anyhow::Result<()>;
+}
+
+//session信息也可以自己管理
+#[async_trait::async_trait]
+pub trait SessionMetaManager<T>: Sync{
+    // 加载session列表
+    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
+    // 更改session
+    async fn update(&self, session_id: &str, meta: T) -> anyhow::Result<()>;
+    // 创建session
+    async fn create(&self, meta: T) -> anyhow::Result<()>;
+    // 删除session
+    async fn delete(&self, session_id: &str) -> anyhow::Result<()>;
 }

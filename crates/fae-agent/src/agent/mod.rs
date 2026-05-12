@@ -148,10 +148,10 @@ pub struct  SessionMeta {
 pub trait AgentPlanning: Send + Sync + 'static {
     /// 开始规划
     async fn start(&self, env: Env, event: &Event) -> anyhow::Result<Context>;
-    
+
     /// 下一步规划
     async fn next_step(&self, env: Env, ctx: &mut Context, event: Event) -> anyhow::Result<Vec<Task>>;
-    
+
     /// 规划完成
     async fn over(&self, env: Env, ctx: &mut Context) -> anyhow::Result<()>;
 }
@@ -161,10 +161,10 @@ pub trait AgentPlanning: Send + Sync + 'static {
 pub trait Agent:Sync{
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
-    
+
     /// 处理会话请求
     async fn on_session(&self, env: Env, meta: SessionMeta) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
-    
+
     /// 处理命令
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
 
@@ -187,9 +187,4 @@ where T: Agent + Send + 'static
     fn from(agent: T) -> Self {
         Self(Arc::new(agent))
     }
-}
-
-#[cfg(test)]
-mod tests {
-
 }
