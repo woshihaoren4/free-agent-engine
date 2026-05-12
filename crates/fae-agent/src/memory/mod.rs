@@ -34,6 +34,9 @@ pub enum MemoryRole {
 
 #[async_trait::async_trait]
 pub trait Memory<T>: Sync {
+    /// session列表
+    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<String>>;
+    
     /// 加载/获取记忆
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<MemoryItem<T>>>;
 
