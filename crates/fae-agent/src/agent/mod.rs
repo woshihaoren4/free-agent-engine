@@ -1,3 +1,5 @@
+mod single_agent;
+
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -134,7 +136,7 @@ pub struct SessionMetaUser{
 
 /// 会话元数据，用于传递会话相关信息
 #[derive(Debug)]
-pub struct  SessionMeta {
+pub struct SessionInfo {
     /// 会话ID
     pub session_id: String,
     /// 使用者信息
@@ -163,7 +165,7 @@ pub trait Agent:Sync{
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
 
     /// 处理会话请求
-    async fn on_session(&self, env: Env, meta: SessionMeta) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
+    async fn on_session(&self, env: Env, meta: SessionInfo) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
 
     /// 处理命令
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
