@@ -3,44 +3,13 @@ mod single_agent;
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
-use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
 use wd_tools::PFErr;
 use crate::{Env, EnvEvent, Error};
+use crate::session::{Message, Session};
 use crate::task::{Task};
 
-/// 消息类型，表示智能体间的通信内容
-#[derive(Default, Debug)]
-pub enum Message {
-    /// 无消息
-    #[default]
-    None,
-    /// 文本消息
-    Text(String),
-    /// 二进制消息
-    Binary(Vec<u8>),
-    /// JSON值消息
-    Value(Value),
-    /// 命令消息
-    Command(Command),
-    /// 任意类型消息，用于扩展
-    Any(Box<dyn Any + Send + Sync + 'static>),
-}
-
-impl PartialEq for Message {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Message::None, Message::None) => true,
-            (Message::Text(a), Message::Text(b)) => a == b,
-            (Message::Binary(a), Message::Binary(b)) => a == b,
-            (Message::Value(a), Message::Value(b)) => a == b,
-            (Message::Command(a), Message::Command(b)) => a == b,
-            (Message::Any(_), Message::Any(_)) => false, // 无法比较Any类型
-            _ => false,
-        }
-    }
-}
 
 /// 命令类型，表示系统和用户命令
 #[derive(Default, Debug)]
@@ -67,35 +36,6 @@ impl PartialEq for Command {
             (Command::Any(_), Command::Any(_)) => false, // 无法比较Any类型
             _ => false,
         }
-    }
-}
-
-/// 会话 trait，定义智能体与外部交互的接口
-#[async_trait::async_trait]
-pub trait Session: Sync{
-    /// 同步调用，返回单个消息
-    async fn call(&self, _input: Message) -> anyhow::Result<Message, Error> {
-        Error::NoSupport("Session.call".into()).err()
-    }
-
-    /// 调用并返回流
-    async fn call_stream(&self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
-        Error::NoSupport("Session.call_stream".into()).err()
-    }
-
-    /// 流式调用，返回多个消息
-    async fn stream_call(&self, _input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Vec<Message>, Error> {
-        Error::NoSupport("Session.stream_call".into()).err()
-    }
-
-    /// 双向流式调用
-    async fn stream(&self, _input: Box<dyn Stream<Item = Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send>, Error> {
-        Error::NoSupport("Session.stream".into()).err()
-    }
-
-    /// 终止
-    async fn abort(&self) -> anyhow::Result<()> {
-        Ok(())
     }
 }
 

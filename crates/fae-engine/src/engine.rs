@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use wd_tools::PFErr;
-use fae_agent::{Agent, AgentRef, Env, Session, Task, TaskResult};
+use fae_agent::{Agent, AgentRef, Env, Task, TaskResult};
 use crate::task_executor::{TaskRuntime, TaskRuntimeRef};
 use crate::workspace::Workspace;
 
@@ -14,9 +14,7 @@ pub struct RecallAgentRef{
 pub trait AgentLoader:Sync{
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef>;
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>>;
-    async fn exit(&self) -> anyhow::Result<()>{
-        Ok(())
-    }
+    async fn exit(&self) -> anyhow::Result<()>;
 }
 #[async_trait::async_trait]
 impl AgentLoader for () {
@@ -25,6 +23,9 @@ impl AgentLoader for () {
     }
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
         Ok(Vec::new())
+    }
+    async fn exit(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

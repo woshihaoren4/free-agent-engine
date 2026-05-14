@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::memory::Memory;
-use crate::{Command, Env, EnvEvent, Session, SessionInfo, SessionMetaManager};
+use crate::{Command, Env, EnvEvent, SessionInfo, SessionMetaManager};
+use crate::session::Session;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SingleAgentSessionConfig {
