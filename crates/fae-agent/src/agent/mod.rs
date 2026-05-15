@@ -4,9 +4,7 @@ use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_stream::Stream;
-use wd_tools::PFErr;
-use crate::{Env, EnvEvent, Error};
+use crate::{Env, EnvEvent, Error, TaskResult};
 use crate::session::{Message, Session};
 use crate::task::{Task};
 
@@ -42,7 +40,7 @@ impl PartialEq for Command {
 /// 事件类型，表示系统中发生的各种事件
 #[derive(Default, Debug)]
 pub enum Event {
-    /// 无事件
+    /// 无事件,通常在初始化后第一个事件
     #[default]
     None,
     /// 会话事件，携带消息
@@ -50,23 +48,7 @@ pub enum Event {
     /// 环境事件
     EnvEvent(EnvEvent),
     /// 任务完成事件
-    TaskOver(Task)
-}
-
-
-/// 上下文，用于存储智能体执行过程中的状态
-#[derive(Debug, Clone)]
-pub struct Context {
-    inner: Arc<Mutex<Box<dyn Any + Send + Sync + 'static>>>,
-}
-
-impl Context {
-    /// 创建新的上下文
-    pub fn new<T: Any + Send + Sync + 'static>(data: T) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Box::new(data))),
-        }
-    }
+    TaskOver(TaskResult)
 }
 
 #[derive(Debug,Clone)]
@@ -83,19 +65,6 @@ pub struct SessionInfo {
     pub user : SessionMetaUser,
     /// 任意类型元数据，用于扩展
     pub extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
-}
-
-/// 智能体规划 trait，定义智能体的规划逻辑
-#[async_trait::async_trait]
-pub trait AgentPlanning: Send + Sync + 'static {
-    /// 开始规划
-    async fn start(&self, env: Env, event: &Event) -> anyhow::Result<Context>;
-
-    /// 下一步规划
-    async fn next_step(&self, env: Env, ctx: &mut Context, event: Event) -> anyhow::Result<Vec<Task>>;
-
-    /// 规划完成
-    async fn over(&self, env: Env, ctx: &mut Context) -> anyhow::Result<()>;
 }
 
 /// 智能体 trait，定义智能体的核心接口

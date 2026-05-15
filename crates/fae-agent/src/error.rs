@@ -16,4 +16,7 @@ pub enum Error {
 
     #[error("anyhow error: {0}")]
     Anyhow(#[from] anyhow::Error),
+
+    #[error("Plan over.")]
+    PlanOver,
 }

@@ -4,6 +4,7 @@ mod task;
 mod env;
 mod memory;
 mod session;
+mod planner;
 
 pub use error::Error;
 pub use agent::*;

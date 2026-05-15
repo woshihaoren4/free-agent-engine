@@ -1,3 +1,5 @@
+mod text_call_stream_session;
+
 use std::any::Any;
 use tokio_stream::Stream;
 use wd_tools::PFErr;
@@ -8,7 +10,12 @@ pub struct Message {
     pub id : String,
     pub part_id: String,
     pub over: bool,
-    pub content : Box<dyn Any + Send + 'static>,
+    content : Box<dyn Any + Send + 'static>,
+}
+
+pub struct Msg<T>{
+    pub message: Message,
+    pub content : T
 }
 
 impl PartialEq for Message {
@@ -18,9 +25,26 @@ impl PartialEq for Message {
 }
 
 impl Message {
+    pub fn new<Id:Into<String>>(id: Id) -> Self {
+        Self {
+            id: id.into(),
+            part_id:"".to_string(),
+            over: false,
+            content: Box::new(()),
+        }
+    }
+    pub fn set_over(mut self)-> Self{
+        self.over = true;self
+    }
+    pub fn set_part_id(mut self, part_id: String)-> Self{
+        self.part_id = part_id;self
+    }
+    pub fn set_content<T:Any+Send+'static>(mut self, content: T)-> Self{
+        self.content = Box::new(content);self
+    }
     pub fn try_into_inner<T>(&mut self) -> Option<T>
     where
-        T:Any + Send + 'static,
+        T:Any,
     {
         if self.content.downcast_ref::<T>().is_some() {
             let mut ctn : Box<dyn Any + Send + 'static> = Box::new(());
@@ -29,6 +53,26 @@ impl Message {
             return Some(*inner)
         }
         None
+    }
+    pub fn to_msg<T>(mut self) -> Result<Msg<T>,Message>
+    where
+        T:Any,
+    {
+        let content = if let Some(s) = self.try_into_inner::<T>(){
+            s
+        }else{
+            return Err(self)
+        };
+        let msg = Msg{
+            message:self,
+            content,
+        };
+        Ok(msg)
+    }
+}
+impl<T:Any+Send+'static> Msg<T> {
+    pub fn to_message(self) -> Message {
+        self.message.set_content(self.content)
     }
 }
 
@@ -61,7 +105,62 @@ pub trait Session: Sync{
     }
 }
 
+// 一次完整的调用，返回单个消息
 #[async_trait::async_trait]
 pub trait SessionPingPong<In,Out>:Sync{
-    async fn call(&self, _input: In) -> anyhow::Result<Out, Error>;
+    async fn call(&self, _input:Msg<In>) -> anyhow::Result<Msg<Out>, Error>;
+}
+
+#[async_trait::async_trait]
+impl<In:Send + 'static,Out:Send + 'static> Session for Box<dyn SessionPingPong<In,Out>>
+{
+    async fn call(&self, mut msg: Message) -> anyhow::Result<Message, Error> {
+        let input = if let Ok(s) = msg.to_msg::<In>(){
+            s
+        }else{
+            return Err(anyhow::anyhow!("[SessionPingPong] input message is not In").into());
+        };
+        let out = (**self).call(input).await?;
+        Ok(out.to_message())
+    }
+}
+
+// 一次完整的调用，返回流
+#[async_trait::async_trait]
+pub trait SessionCallStream<In,Out>:Sync{
+    async fn call(&self, _input: In) ->anyhow::Result<Box<dyn Stream<Item=Out> + Send>>;
+}
+
+struct MapMessageStream<Out> {
+    inner: std::pin::Pin<Box<dyn Stream<Item = Out> + Send>>,
+    id: String,
+}
+
+impl<Out> Unpin for MapMessageStream<Out> {}
+
+impl<Out: Send + 'static> Stream for MapMessageStream<Out> {
+    type Item = Message;
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx).map(|opt| {
+            opt.map(|out| Message::new(self.id.clone()).set_content(out))
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl<In:Send + 'static,Out:Send + 'static> Session for Box<dyn SessionCallStream<In,Out>>
+{
+    async fn call_stream(&self, mut msg: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>, Error> {
+        let id = msg.id.clone();
+        let input = if let Some(s) = msg.try_into_inner::<In>(){
+            s
+        }else{
+            return Err(anyhow::anyhow!("[SessionCallStream] input message is not In").into());
+        };
+        let out_stream = (**self).call(input).await?;
+        Ok(Box::new(MapMessageStream {
+            inner: Box::into_pin(out_stream),
+            id,
+        }))
+    }
 }
