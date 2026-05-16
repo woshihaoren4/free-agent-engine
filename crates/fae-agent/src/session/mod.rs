@@ -1,4 +1,8 @@
-mod text_call_stream_session;
+mod session_plan_layer;
+mod session_trait_ext;
+
+pub use session_trait_ext::*;
+pub use session_plan_layer::*;
 
 use std::any::Any;
 use tokio_stream::Stream;
@@ -38,6 +42,9 @@ impl Message {
     }
     pub fn set_part_id(mut self, part_id: String)-> Self{
         self.part_id = part_id;self
+    }
+    pub fn set_raw_content(mut self, content: Box<dyn Any + Send + 'static>)-> Self{
+        self.content = content;self
     }
     pub fn set_content<T:Any+Send+'static>(mut self, content: T)-> Self{
         self.content = Box::new(content);self
@@ -80,87 +87,28 @@ impl<T:Any+Send+'static> Msg<T> {
 #[async_trait::async_trait]
 pub trait Session: Sync{
     /// 同步调用，返回单个消息
-    async fn call(&self, _input: Message) -> anyhow::Result<Message, Error> {
-        Error::NoSupport("Session.call".into()).err()
+    async fn call(&mut self, _input: Message) -> anyhow::Result<Message> {
+        anyhow::Error::from(Error::NoSupport("Session.call".into())).err()
     }
 
     /// 调用并返回流
-    async fn call_stream(&self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>, Error> {
-        Error::NoSupport("Session.call_stream".into()).err()
+    async fn call_stream(&mut self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>> {
+        anyhow::Error::from(Error::NoSupport("Session.call_stream".into())).err()
     }
 
     /// 流式调用，返回多个消息
-    async fn stream_call(&self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Vec<Message>, Error> {
-        Error::NoSupport("Session.stream_call".into()).err()
+    async fn stream_call(&mut self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Vec<Message>> {
+        anyhow::Error::from(Error::NoSupport("Session.stream_call".into())).err()
     }
 
     /// 双向流式调用
-    async fn stream(&self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>, Error> {
-        Error::NoSupport("Session.stream".into()).err()
+    async fn stream(&mut self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>> {
+        anyhow::Error::from(Error::NoSupport("Session.stream".into())).err()
     }
 
     /// 终止
-    async fn abort(&self) -> anyhow::Result<()> {
+    async fn abort(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
-// 一次完整的调用，返回单个消息
-#[async_trait::async_trait]
-pub trait SessionPingPong<In,Out>:Sync{
-    async fn call(&self, _input:Msg<In>) -> anyhow::Result<Msg<Out>, Error>;
-}
-
-#[async_trait::async_trait]
-impl<In:Send + 'static,Out:Send + 'static> Session for Box<dyn SessionPingPong<In,Out>>
-{
-    async fn call(&self, mut msg: Message) -> anyhow::Result<Message, Error> {
-        let input = if let Ok(s) = msg.to_msg::<In>(){
-            s
-        }else{
-            return Err(anyhow::anyhow!("[SessionPingPong] input message is not In").into());
-        };
-        let out = (**self).call(input).await?;
-        Ok(out.to_message())
-    }
-}
-
-// 一次完整的调用，返回流
-#[async_trait::async_trait]
-pub trait SessionCallStream<In,Out>:Sync{
-    async fn call(&self, _input: In) ->anyhow::Result<Box<dyn Stream<Item=Out> + Send>>;
-}
-
-struct MapMessageStream<Out> {
-    inner: std::pin::Pin<Box<dyn Stream<Item = Out> + Send>>,
-    id: String,
-}
-
-impl<Out> Unpin for MapMessageStream<Out> {}
-
-impl<Out: Send + 'static> Stream for MapMessageStream<Out> {
-    type Item = Message;
-    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx).map(|opt| {
-            opt.map(|out| Message::new(self.id.clone()).set_content(out))
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl<In:Send + 'static,Out:Send + 'static> Session for Box<dyn SessionCallStream<In,Out>>
-{
-    async fn call_stream(&self, mut msg: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>, Error> {
-        let id = msg.id.clone();
-        let input = if let Some(s) = msg.try_into_inner::<In>(){
-            s
-        }else{
-            return Err(anyhow::anyhow!("[SessionCallStream] input message is not In").into());
-        };
-        let out_stream = (**self).call(input).await?;
-        Ok(Box::new(MapMessageStream {
-            inner: Box::into_pin(out_stream),
-            id,
-        }))
-    }
-}

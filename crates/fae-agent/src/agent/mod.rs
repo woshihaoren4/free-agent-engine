@@ -40,15 +40,17 @@ impl PartialEq for Command {
 /// 事件类型，表示系统中发生的各种事件
 #[derive(Default, Debug)]
 pub enum Event {
-    /// 无事件,通常在初始化后第一个事件
+    /// 无事件
     #[default]
     None,
-    /// 会话事件，携带消息
-    Session(Message),
+    /// 单次对话
+    SessionCall(SessionInfo,Message),
     /// 环境事件
     EnvEvent(EnvEvent),
     /// 任务完成事件
-    TaskOver(TaskResult)
+    TaskOver(TaskResult),
+    /// 命令
+    Command(Command),
 }
 
 #[derive(Debug,Clone)]
@@ -67,9 +69,24 @@ pub struct SessionInfo {
     pub extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 
+impl Default for SessionInfo {
+    fn default() -> Self {
+        Self{
+            session_id: String::new(),
+            user: SessionMetaUser{
+                user_id: String::new(),
+            },
+            extend_any: None,
+        }
+    }
+}
+
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
 pub trait Agent:Sync{
+    /// 智能体ID
+    fn id(&self) -> String;
+
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
 

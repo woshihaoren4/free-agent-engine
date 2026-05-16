@@ -72,6 +72,8 @@ pub enum TaskType {
     None,
     /// 执行模型
     Model,
+    /// 执行一个计划
+    Plan,
     /// 执行工具
     Tool,
     /// 执行智能体
@@ -143,6 +145,9 @@ impl TaskResult {
     }
     pub fn success<T:Into<String>,A:Into<String>>(task_id: T,agent_id:A)->Self{
         Self::new(0,"success",task_id,agent_id)
+    }
+    pub fn is_error(&self) -> bool {
+        self.code != 0
     }
     pub fn set_raw_data<T:Any + Send + 'static>(mut self, data:T)->Self{
         self.data = Some(Box::new(data));

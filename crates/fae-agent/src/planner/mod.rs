@@ -1,33 +1,24 @@
-use std::any::Any;
+mod plan_to_agent;
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::{Env, Event, Task};
-
-/// 上下文，用于存储智能体执行过程中的状态
-#[derive(Debug, Clone)]
-pub struct Context {
-    inner: Arc<Mutex<Box<dyn Any + Send + Sync + 'static>>>,
-}
-
-impl Context {
-    /// 创建新的上下文
-    pub fn new<T: Any + Send + Sync + 'static>(data: T) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Box::new(data))),
-        }
-    }
-}
+use crate::{Env, Event, Session, SessionInfo, Task};
 
 /// 构建规划
 #[async_trait::async_trait]
-pub trait AgentPlanningBuilder {
-    fn build(&mut self, env: Env, event: Event) -> anyhow::Result<Arc<dyn AgentPlanning+Send+'static>>;
+pub trait AgentPlanningExt<T: Planning +Send+'static>:Sync {
+    fn id(&self) -> String;
+    async fn generate_plan(&self, env: Env, event: &mut Event) -> anyhow::Result<T>;
+    async fn exit(&self) -> anyhow::Result<()>;
 }
 
 /// 智能体规划 trait，定义智能体的规划逻辑
 #[async_trait::async_trait]
-pub trait AgentPlanning:Sync {
+pub trait Planning:Sync {
+    fn id(&self) -> String;
     /// 下一步规划
     /// Error::PlanOver 表示规划完成
     async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>>;
+    /// 强制终止
+    async fn abort(&mut self) -> anyhow::Result<()>;
 }
