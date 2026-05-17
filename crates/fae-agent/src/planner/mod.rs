@@ -18,7 +18,9 @@ pub trait Planning:Sync {
     /// Error::PlanOver 表示规划完成
     async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>>;
     /// 强制终止
-    async fn abort(&mut self) -> anyhow::Result<()>;
+    async fn abort(&mut self) -> anyhow::Result<()>{
+        Ok(())
+    }
 }
 
 // 聚合若干个实现Planning的结构同时实现planing

@@ -42,10 +42,6 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
     async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
         todo!()
     }
-
-    async fn abort(&mut self) -> anyhow::Result<()> {
-        todo!()
-    }
 }
 
 pub struct SingleAgentPlanSessionCallStream<M>{
@@ -63,10 +59,6 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCallStream<M>{
     }
 
     async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
-        todo!()
-    }
-
-    async fn abort(&mut self) -> anyhow::Result<()> {
         todo!()
     }
 }
