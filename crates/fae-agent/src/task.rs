@@ -74,6 +74,8 @@ pub enum TaskType {
     Model,
     /// 执行一个计划
     Plan,
+    /// 结束一个任务
+    EndPlan,
     /// 执行工具
     Tool,
     /// 执行智能体

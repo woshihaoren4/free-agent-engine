@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use wd_tools::channel::Sender;
 use crate::memory::Memory;
-use crate::{Command, Env, EnvEvent, SessionInfo, SessionMetaManager};
+use crate::{define_planning_group, Command, Env, EnvEvent, Event, Message, SessionInfo, SessionMetaManager, Task};
+use crate::planner::{AgentPlanningExt, Planning};
 use crate::session::Session;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -20,21 +22,69 @@ pub struct SingleAgentSessionConfig {
 
 pub struct SingleAgent<M>{
     agent_id: String,
+    memory: Arc<dyn Memory<M>+Send+'static>,
+    session_manager: Arc<dyn SessionMetaManager<SingleAgentSessionConfig>+Send+'static>,
+}
+
+pub struct SingleAgentPlanSessionCall<M>{
+    id: String,
+    session_info: SessionInfo,
+    input: String,
     memory: Arc<dyn Memory<M>+Send+Sync+'static>,
-    session_manager: Arc<dyn SessionMetaManager<SingleAgentSessionConfig>+Send+Sync+'static>,
 }
 
 #[async_trait::async_trait]
-impl<M> super::Agent for SingleAgent<M> {
-    async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()> {
+impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
+    fn id(&self) -> String {
         todo!()
     }
 
-    async fn on_session(&self, env: Env, meta: SessionInfo) -> anyhow::Result<Box<dyn Session + Send + 'static>> {
+    async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
         todo!()
     }
 
-    async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()> {
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        todo!()
+    }
+}
+
+pub struct SingleAgentPlanSessionCallStream<M>{
+    id: String,
+    session_info: SessionInfo,
+    input: String,
+    output: Sender<M>,
+    memory: Arc<dyn Memory<M>+Send+Sync+'static>,
+}
+
+#[async_trait::async_trait]
+impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCallStream<M>{
+    fn id(&self) -> String {
+        todo!()
+    }
+
+    async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
+        todo!()
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        todo!()
+    }
+}
+
+define_planning_group!(
+    pub enum SingleAgentPlan<M> {
+        SessionCall(SingleAgentPlanSessionCall<M>),
+        SessionCallStream(SingleAgentPlanSessionCallStream<M>),
+    }
+);
+
+#[async_trait::async_trait]
+impl<M:Send+Sync+'static> AgentPlanningExt<SingleAgentPlan<M>> for SingleAgent<M> {
+    fn id(&self) -> String {
+        todo!()
+    }
+
+    async fn generate_plan(&self, env: Env, event: &mut Event) -> anyhow::Result<SingleAgentPlan<M>> {
         todo!()
     }
 

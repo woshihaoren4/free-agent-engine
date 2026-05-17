@@ -4,6 +4,8 @@ use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_stream::Stream;
+use wd_tools::channel::Sender;
 use crate::{Env, EnvEvent, Error, TaskResult};
 use crate::session::{Message, Session};
 use crate::task::{Task};
@@ -38,13 +40,16 @@ impl PartialEq for Command {
 }
 
 /// 事件类型，表示系统中发生的各种事件
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub enum Event {
     /// 无事件
     #[default]
     None,
-    /// 单次对话
+    /// session事件
     SessionCall(SessionInfo,Message),
+    SessionCallStream(SessionInfo,Message, Sender<Message>),
+    SessionStreamCall(SessionInfo, Box<dyn Stream<Item=Message> + Send + Sync + 'static>),
+    SessionStream(SessionInfo,Box<dyn Stream<Item=Message> + Send + Sync + 'static>, Sender<Message>),
     /// 环境事件
     EnvEvent(EnvEvent),
     /// 任务完成事件
@@ -78,6 +83,11 @@ impl Default for SessionInfo {
             },
             extend_any: None,
         }
+    }
+}
+impl SessionInfo {
+    pub fn get_session_id(&self) -> &str {
+        self.session_id.as_str()
     }
 }
 

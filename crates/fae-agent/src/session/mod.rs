@@ -46,7 +46,7 @@ impl Message {
     pub fn set_raw_content(mut self, content: Box<dyn Any + Send + 'static>)-> Self{
         self.content = content;self
     }
-    pub fn set_content<T:Any+Send+'static>(mut self, content: T)-> Self{
+    pub fn set_content<T:Any+Send+Sync+'static>(mut self, content: T)-> Self{
         self.content = Box::new(content);self
     }
     pub fn try_into_inner<T>(&mut self) -> Option<T>
@@ -54,7 +54,7 @@ impl Message {
         T:Any,
     {
         if self.content.downcast_ref::<T>().is_some() {
-            let mut ctn : Box<dyn Any + Send + 'static> = Box::new(());
+            let mut ctn : Box<dyn Any + Send  + 'static> = Box::new(());
             std::mem::swap(&mut self.content,&mut ctn);
             let inner = ctn.downcast::<T>().unwrap();
             return Some(*inner)
@@ -77,7 +77,7 @@ impl Message {
         Ok(msg)
     }
 }
-impl<T:Any+Send+'static> Msg<T> {
+impl<T:Any+Send+Sync+'static> Msg<T> {
     pub fn to_message(self) -> Message {
         self.message.set_content(self.content)
     }
@@ -92,17 +92,17 @@ pub trait Session: Sync{
     }
 
     /// 调用并返回流
-    async fn call_stream(&mut self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>> {
+    async fn call_stream(&mut self, _input: Message) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send + Sync>> {
         anyhow::Error::from(Error::NoSupport("Session.call_stream".into())).err()
     }
 
     /// 流式调用，返回多个消息
-    async fn stream_call(&mut self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Vec<Message>> {
+    async fn stream_call(&mut self, _input: Box<dyn Stream<Item =Message> + Send + Sync>) -> anyhow::Result<Vec<Message>> {
         anyhow::Error::from(Error::NoSupport("Session.stream_call".into())).err()
     }
 
     /// 双向流式调用
-    async fn stream(&mut self, _input: Box<dyn Stream<Item =Message> + Send>) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send>> {
+    async fn stream(&mut self, _input: Box<dyn Stream<Item =Message> + Send + Sync>) -> anyhow::Result<Box<dyn Stream<Item =Message> + Send + Sync>> {
         anyhow::Error::from(Error::NoSupport("Session.stream".into())).err()
     }
 

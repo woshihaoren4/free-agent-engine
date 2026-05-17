@@ -1,7 +1,13 @@
 mod file_chat_memory;
 mod file_session_metadata;
+mod general_message;
+
+pub use general_message::*;
+pub use file_chat_memory::*;
+pub use file_session_metadata::*;
 
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemoryItem<T> {
@@ -34,7 +40,7 @@ pub enum MemoryRole {
 }
 
 #[async_trait::async_trait]
-pub trait Memory<T>: Sync {
+pub trait Memory<T:Serialize + DeserializeOwned + Clone + Send + Sync + 'static>: Sync {
     /// 加载/获取记忆
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<MemoryItem<T>>>;
 
