@@ -37,9 +37,12 @@ impl Task {
         self.agent_id = agent_id.into();
         self
     }
-    pub fn set_args<T:Any + Send + Sync + 'static>(mut self, args: T) -> Self {
-        self.args = Some(Box::new(args));
+    pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>)->Self {
+        self.args = Some(args);
         self
+    }
+    pub fn set_args<T:Any + Send + Sync + 'static>(self, args: T) -> Self {
+        self.set_args_raw(Box::new(args))
     }
     pub fn assert<T: Any>(&self) -> bool {
         if let Some(ref args) = self.args {

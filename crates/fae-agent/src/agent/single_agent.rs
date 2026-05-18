@@ -2,8 +2,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use wd_tools::channel::Sender;
 use crate::memory::Memory;
-use crate::{define_planning_group, Command, Env, EnvEvent, Event, Message, SessionInfo, SessionMetaManager, Task};
-use crate::planner::{AgentPlanningExt, Planning};
+use crate::{define_planning_group, Command, Env, EnvEvent, Event, Message, PlanningResult, SessionInfo, SessionMetaManager, Task, TaskResult};
+use crate::planner::{AgentPlanningExt, Planning, PlanningItem};
 use crate::session::Session;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,7 +39,11 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
         todo!()
     }
 
-    async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
+    async fn start(&mut self) -> anyhow::Result<PlanningResult> {
+        Ok(PlanningResult::End(None))
+    }
+
+    async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult> {
         todo!()
     }
 }
@@ -57,8 +61,11 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCallStream<M>{
     fn id(&self) -> String {
         todo!()
     }
+    async fn start(&mut self) -> anyhow::Result<PlanningResult> {
+        Ok(PlanningResult::End(None))
+    }
 
-    async fn next(&mut self, event: Event) -> anyhow::Result<Vec<Task>> {
+    async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult> {
         todo!()
     }
 }
@@ -76,7 +83,7 @@ impl<M:Send+Sync+'static> AgentPlanningExt<SingleAgentPlan<M>> for SingleAgent<M
         todo!()
     }
 
-    async fn generate_plan(&self, env: Env, event: &mut Event) -> anyhow::Result<SingleAgentPlan<M>> {
+    async fn generate_plan(&self, env: Env, event: Event) -> anyhow::Result<SingleAgentPlan<M>> {
         todo!()
     }
 

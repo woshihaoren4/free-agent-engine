@@ -20,8 +20,8 @@ where
     }
 
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()> {
-        let mut event = Event::EnvEvent(event);
-        let plan = self.f.generate_plan(env.clone(), &mut event).await?;
+        let event = Event::EnvEvent(event);
+        let plan = self.f.generate_plan(env.clone(), event).await?;
         let plan:Box<dyn Planning + Send + 'static> = Box::new(plan);
         let plan_id = plan.id();
         let agent_id = self.f.id();
@@ -36,8 +36,8 @@ where
     }
 
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()> {
-        let mut event = Event::Command(cmd);
-        let plan = self.f.generate_plan(env.clone(), &mut event).await?;
+        let event = Event::Command(cmd);
+        let plan = self.f.generate_plan(env.clone(),event).await?;
         let plan:Box<dyn Planning + Send + 'static> = Box::new(plan);
         let plan_id = plan.id();
         let agent_id = self.f.id();

@@ -39,6 +39,13 @@ impl Workspace {
         tokio::spawn(async move {
             while this.status.is_running() {
                 let event = this.env.watch().await;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        wd_log::log_error_ln!("[Workspace::{}] watch env failed: {:?}",this.name,e);
+                        continue;
+                    }
+                };
                 if event.is_none() {
                     // 没有事件，等待1ms
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;

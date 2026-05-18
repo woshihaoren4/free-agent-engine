@@ -6,6 +6,9 @@ use wd_tools::channel::Channel;
 use wd_tools::PFErr;
 use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 
+const DEFAULT_TASK_RUNTIME_ID: &str = "FAE_DEFAULT_TASK_EXECUTOR";
+const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
+
 pub struct TaskRuntime {
     events: Channel<EnvEvent>,
     parent: Option<Env>,
@@ -14,7 +17,7 @@ pub struct TaskRuntime {
 
 impl TaskRuntime {
     pub fn new() -> Self {
-        let events = Channel::with_cap(1024);
+        let events = Channel::with_cap(DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT);
         Self { events,  parent: None, executors: HashMap::new()}
     }
     pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
@@ -45,18 +48,26 @@ impl TaskRuntime {
 #[async_trait::async_trait]
 impl Environment for TaskRuntime{
     fn id(&self) -> &'static str {
-        "FAE_DEFAULT_TASK_EXECUTOR"
+        DEFAULT_TASK_RUNTIME_ID
     }
 
     async fn register_parent_env(&mut self, env: Env) {
         self.parent = Some(env);
     }
 
-    async fn watch(&self) -> EnvEvent {
-        if let Some(ref parent_env) = self.parent{
-            return parent_env.watch().await
+    async fn watch(&self) -> anyhow::Result<EnvEvent> {
+        let self_fut = self.events.recv();
+        if let Some(ref p) = self.parent {
+            let parent_fut = p.watch();
+            let event = tokio::select! {
+                e = self_fut => e?,
+                e = parent_fut => e?,
+            };
+            Ok(event)
+        }else{
+            let e= self_fut.await?;
+            Ok(e)
         }
-        EnvEvent::None
     }
 
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
@@ -128,16 +139,25 @@ impl Environment for TaskRuntime{
 
 // TaskRuntimeRef is a reference to TaskRuntime.
 #[derive(Clone)]
-pub struct TaskRuntimeRef(Arc<TaskRuntime>);
+pub struct TaskRuntimeRef(Env);
 impl TaskRuntimeRef {
     pub fn as_env(&self) -> Env {
-        Env::from(self.0.clone() as Arc<dyn Environment+Send+'static>)
+        self.0.clone()
     }
 }
 impl From<TaskRuntime> for TaskRuntimeRef {
-    fn from(runtime: TaskRuntime) -> Self {Self(Arc::new(runtime))}
+    fn from(runtime: TaskRuntime) -> Self {
+        Self(Env::from(Arc::new(runtime) as Arc<dyn Environment+Send+'static>))
+    }
+}
+impl From<Env> for TaskRuntimeRef {
+    fn from(env: Env) -> Self {
+        Self(env)
+    }
 }
 impl Deref for TaskRuntimeRef {
-    type Target = TaskRuntime;
-    fn deref(&self) -> &Self::Target {&self.0}
+    type Target = Env;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }

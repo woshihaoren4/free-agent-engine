@@ -12,3 +12,4 @@ pub use task::*;
 pub use env::*;
 pub use memory::*;
 pub use session::*;
+pub use planner::*;

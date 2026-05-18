@@ -65,8 +65,8 @@ impl<P:Planning +Send+'static> SessionPlanLayer<P> {
 impl<P:Planning+Send+'static> Session for SessionPlanLayer<P> {
     async fn call(&mut self, msg: Message) -> anyhow::Result<Message> {
         let info = std::mem::take(&mut self.session_info);
-        let mut event = Event::SessionCall(info,msg);
-        let plan = self.plan_builder.generate_plan(self.env.clone(),&mut event).await?;
+        let event = Event::SessionCall(info,msg);
+        let plan = self.plan_builder.generate_plan(self.env.clone(),event).await?;
         self.plan_id = plan.id().to_string();
         let task = Task::new(plan.id(), self.plan_builder.id(),TaskType::Plan);
         let result = self.env.execute(task).await?;
@@ -84,8 +84,8 @@ impl<P:Planning+Send+'static> Session for SessionPlanLayer<P> {
         let info = std::mem::take(&mut self.session_info);
         let (sender,receiver) = wd_tools::channel::Channel::new(SESSION_STREAM_CHANEL_COUNT);
 
-        let mut event = Event::SessionCallStream(info, input, sender);
-        let plan = self.plan_builder.generate_plan(self.env.clone(), &mut event).await?;
+        let event = Event::SessionCallStream(info, input, sender);
+        let plan = self.plan_builder.generate_plan(self.env.clone(),event).await?;
         self.plan_id = plan.id().to_string();
         let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
         self.env.spawn(vec![task]).await?;
@@ -95,8 +95,8 @@ impl<P:Planning+Send+'static> Session for SessionPlanLayer<P> {
 
     async fn stream_call(&mut self, input: Box<dyn Stream<Item=Message> + Send + Sync>) -> anyhow::Result<Vec<Message>> {
         let info = std::mem::take(&mut self.session_info);
-        let mut event = Event::SessionStreamCall(info, input);
-        let plan = self.plan_builder.generate_plan(self.env.clone(), &mut event).await?;
+        let event = Event::SessionStreamCall(info, input);
+        let plan = self.plan_builder.generate_plan(self.env.clone(),event).await?;
         self.plan_id = plan.id().to_string();
         let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
         let mut result = self.env.execute(task).await?;
@@ -113,8 +113,8 @@ impl<P:Planning+Send+'static> Session for SessionPlanLayer<P> {
     async fn stream(&mut self, input: Box<dyn Stream<Item=Message> + Send + Sync>) -> anyhow::Result<Box<dyn Stream<Item=Message> + Send + Sync>> {
         let info = std::mem::take(&mut self.session_info);
         let (send,recv) = wd_tools::channel::Channel::new(SESSION_STREAM_CHANEL_COUNT);
-        let mut event = Event::SessionStream(info, input,send);
-        let plan = self.plan_builder.generate_plan(self.env.clone(), &mut event).await?;
+        let event = Event::SessionStream(info, input,send);
+        let plan = self.plan_builder.generate_plan(self.env.clone(),event).await?;
         self.plan_id = plan.id().to_string();
         let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
         self.env.spawn(vec![task]).await?;

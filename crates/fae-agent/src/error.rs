@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+// 任务执行错误码 未知错误
 pub const TASK_ERROR_CODE_UNKNOWN: i32 = 999001001;
 
 
@@ -16,7 +17,4 @@ pub enum Error {
 
     #[error("anyhow error: {0}")]
     Anyhow(#[from] anyhow::Error),
-
-    #[error("Plan over.")]
-    PlanOver,
 }

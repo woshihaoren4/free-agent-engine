@@ -37,6 +37,10 @@ pub enum ThingSelect {
     EnvVar(String),
     /// 任务执行器：任务类型,渠道
     Executor(TaskType, String),
+    /// plan 执行计划，计划ID
+    Plan(String),
+    /// Custom
+    Custom(String),
 }
 impl ThingSelect {
     pub fn is_none(&self) -> bool {
@@ -73,6 +77,8 @@ pub enum ThingItem{
     None,
     /// 任务执行器,执行器描述
     Executor(String),
+    /// plan 执行计划，计划ID
+    Plan(String),
     /// 模块
     Module(String),
     /// 工具
@@ -102,7 +108,7 @@ pub trait Environment: Send + Sync + 'static {
 
     /// 监听环境事件，返回事件通道
     /// 注意：事件是不是所有消费者共享的，A消费了这个事件则B不会收到这个事件
-    async fn watch(&self) -> EnvEvent;
+    async fn watch(&self) -> anyhow::Result<EnvEvent>;
 
     /// 查询环境中的事物
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>>;
