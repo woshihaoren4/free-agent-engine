@@ -1,7 +1,7 @@
+use crate::{Task, TaskResult, TaskType};
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
-use crate::{Task, TaskResult, TaskType};
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
 pub enum EnvEvent {
@@ -19,11 +19,10 @@ pub enum EnvEvent {
 }
 impl EnvEvent {
     pub fn is_none(&self) -> bool {
-        if let Self::None = *self {
-            true
-        } else {
-            false
-        }
+        if let Self::None = *self { true } else { false }
+    }
+    pub fn is_task(&self) -> bool {
+        if let Self::TaskResult(_) = *self { true } else { false }
     }
 }
 
@@ -37,8 +36,8 @@ pub enum ThingSelect {
     EnvVar(String),
     /// 任务执行器：任务类型,渠道
     Executor(TaskType, String),
-    /// plan 执行计划，计划ID
-    Plan(String),
+    /// plan 执行计划，PlanID,AgentID
+    Plan(String, String),
     /// Custom
     Custom(String),
 }
@@ -56,10 +55,14 @@ pub struct Thing {
 }
 impl Thing {
     pub fn new(source: String) -> Self {
-        Self { source, items: Vec::new() }
+        Self {
+            source,
+            items: Vec::new(),
+        }
     }
-    pub fn add_item<T:Into<ThingItem>>(&mut self, item: T)->&mut Self {
-        self.items.push(item.into());self
+    pub fn add_item<T: Into<ThingItem>>(&mut self, item: T) -> &mut Self {
+        self.items.push(item.into());
+        self
     }
     pub fn set_items(&mut self, items: Vec<ThingItem>) -> &mut Self {
         self.items = items;
@@ -72,7 +75,7 @@ impl Thing {
     }
 }
 #[derive(Default, Debug)]
-pub enum ThingItem{
+pub enum ThingItem {
     #[default]
     None,
     /// 任务执行器,执行器描述
@@ -104,7 +107,7 @@ pub trait Environment: Send + Sync + 'static {
     fn id(&self) -> &'static str;
 
     /// 父子环境嵌套
-    async fn register_parent_env(&mut self, env:Env);
+    async fn register_parent_env(&mut self, env: Env);
 
     /// 监听环境事件，返回事件通道
     /// 注意：事件是不是所有消费者共享的，A消费了这个事件则B不会收到这个事件

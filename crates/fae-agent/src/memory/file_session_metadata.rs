@@ -1,9 +1,9 @@
+use anyhow::Context;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
 use tokio::fs;
-use anyhow::Context;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::memory::{SessionMetaManager};
+use crate::memory::SessionMetaManager;
 
 /// 基于文件系统的会话元数据管理实现
 pub struct FileSessionMetaManager<T> {
@@ -14,13 +14,13 @@ pub struct FileSessionMetaManager<T> {
 
 impl<T> FileSessionMetaManager<T> {
     /// 创建一个新的 FileSessionMetaManager
-    /// 
+    ///
     /// # 参数
     /// * `dir_path` - 用于存储会话元数据的目录
     /// * `id_extractor` - 用于从元数据中提取 session_id 的函数指针
     /// * `updated_at_extractor` - 用于从元数据中提取 updated_at 的函数指针
     pub async fn new<P: Into<PathBuf>>(
-        dir_path: P, 
+        dir_path: P,
         id_extractor: fn(&T) -> String,
         updated_at_extractor: fn(&T) -> u64,
     ) -> anyhow::Result<Self> {
@@ -54,7 +54,11 @@ where
 
         let mut metas = Vec::new();
 
-        while let Some(entry) = entries.next_entry().await.context("Failed to get directory entry")? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .context("Failed to get directory entry")?
+        {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("desc") {
                 let content = match fs::read_to_string(&path).await {
@@ -81,8 +85,8 @@ where
         if !file_path.exists() {
             anyhow::bail!("Session {} does not exist", session_id);
         }
-        let content = serde_json::to_string_pretty(&meta)
-            .context("Failed to serialize session meta")?;
+        let content =
+            serde_json::to_string_pretty(&meta).context("Failed to serialize session meta")?;
         fs::write(file_path, content)
             .await
             .context("Failed to write session file")?;
@@ -95,8 +99,8 @@ where
         if file_path.exists() {
             anyhow::bail!("Session {} already exists", session_id);
         }
-        let content = serde_json::to_string_pretty(&meta)
-            .context("Failed to serialize session meta")?;
+        let content =
+            serde_json::to_string_pretty(&meta).context("Failed to serialize session meta")?;
         fs::write(file_path, content)
             .await
             .context("Failed to write session file")?;
@@ -114,7 +118,6 @@ where
     }
 }
 
-
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
@@ -129,29 +132,30 @@ pub type DefaultFileSessionMetaManager = FileSessionMetaManager<SessionMeta>;
 impl FileSessionMetaManager<SessionMeta> {
     /// 为默认的 SessionMeta 创建一个文件管理器
     pub async fn new_default<P: Into<PathBuf>>(dir_path: P) -> anyhow::Result<Self> {
-        Self::new(
-            dir_path, 
-            |meta| meta.id.clone(),
-            |meta| meta.updated_at,
-        ).await
+        Self::new(dir_path, |meta| meta.id.clone(), |meta| meta.updated_at).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{file_chat_memory::FileChatMemory, Memory, MemoryItem, MemoryRole};
+    use crate::memory::{Memory, MemoryItem, MemoryRole, file_chat_memory::FileChatMemory};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn get_temp_dir(name: &str) -> PathBuf {
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("{}_{}", name, time))
     }
 
     #[tokio::test]
     async fn test_file_session_meta_manager() {
         let dir = get_temp_dir("test_session_meta");
-        let manager = DefaultFileSessionMetaManager::new_default(&dir).await.unwrap();
+        let manager = DefaultFileSessionMetaManager::new_default(&dir)
+            .await
+            .unwrap();
 
         // Test create
         let meta1 = SessionMeta {
@@ -197,9 +201,11 @@ mod tests {
     #[tokio::test]
     async fn test_session_and_memory_integration() {
         let dir = get_temp_dir("test_session_and_memory");
-        
+
         // 1. 初始化 Meta Manager 和 Memory Manager
-        let meta_manager = DefaultFileSessionMetaManager::new_default(&dir).await.unwrap();
+        let meta_manager = DefaultFileSessionMetaManager::new_default(&dir)
+            .await
+            .unwrap();
         let chat_memory = FileChatMemory::<String>::new(&dir).await.unwrap();
 
         let session_id = "integration_sess_1";
@@ -233,7 +239,7 @@ mod tests {
         let loaded_memory = chat_memory.load(session_id, 0, 10).await.unwrap();
         assert_eq!(loaded_memory.len(), 1);
         assert_eq!(loaded_memory[0].content, "Hello from integration test");
-        
+
         // 5. 更新 Session 并且增加新记忆
         let mut updated_meta = sessions[0].clone();
         updated_meta.updated_at = 2000;
@@ -251,7 +257,7 @@ mod tests {
 
         let loaded_memory = chat_memory.load(session_id, 0, 10).await.unwrap();
         assert_eq!(loaded_memory.len(), 2);
-        
+
         let sessions = meta_manager.session_list(0, 10).await.unwrap();
         assert_eq!(sessions[0].updated_at, 2000);
 

@@ -1,10 +1,13 @@
+use fae_agent::{
+    Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem,
+    ThingSelect,
+};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use wd_tools::channel::Channel;
 use wd_tools::PFErr;
-use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
+use wd_tools::channel::Channel;
 
 const DEFAULT_TASK_RUNTIME_ID: &str = "FAE_DEFAULT_TASK_EXECUTOR";
 const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
@@ -12,41 +15,63 @@ const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
 pub struct TaskRuntime {
     events: Channel<EnvEvent>,
     parent: Option<Env>,
-    executors: HashMap<String, Arc<dyn TaskExecutor+Send+'static>>,
+    executors: HashMap<String, Arc<dyn TaskExecutor + Send + 'static>>,
 }
 
 impl TaskRuntime {
     pub fn new() -> Self {
         let events = Channel::with_cap(DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT);
-        Self { events,  parent: None, executors: HashMap::new()}
+        Self {
+            events,
+            parent: None,
+            executors: HashMap::new(),
+        }
     }
     pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
         format!("{}-{}", task_type, channel)
     }
-    pub fn raw_register_executor(&mut self, task_type: TaskType, executor: Arc<dyn TaskExecutor+Send+'static>) {
+    pub fn raw_register_executor(
+        &mut self,
+        task_type: TaskType,
+        executor: Arc<dyn TaskExecutor + Send + 'static>,
+    ) {
         let channel = executor.channel();
-        self.executors.insert(self.generate_executor_key(&task_type, &channel), executor);
+        self.executors
+            .insert(self.generate_executor_key(&task_type, &channel), executor);
     }
-    pub fn register_executor<T: TaskExecutor+Send+'static>(&mut self, task_type: TaskType, executor:T) {
+    pub fn register_executor<T: TaskExecutor + Send + 'static>(
+        &mut self,
+        task_type: TaskType,
+        executor: T,
+    ) {
         self.raw_register_executor(task_type, Arc::new(executor));
     }
-    pub fn get_executor(&self, task_type: &TaskType, channel: &str) -> Option<Arc<dyn TaskExecutor+Send>> {
-        self.executors.get(&self.generate_executor_key(task_type, channel)).cloned()
+    pub fn get_executor(
+        &self,
+        task_type: &TaskType,
+        channel: &str,
+    ) -> Option<Arc<dyn TaskExecutor + Send>> {
+        self.executors
+            .get(&self.generate_executor_key(task_type, channel))
+            .cloned()
     }
-    pub async fn exec(executor: Arc<dyn TaskExecutor+Send>, task: Task) -> TaskResult {
+    pub async fn exec(executor: Arc<dyn TaskExecutor + Send>, task: Task) -> TaskResult {
         let task_id = task.id.clone();
         let agent_id = task.agent_id.clone();
-        match executor.execute(task).await{
+        match executor.execute(task).await {
             Ok(result) => result,
-            Err(err) => {
-                TaskResult::new(fae_agent::error::TASK_ERROR_CODE_UNKNOWN,format!("{:?}", err),task_id,agent_id)
-            },
+            Err(err) => TaskResult::new(
+                fae_agent::error::TASK_ERROR_CODE_UNKNOWN,
+                format!("{:?}", err),
+                task_id,
+                agent_id,
+            ),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl Environment for TaskRuntime{
+impl Environment for TaskRuntime {
     fn id(&self) -> &'static str {
         DEFAULT_TASK_RUNTIME_ID
     }
@@ -64,8 +89,8 @@ impl Environment for TaskRuntime{
                 e = parent_fut => e?,
             };
             Ok(event)
-        }else{
-            let e= self_fut.await?;
+        } else {
+            let e = self_fut.await?;
             Ok(e)
         }
     }
@@ -73,19 +98,32 @@ impl Environment for TaskRuntime{
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
         //为空时，查询所有任务执行器
         if select.is_none() {
-            let items = self.executors.iter().map(|(_,e)|ThingItem::Executor(e.desc())).collect();
-            let thing = Thing::new(self.id().to_string()).set_items(items).into_self();
+            let items = self
+                .executors
+                .iter()
+                .map(|(_, e)| ThingItem::Executor(e.desc()))
+                .collect();
+            let thing = Thing::new(self.id().to_string())
+                .set_items(items)
+                .into_self();
             return Ok(vec![thing]);
         }
         //根据任务类型和渠道查询
         if let ThingSelect::Executor(ref task_type, ref channel) = select {
-            if let Some(e) = self.executors.get(&self.generate_executor_key(&task_type, channel)) {
-                return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::Executor(e.desc())).into_self()]);
+            if let Some(e) = self
+                .executors
+                .get(&self.generate_executor_key(&task_type, channel))
+            {
+                return Ok(vec![
+                    Thing::new(self.id().to_string())
+                        .add_item(ThingItem::Executor(e.desc()))
+                        .into_self(),
+                ]);
             }
         }
         //如果父环境也没有，就返回空
         if let Some(e) = self.parent.as_ref() {
-            return e.query(select).await
+            return e.query(select).await;
         }
         Ok(vec![])
     }
@@ -93,9 +131,18 @@ impl Environment for TaskRuntime{
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
         //先检查
         for i in &tasks {
-            let list = self.query(ThingSelect::Executor(i.get_type().clone(),i.get_exec_channel().to_string())).await?;
+            let list = self
+                .query(ThingSelect::Executor(
+                    i.get_type().clone(),
+                    i.get_exec_channel().to_string(),
+                ))
+                .await?;
             if list.is_empty() {
-                return anyhow::anyhow!("[TaskRuntime:spawn]task executor not found: {:?}", i.r#type).err();
+                return anyhow::anyhow!(
+                    "[TaskRuntime:spawn]task executor not found: {:?}",
+                    i.r#type
+                )
+                .err();
             }
         }
         //后执行
@@ -106,16 +153,23 @@ impl Environment for TaskRuntime{
                 let executor = e.clone();
                 tokio::spawn(async move {
                     let result = Self::exec(executor, task).await;
-                    if let Err(e) = events_channel.send(EnvEvent::TaskResult(result)).await{
-                        wd_log::log_error_ln!("[TaskRuntime:spawn] send task result error: {:?}",e);
+                    if let Err(e) = events_channel.send(EnvEvent::TaskResult(result)).await {
+                        wd_log::log_error_ln!(
+                            "[TaskRuntime:spawn] send task result error: {:?}",
+                            e
+                        );
                     };
                 });
-            }else if let Some(e) = self.parent.as_ref() {
+            } else if let Some(e) = self.parent.as_ref() {
                 //再委托给父环境
                 e.spawn(vec![task]).await?;
-            }else{
+            } else {
                 //如果父环境也没有，就报错
-                return anyhow::anyhow!("[TaskRuntime:spawn] task executor not found: {:?}", task.r#type).err();
+                return anyhow::anyhow!(
+                    "[TaskRuntime:spawn] task executor not found: {:?}",
+                    task.r#type
+                )
+                .err();
             }
         }
         Ok(())
@@ -126,16 +180,19 @@ impl Environment for TaskRuntime{
             //优先自己执行
             let result = Self::exec(e.clone(), task).await;
             Ok(result)
-        }else if let Some(e) = self.parent.as_ref() {
+        } else if let Some(e) = self.parent.as_ref() {
             //再委托给父环境
             e.execute(task).await
-        }else{
+        } else {
             //如果父环境也没有，就报错
-            return anyhow::anyhow!("[TaskRuntime:execute] task executor not found: {:?}", task.r#type).err();
+            return anyhow::anyhow!(
+                "[TaskRuntime:execute] task executor not found: {:?}",
+                task.r#type
+            )
+            .err();
         }
     }
 }
-
 
 // TaskRuntimeRef is a reference to TaskRuntime.
 #[derive(Clone)]
@@ -147,7 +204,9 @@ impl TaskRuntimeRef {
 }
 impl From<TaskRuntime> for TaskRuntimeRef {
     fn from(runtime: TaskRuntime) -> Self {
-        Self(Env::from(Arc::new(runtime) as Arc<dyn Environment+Send+'static>))
+        Self(Env::from(
+            Arc::new(runtime) as Arc<dyn Environment + Send + 'static>
+        ))
     }
 }
 impl From<Env> for TaskRuntimeRef {

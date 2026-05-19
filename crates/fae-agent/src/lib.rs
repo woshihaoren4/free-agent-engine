@@ -1,15 +1,15 @@
 mod agent;
-pub mod error;
-mod task;
 mod env;
+pub mod error;
 mod memory;
-mod session;
 mod planner;
+mod session;
+mod task;
 
-pub use error::Error;
 pub use agent::*;
-pub use task::*;
 pub use env::*;
+pub use error::Error;
 pub use memory::*;
-pub use session::*;
 pub use planner::*;
+pub use session::*;
+pub use task::*;

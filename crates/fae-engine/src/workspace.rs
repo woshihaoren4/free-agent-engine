@@ -1,10 +1,10 @@
+use crate::engine::AgentLoader;
+use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionInfo};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionInfo};
-use crate::engine::AgentLoader;
 
 // 0:初始化，1:运行中，2:已停止
-#[derive(Debug,Clone,Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkspaceStatus(Arc<AtomicU8>);
 
 impl WorkspaceStatus {
@@ -22,13 +22,12 @@ impl WorkspaceStatus {
     }
 }
 
-
 #[derive(Clone)]
 pub struct Workspace {
     pub(crate) status: WorkspaceStatus,
     pub(crate) name: String,
     pub(crate) loader: Arc<dyn AgentLoader + Send + 'static>,
-    pub(crate) env : Env,
+    pub(crate) env: Env,
 }
 
 impl Workspace {
@@ -42,7 +41,11 @@ impl Workspace {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
-                        wd_log::log_error_ln!("[Workspace::{}] watch env failed: {:?}",this.name,e);
+                        wd_log::log_error_ln!(
+                            "[Workspace::{}] watch env failed: {:?}",
+                            this.name,
+                            e
+                        );
                         continue;
                     }
                 };
@@ -52,43 +55,59 @@ impl Workspace {
                     continue;
                 }
                 //分发事件给智能体
-                match event{
+                match event {
                     EnvEvent::TaskResult(ref result) => {
                         // 分发任务执行结果给智能体
                         let agent = match this.get_agent(result.agent_id.as_str()).await {
                             Ok(agent) => agent,
                             Err(e) => {
-                                wd_log::log_error_ln!("[Workspace::{}] load agent failed: {:?}",this.name,e);
+                                wd_log::log_error_ln!(
+                                    "[Workspace::{}] load agent failed: {:?}",
+                                    this.name,
+                                    e
+                                );
                                 continue;
                             }
                         };
-                        if let Err(e) = agent.on_env(this.env.clone(),event).await {
-                            wd_log::log_error_ln!("[Workspace::{}] on_env failed: {:?}",this.name,e);
+                        if let Err(e) = agent.on_env(this.env.clone(), event).await {
+                            wd_log::log_error_ln!(
+                                "[Workspace::{}] on_env failed: {:?}",
+                                this.name,
+                                e
+                            );
                         }
                     }
                     _ => {
                         // 其他事件，不处理
-                        wd_log::log_info_ln!("[Workspace::{}] ignore event: {:?}",this.name,&event);
+                        wd_log::log_info_ln!(
+                            "[Workspace::{}] ignore event: {:?}",
+                            this.name,
+                            &event
+                        );
                     }
                 }
             }
             this.status.set_stopped();
         });
     }
-    pub async fn get_agent(&self, agent_id:&str) -> anyhow::Result<AgentRef> {
+    pub async fn get_agent(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
         self.loader.load(agent_id).await
     }
     pub fn get_env(&self) -> Env {
         self.env.clone()
     }
-    pub async fn session<T:Into<SessionInfo>>(&self, agent:&str, meta:T) ->  anyhow::Result<Box<dyn Session + Send + 'static>> {
+    pub async fn session<T: Into<SessionInfo>>(
+        &self,
+        agent: &str,
+        meta: T,
+    ) -> anyhow::Result<Box<dyn Session + Send + 'static>> {
         let agent = self.get_agent(agent).await?;
-        agent.on_session(self.env.clone(),meta.into()).await
+        agent.on_session(self.env.clone(), meta.into()).await
     }
     pub async fn exit(&self) {
         self.status.set_stopped();
         if let Err(e) = self.loader.exit().await {
-            wd_log::log_error_ln!("[Workspace::{}] exit failed: {:?}",self.name,e);
+            wd_log::log_error_ln!("[Workspace::{}] exit failed: {:?}", self.name, e);
         }
     }
 }

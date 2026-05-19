@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
 use super::{Memory, MemoryItem};
@@ -31,19 +31,27 @@ where
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                    if session_id.is_empty() { continue; }
-                    
+                    let session_id = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if session_id.is_empty() {
+                        continue;
+                    }
+
                     let content = tokio::fs::read_to_string(&path).await?;
                     let mut items = Vec::new();
                     for line in content.lines() {
                         let line = line.trim();
-                        if line.is_empty() { continue; }
+                        if line.is_empty() {
+                            continue;
+                        }
                         if let Ok(item) = serde_json::from_str::<MemoryItem<T>>(line) {
                             items.push(item);
                         }
                     }
-                    
+
                     // Limit to 100 items per session on load
                     if items.len() > 100 {
                         let excess = items.len() - 100;
@@ -72,7 +80,7 @@ where
                     content.push('\n');
                 }
                 *flushed_count = items.len();
-                
+
                 let file_path = self.base_dir.join(format!("{}.jsonl", session_id));
                 let mut file = tokio::fs::OpenOptions::new()
                     .create(true)
@@ -80,7 +88,7 @@ where
                     .open(&file_path)
                     .await
                     .context("Failed to open session memory file for append")?;
-                    
+
                 use tokio::io::AsyncWriteExt;
                 file.write_all(content.as_bytes()).await?;
             }
@@ -113,7 +121,9 @@ where
         let session_id = item.session_id.clone();
         let should_flush = {
             let mut store = self.store.write().await;
-            let (flushed_count, items) = store.entry(session_id.clone()).or_insert_with(|| (0, Vec::new()));
+            let (flushed_count, items) = store
+                .entry(session_id.clone())
+                .or_insert_with(|| (0, Vec::new()));
             items.push(item);
 
             // 限制每个 session 最多存 100 条内容
@@ -132,10 +142,7 @@ where
         Ok(())
     }
 
-    async fn update(
-        &self,
-        item: MemoryItem<T>,
-    ) -> anyhow::Result<()> {
+    async fn update(&self, item: MemoryItem<T>) -> anyhow::Result<()> {
         let session_id = item.session_id.clone();
         let id = item.id.clone();
         let should_flush = {
@@ -143,12 +150,18 @@ where
             if let Some((flushed_count, items)) = store.get_mut(&session_id) {
                 if let Some(pos) = items.iter().position(|x| x.id == id) {
                     if pos < *flushed_count {
-                        return Err(anyhow::anyhow!("Cannot update an item that has already been flushed to file"));
+                        return Err(anyhow::anyhow!(
+                            "Cannot update an item that has already been flushed to file"
+                        ));
                     }
                     items[pos] = item;
                     items.len() - *flushed_count >= 50
-                } else { false }
-            } else { false }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         };
 
         if should_flush {
@@ -163,12 +176,18 @@ where
             if let Some((flushed_count, items)) = store.get_mut(session_id) {
                 if let Some(pos) = items.iter().position(|x| x.id == id) {
                     if pos < *flushed_count {
-                        return Err(anyhow::anyhow!("Cannot delete an item that has already been flushed to file"));
+                        return Err(anyhow::anyhow!(
+                            "Cannot delete an item that has already been flushed to file"
+                        ));
                     }
                     items.remove(pos);
                     items.len() - *flushed_count >= 50
-                } else { false }
-            } else { false }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         };
 
         if should_flush {
@@ -206,26 +225,26 @@ where
 /// 常用的大模型聊天内容
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatContent {
-        /// 文本内容
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub text: Option<String>,
-        /// 工具调用请求（当模型决定调用工具时）
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub tool_calls: Option<Vec<ToolCall>>,
-        /// 工具执行结果（当作为 Tool 角色返回结果时）
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub tool_result: Option<String>,
+    /// 文本内容
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// 工具调用请求（当模型决定调用工具时）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// 工具执行结果（当作为 Tool 角色返回结果时）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<String>,
 }
 
 /// 工具调用信息
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
-        /// 工具调用 ID
-        pub id: String,
-        /// 工具名称
-        pub name: String,
-        /// 工具参数 (JSON 字符串)
-        pub arguments: String,
+    /// 工具调用 ID
+    pub id: String,
+    /// 工具名称
+    pub name: String,
+    /// 工具参数 (JSON 字符串)
+    pub arguments: String,
 }
 
 /// 默认的文件聊天记忆实现类型别名
@@ -238,7 +257,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn get_temp_dir(name: &str) -> PathBuf {
-        let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("{}_{}", name, time));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -267,7 +289,9 @@ mod tests {
 
         // Should not be in file yet (only 1 item, < 50)
         let file_path = dir_path.join("sess_1.jsonl");
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&file_path)
+            .await
+            .unwrap_or_default();
         assert!(content.is_empty());
 
         // Flush and verify
@@ -308,7 +332,9 @@ mod tests {
         let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
 
         for i in 0..105 {
-            mem.push(mock_item("sess_1", &i.to_string(), &format!("msg {}", i))).await.unwrap();
+            mem.push(mock_item("sess_1", &i.to_string(), &format!("msg {}", i)))
+                .await
+                .unwrap();
         }
 
         // Session limit keeps only the last 100 items (ids 5 to 104)

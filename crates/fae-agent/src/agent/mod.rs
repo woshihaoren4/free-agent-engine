@@ -1,15 +1,14 @@
 mod single_agent;
 
+use crate::session::{Message, Session};
+use crate::task::Task;
+use crate::{Env, EnvEvent, Error, TaskResult};
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
 use wd_tools::channel::Sender;
-use crate::{Env, EnvEvent, Error, TaskResult};
-use crate::session::{Message, Session};
-use crate::task::{Task};
-
 
 /// 命令类型，表示系统和用户命令
 #[derive(Default, Debug)]
@@ -46,10 +45,17 @@ pub enum Event {
     #[default]
     None,
     /// session事件
-    SessionCall(SessionInfo,Message),
-    SessionCallStream(SessionInfo,Message, Sender<Message>),
-    SessionStreamCall(SessionInfo, Box<dyn Stream<Item=Message> + Send + Sync + 'static>),
-    SessionStream(SessionInfo,Box<dyn Stream<Item=Message> + Send + Sync + 'static>, Sender<Message>),
+    SessionCall(SessionInfo, Message),
+    SessionCallStream(SessionInfo, Message, Sender<Message>),
+    SessionStreamCall(
+        SessionInfo,
+        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
+    ),
+    SessionStream(
+        SessionInfo,
+        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
+        Sender<Message>,
+    ),
     /// 环境事件
     EnvEvent(EnvEvent),
     /// 任务完成事件
@@ -58,8 +64,8 @@ pub enum Event {
     Command(Command),
 }
 
-#[derive(Debug,Clone)]
-pub struct SessionMetaUser{
+#[derive(Debug, Clone)]
+pub struct SessionMetaUser {
     pub user_id: String,
 }
 
@@ -69,16 +75,16 @@ pub struct SessionInfo {
     /// 会话ID
     pub session_id: String,
     /// 使用者信息
-    pub user : SessionMetaUser,
+    pub user: SessionMetaUser,
     /// 任意类型元数据，用于扩展
-    pub extend_any : Option<Box<dyn Any + Send + Sync + 'static>>,
+    pub extend_any: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 
 impl Default for SessionInfo {
     fn default() -> Self {
-        Self{
+        Self {
             session_id: String::new(),
-            user: SessionMetaUser{
+            user: SessionMetaUser {
                 user_id: String::new(),
             },
             extend_any: None,
@@ -93,7 +99,7 @@ impl SessionInfo {
 
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
-pub trait Agent:Sync{
+pub trait Agent: Sync {
     /// 智能体ID
     fn id(&self) -> String;
 
@@ -101,7 +107,11 @@ pub trait Agent:Sync{
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
 
     /// 处理会话请求
-    async fn on_session(&self, env: Env, meta: SessionInfo) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
+    async fn on_session(
+        &self,
+        env: Env,
+        meta: SessionInfo,
+    ) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
 
     /// 处理命令
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
@@ -120,7 +130,8 @@ impl Deref for AgentRef {
     }
 }
 impl<T> From<T> for AgentRef
-where T: Agent + Send + 'static
+where
+    T: Agent + Send + 'static,
 {
     fn from(agent: T) -> Self {
         Self(Arc::new(agent))

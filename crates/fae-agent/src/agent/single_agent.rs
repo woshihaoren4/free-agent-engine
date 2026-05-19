@@ -1,10 +1,13 @@
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use wd_tools::channel::Sender;
 use crate::memory::Memory;
-use crate::{define_planning_group, Command, Env, EnvEvent, Event, Message, PlanningResult, SessionInfo, SessionMetaManager, Task, TaskResult};
 use crate::planner::{AgentPlanningExt, Planning, PlanningItem};
 use crate::session::Session;
+use crate::{
+    Command, Env, EnvEvent, Event, Message, PlanningResult, SessionInfo, SessionMetaManager, Task,
+    TaskResult, define_planning_group,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use wd_tools::channel::Sender;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SingleAgentSessionConfig {
@@ -20,21 +23,21 @@ pub struct SingleAgentSessionConfig {
     pub model_api_base_url: String,
 }
 
-pub struct SingleAgent<M>{
+pub struct SingleAgent<M> {
     agent_id: String,
-    memory: Arc<dyn Memory<M>+Send+'static>,
-    session_manager: Arc<dyn SessionMetaManager<SingleAgentSessionConfig>+Send+'static>,
+    memory: Arc<dyn Memory<M> + Send + 'static>,
+    session_manager: Arc<dyn SessionMetaManager<SingleAgentSessionConfig> + Send + 'static>,
 }
 
-pub struct SingleAgentPlanSessionCall<M>{
+pub struct SingleAgentPlanSessionCall<M> {
     id: String,
     session_info: SessionInfo,
     input: String,
-    memory: Arc<dyn Memory<M>+Send+Sync+'static>,
+    memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
 }
 
 #[async_trait::async_trait]
-impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
+impl<M: Send + Sync + 'static> Planning for SingleAgentPlanSessionCall<M> {
     fn id(&self) -> String {
         todo!()
     }
@@ -48,16 +51,16 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
     }
 }
 
-pub struct SingleAgentPlanSessionCallStream<M>{
+pub struct SingleAgentPlanSessionCallStream<M> {
     id: String,
     session_info: SessionInfo,
     input: String,
     output: Sender<M>,
-    memory: Arc<dyn Memory<M>+Send+Sync+'static>,
+    memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
 }
 
 #[async_trait::async_trait]
-impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCallStream<M>{
+impl<M: Send + Sync + 'static> Planning for SingleAgentPlanSessionCallStream<M> {
     fn id(&self) -> String {
         todo!()
     }
@@ -78,7 +81,7 @@ define_planning_group!(
 );
 
 #[async_trait::async_trait]
-impl<M:Send+Sync+'static> AgentPlanningExt<SingleAgentPlan<M>> for SingleAgent<M> {
+impl<M: Send + Sync + 'static> AgentPlanningExt<SingleAgentPlan<M>> for SingleAgent<M> {
     fn id(&self) -> String {
         todo!()
     }
