@@ -143,9 +143,10 @@ macro_rules! define_planning_group {
 pub struct EndPlanTaskArgs {
     pub plan_id: String,
     pub agent_id: String,
+    pub reason: String,
 }
 impl EndPlanTaskArgs {
-    pub fn new(plan_id: String, agent_id: String) -> Self {
-        Self { plan_id, agent_id }
+    pub fn new(plan_id: String, agent_id: String, reason: String) -> Self {
+        Self { plan_id, agent_id, reason }
     }
 }

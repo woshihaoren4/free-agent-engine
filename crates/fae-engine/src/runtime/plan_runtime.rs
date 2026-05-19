@@ -1,16 +1,17 @@
-use fae_agent::{Env, EnvEvent, Environment, Planning, PlanningResult, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
+use fae_agent::{EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, RwLock};
 use wd_tools::channel::Channel;
 use wd_tools::{PFArc, PFErr};
-use fae_agent::error::{TASK_ERROR_CODE_PLAN_ABORT, TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL};
+use fae_agent::error::{TASK_ERROR_CODE_PLAN_ABORT, TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, TASK_ERROR_CODE_PLAN_ABORT_USER};
 
-const DEFAULT_PLAN_RUNTIME_ID: &str = "FAE_DEFAULT_PLAN_RUNTIME";
-const DEFAULT_PLAN_RUNTIME_EXEC_CHANNEL: &str = "default";
-const DEFAULT_PLAN_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
-const DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX: &str = "__PRSUB_";
-const DEFAULT_PLAN_RUNTIME_PLAN_ID_SPILT: &str = "_*P#R$S@U&B_";
+pub const DEFAULT_PLAN_RUNTIME_ID: &str = "FAE_DEFAULT_PLAN_RUNTIME";
+pub const DEFAULT_PLAN_RUNTIME_EXEC_CHANNEL: &str = "default";
+pub const DEFAULT_PLAN_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
+pub const DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX: &str = "__PRSUB_";
+pub const DEFAULT_PLAN_RUNTIME_PLAN_ID_SPILT: &str = "_*P#R$S@U&B_";
 
 pub struct PlanCtl {
     task: Task,
@@ -110,7 +111,7 @@ impl PlanRuntime {
         plans.remove(id)
     }
     // 异常处理
-    async fn handle_error<S:Into<String>>(code:i32, plan:&mut PlanCtl, info:S, remove_id:&mut String) {
+    async fn abort_plan_by_error<S:Into<String>>(code:i32, plan:&mut PlanCtl, info:S, remove_id:&mut String) {
         plan.plan.abort().await;
         plan.result = Option::from(TaskResult::error(code, info.into(), plan.task.id.as_str(), plan.task.agent_id.as_str()));
         //通知计划执行器
@@ -118,6 +119,20 @@ impl PlanRuntime {
             notify.notify_one();
             *remove_id = String::new();
         }
+    }
+    async fn abort_plan_by_id(&self,pid:String,aid:String,reason:String)->anyhow::Result<()>{
+        let mut id = Self::generate_plan_sub_id(pid.as_str(), aid.as_str());
+        let plan = if let Some(p) = self.get_plan(&id).await{
+            p
+        }else {
+            return Err(anyhow::anyhow!("[PlanRuntime] not found plan, id={}",id));
+        };
+        let mut plan_lock = plan.lock().await;
+        Self::abort_plan_by_error(TASK_ERROR_CODE_PLAN_ABORT_USER, plan_lock.deref_mut(), reason, &mut id).await;
+        if !id.is_empty() {
+            self.remove_plan(&id).await;
+        }
+        Ok(())
     }
     fn task_result_callback(&self, mut result:TaskResult) {
         let plans = self.plans.clone();
@@ -147,7 +162,7 @@ impl PlanRuntime {
                     }else if let Some(r) = opt{
                         // 存在待通知的结果，返回结果给等待者
                         if let Err(e) = chan.send(EnvEvent::TaskResult(r)).await{
-                            Self::handle_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, format!("[PlanRuntime:task_result_callback] plan execute success. but send task result to channel failed: {:?}", e), &mut remove_id).await;
+                            Self::abort_plan_by_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, format!("[PlanRuntime:task_result_callback] plan execute success. but send task result to channel failed: {:?}", e), &mut remove_id).await;
                         }
                     }else{
                         //异步且没有返回值，则不进行回调通知，正常结束任务即可
@@ -160,17 +175,17 @@ impl PlanRuntime {
                     });
                     if let Some(env) = env {
                         if let Err(e) = env.spawn(tasks).await {
-                            Self::handle_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, e.to_string(), &mut remove_id).await;
+                            Self::abort_plan_by_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, e.to_string(), &mut remove_id).await;
                         }else{
                             //下一步执行成功，不移除计划
                             remove_id = String::new();
                         }
                     }else {
-                        Self::handle_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, "[PlanRuntime:task_result_callback] parent is nil.", &mut remove_id).await;
+                        Self::abort_plan_by_error(TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL, &mut plan_lock, "[PlanRuntime:task_result_callback] parent is nil.", &mut remove_id).await;
                     }
                 }
                 Err(e) => {
-                    Self::handle_error(TASK_ERROR_CODE_PLAN_ABORT, &mut plan_lock, e.to_string(), &mut remove_id).await;
+                    Self::abort_plan_by_error(TASK_ERROR_CODE_PLAN_ABORT, &mut plan_lock, e.to_string(), &mut remove_id).await;
                 }
             }
             if !remove_id.is_empty(){
@@ -264,7 +279,10 @@ impl Environment for PlanRuntime {
             let mut plan = if let Some(s) = task.into_inner::<Box<dyn Planning + Send + 'static>>()
             {
                 s
-            } else {
+            } else if let Some(abort_plan) = task.into_inner::<EndPlanTaskArgs>(){
+                self.abort_plan_by_id(abort_plan.plan_id,abort_plan.agent_id,abort_plan.reason).await?;
+                continue;
+            }else {
                 return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", task).err();
             };
             let plan_result = plan.init().await?;
@@ -299,9 +317,19 @@ impl Environment for PlanRuntime {
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
+        if task.r#type != TaskType::Plan {
+            if let Some(ref p) = self.parent {
+                return p.execute(task).await;
+            }else{
+                return anyhow::anyhow!("[PlanRuntime:execute] task executor not found: {:?}", task).err();
+            }
+        }
         let mut plan = if let Some(s) = task.into_inner::<Box<dyn Planning + Send + 'static>>() {
             s
-        } else {
+        } else if let Some(abort_plan) = task.into_inner::<EndPlanTaskArgs>(){
+            self.abort_plan_by_id(abort_plan.plan_id,abort_plan.agent_id,abort_plan.reason).await?;
+            return Ok(TaskResult::success(task.id, task.agent_id));
+        }else {
             return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", task).err();
         };
         let pid = Self::generate_plan_sub_id(task.id.as_str(), task.agent_id.as_str());

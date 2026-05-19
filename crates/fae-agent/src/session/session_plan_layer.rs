@@ -165,11 +165,11 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
     }
 
     async fn abort(&mut self) -> anyhow::Result<()> {
-        let args = EndPlanTaskArgs::new(self.plan_id.clone(), self.plan_builder.id());
+        let args = EndPlanTaskArgs::new(self.plan_id.clone(), self.plan_builder.id(),"session abort".to_string());
         let task = Task::new(
             self.plan_id.as_str(),
             self.plan_builder.id(),
-            TaskType::EndPlan,
+            TaskType::Plan,
         )
         .set_args(args);
         self.env.spawn(vec![task]).await?;

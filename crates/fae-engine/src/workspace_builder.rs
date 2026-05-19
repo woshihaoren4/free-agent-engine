@@ -73,19 +73,19 @@ impl WorkspaceBuilder {
         ws.start_watch_env();
         ws
     }
-    pub fn set_name(mut self, name: impl Into<String>) -> Self {
+    pub fn set_name(&mut self, name: impl Into<String>) -> &mut Self {
         self.name = name.into();
         self
     }
-    pub fn set_loader(mut self, loader: impl AgentLoader + Send + 'static) -> Self {
+    pub fn set_loader(&mut self, loader: impl AgentLoader + Send + 'static) -> &mut Self {
         self.loader = Arc::new(loader);
         self
     }
-    pub fn add_loader_layer(self, layer: impl AgentLoader + Send + 'static) -> Self {
+    pub fn add_loader_layer(&mut self, layer: impl AgentLoader + Send + 'static) -> &mut Self {
         let loader = self.loader.clone();
         self.set_loader(AgentLoaderLayer::new(loader, layer))
     }
-    pub async fn add_env_layer(mut self, mut layer: impl Environment + Send + 'static) -> Self {
+    pub async fn add_env_layer(&mut self, mut layer: impl Environment + Send + 'static) -> &mut Self {
         let env = self.env.clone();
         self.env = {
             layer.register_parent_env(env).await;

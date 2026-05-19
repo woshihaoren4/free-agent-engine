@@ -6,8 +6,8 @@ use async_openai::types::{
 use fae_agent::{Task, TaskExecutor, TaskResult};
 use wd_tools::PFErr;
 
-const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
-const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
+pub const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
+pub const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
 
 pub struct ModelOpenAIApiExecutorTaskConfig<T> {
     pub req: T,
@@ -16,6 +16,7 @@ pub struct ModelOpenAIApiExecutorTaskConfig<T> {
 
 pub struct ModelOpenAIApiExecutor {
     pub desc: String,
+    pub channel: String,
     pub client: Client<OpenAIConfig>,
 }
 
@@ -24,6 +25,7 @@ impl ModelOpenAIApiExecutor {
         let client = Client::new();
         Self {
             desc: DEFAULT_OPENAI_MODEL_DESC.into(),
+            channel: EXECUTOR_OPENAI_API_CHANNEL.into(),
             client,
         }
     }
@@ -31,11 +33,15 @@ impl ModelOpenAIApiExecutor {
         let client = Client::with_config(cfg);
         Self {
             desc: DEFAULT_OPENAI_MODEL_DESC.into(),
+            channel: EXECUTOR_OPENAI_API_CHANNEL.into(),
             client,
         }
     }
-    pub fn channel() -> String {
-        EXECUTOR_OPENAI_API_CHANNEL.into()
+    pub fn set_channel(mut self, channel: &str) -> Self {
+        self.channel = channel.into();self
+    }
+    pub fn get_channel(&self) -> String {
+        self.channel.clone()
     }
     pub async fn chat_stream(
         &self,
@@ -66,7 +72,7 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
     }
 
     fn channel(&self) -> String {
-        Self::channel()
+        self.get_channel()
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {

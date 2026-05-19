@@ -6,6 +6,9 @@ pub const TASK_ERROR_CODE_UNKNOWN: i32 = 999001001;
 pub const TASK_ERROR_CODE_PLAN_ABORT: i32 = 999001002;
 // 计划执行报错，计划被终止， 错误来源执行器
 pub const TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL: i32 = 999001003;
+// 计划被用户强行终止
+pub const TASK_ERROR_CODE_PLAN_ABORT_USER: i32 = 999001004;
+
 
 
 #[derive(Error, Debug)]

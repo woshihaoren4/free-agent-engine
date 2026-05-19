@@ -32,7 +32,7 @@ pub struct Workspace {
 
 impl Workspace {
     //启动工作空间，监听环境变化
-    pub fn start_watch_env(&self) {
+    pub(crate) fn start_watch_env(&self) {
         let this = self.clone();
         this.status.set_running();
         tokio::spawn(async move {

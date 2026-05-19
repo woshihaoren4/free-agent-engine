@@ -97,8 +97,6 @@ pub enum TaskType {
     Model,
     /// 执行一个计划
     Plan,
-    /// 结束一个任务
-    EndPlan,
     /// 执行工具
     Tool,
     /// 执行智能体
@@ -129,7 +127,8 @@ impl From<&str> for TaskType {
     fn from(s: &str) -> Self {
         match s {
             "none" => TaskType::None,
-            "module" => TaskType::Model,
+            "model" | "module" => TaskType::Model,
+            "plan" => TaskType::Plan,
             "tool" => TaskType::Tool,
             "agent" => TaskType::Agent,
             "skill" => TaskType::Skill,
@@ -143,7 +142,20 @@ impl From<&str> for TaskType {
 }
 impl Display for TaskType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        let s = match self {
+            TaskType::None => "none",
+            TaskType::Model => "model",
+            TaskType::Plan => "plan",
+            TaskType::Tool => "tool",
+            TaskType::Agent => "agent",
+            TaskType::Skill => "skill",
+            TaskType::Custom => "custom",
+            TaskType::Output => "output",
+            TaskType::Error => "error",
+            TaskType::Over => "over",
+            TaskType::Any(s) => s.as_str(),
+        };
+        write!(f, "{}", s)
     }
 }
 #[derive(Debug)]

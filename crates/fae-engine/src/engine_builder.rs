@@ -5,14 +5,11 @@ use crate::workspace::Workspace;
 use crate::workspace_builder::WorkspaceBuilder;
 use fae_agent::{Env, Environment};
 
-impl Default for AgentsEngine {
-    fn default() -> Self {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(AgentsEngine::new(TaskRuntime::new()).assemble_runtime(PlanRuntime::new()))
-    }
-}
-
 impl AgentsEngine {
+    pub async fn default() -> Self {
+        AgentsEngine::new(TaskRuntime::new())
+            .assemble_runtime(PlanRuntime::new()).await
+    }
     pub async fn assemble_runtime(mut self, mut layer: impl Environment + Send + 'static) -> Self {
         let env = self.runtime.as_env();
         self.runtime = {
