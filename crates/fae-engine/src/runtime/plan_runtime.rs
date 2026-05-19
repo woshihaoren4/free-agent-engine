@@ -9,6 +9,7 @@ const DEFAULT_PLAN_RUNTIME_ID: &str = "FAE_DEFAULT_PLAN_RUNTIME";
 const DEFAULT_PLAN_RUNTIME_EXEC_CHANNEL: &str = "default";
 const DEFAULT_PLAN_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
 const DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX: &str = "__PRSUB_";
+const DEFAULT_PLAN_RUNTIME_PLAN_ID_SPILT: &str = "_*P#R$S@U&B_";
 
 pub struct PlanCtl{
     task : Task,
@@ -38,15 +39,15 @@ impl PlanRuntime {
             plans,
         }
     }
-    fn generate_plan_sub_id(id:&str) -> String {
-        format!("{}{}",DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX,id)
+    fn generate_plan_sub_id(tid:&str,aid:&str) -> String {
+        format!("{}{}{}{}",DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX,tid,DEFAULT_PLAN_RUNTIME_PLAN_ID_SPILT,aid)
     }
     async fn push_plan(&self,id:String,plan:Arc<Mutex<PlanCtl>>) {
         let mut plans = self.plans.write().await;
         plans.insert(id,plan);
     }
     async fn run_plan(&self,plan:PlanCtl,init_result:PlanningResult) {
-        let pid = Self::generate_plan_sub_id(&plan.task.agent_id);
+        let pid = Self::generate_plan_sub_id(&plan.task.id,&plan.task.agent_id);
         let env = self.parent.clone().unwrap();
         let channel = if init_result.is_end() {
             Some(self.events.clone())
@@ -54,7 +55,7 @@ impl PlanRuntime {
             None
         };
         let p = Arc::new(Mutex::new(plan));
-        self.push_plan(pid,p.clone()).await;
+        self.push_plan(pid.clone(),p.clone()).await;
         tokio::spawn(async move {
             if let PlanningResult::End(opt) = init_result {
                 if let Some(result) = opt {
@@ -64,7 +65,10 @@ impl PlanRuntime {
                         }
                     }
                 }
-            }else if let PlanningResult::Tasks(tasks) = init_result {
+            }else if let PlanningResult::Tasks(mut tasks) = init_result {
+                tasks.iter_mut().for_each(|task| {
+                    task.agent_id = pid.clone();
+                });
                 if let Err(e) = env.spawn(tasks).await{
                     wd_log::log_error_ln!("[PlanRuntime:run_plan] spawn tasks failed: {:?}",e);
                 }
@@ -172,7 +176,7 @@ impl Environment for PlanRuntime {
         }else{
             return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", task).err();
         };
-        let pid = Self::generate_plan_sub_id(task.agent_id.as_str());
+        let pid = Self::generate_plan_sub_id(task.id.as_str(),task.agent_id.as_str());
 
         let tasks = match plan.init().await?{
             PlanningResult::End(opt) => {
