@@ -23,6 +23,11 @@ pub enum PlanningResult{
     End(Option<TaskResult>),
     Tasks(Vec<Task>),
 }
+impl PlanningResult {
+    pub fn is_end(&self) -> bool{
+        matches!(self, PlanningResult::End(_))
+    }
+}
 
 /// 智能体规划 trait，定义智能体的规划逻辑
 #[async_trait::async_trait]
@@ -32,7 +37,7 @@ pub trait Planning:Sync {
     async fn show(&self)-> String{
         format!("[{}] running...", self.id())
     }
-    async fn start(&mut self) -> anyhow::Result<PlanningResult>;
+    async fn init(&mut self) -> anyhow::Result<PlanningResult>;
     /// 下一步规划
     async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult>;
     /// 强制终止
@@ -69,9 +74,9 @@ macro_rules! define_planning_group {
                 }
             }
 
-            async fn start(&mut self) -> anyhow::Result<$crate::planner::PlanningResult> {
+            async fn init(&mut self) -> anyhow::Result<$crate::planner::PlanningResult> {
                 match self {
-                    $( Self::$variant(inner) => inner.start().await, )*
+                    $( Self::$variant(inner) => inner.init().await, )*
                 }
             }
 
@@ -113,9 +118,9 @@ macro_rules! define_planning_group {
                 }
             }
 
-            async fn start(&mut self) -> anyhow::Result<$crate::planner::PlanningResult> {
+            async fn init(&mut self) -> anyhow::Result<$crate::planner::PlanningResult> {
                 match self {
-                    $( Self::$variant(inner) => inner.start().await, )*
+                    $( Self::$variant(inner) => inner.init().await, )*
                 }
             }
 

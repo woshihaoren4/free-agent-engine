@@ -39,7 +39,7 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCall<M>{
         todo!()
     }
 
-    async fn start(&mut self) -> anyhow::Result<PlanningResult> {
+    async fn init(&mut self) -> anyhow::Result<PlanningResult> {
         Ok(PlanningResult::End(None))
     }
 
@@ -61,7 +61,7 @@ impl<M:Send+Sync+'static> Planning for SingleAgentPlanSessionCallStream<M>{
     fn id(&self) -> String {
         todo!()
     }
-    async fn start(&mut self) -> anyhow::Result<PlanningResult> {
+    async fn init(&mut self) -> anyhow::Result<PlanningResult> {
         Ok(PlanningResult::End(None))
     }
 

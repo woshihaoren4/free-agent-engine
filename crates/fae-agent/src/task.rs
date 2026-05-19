@@ -66,6 +66,12 @@ impl Task {
     }
 }
 
+impl Default for Task {
+    fn default() -> Self {
+        Self::new("default","default",TaskType::None)
+    }
+}
+
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Default,Debug, PartialEq,Eq,Clone,PartialOrd,Ord,Hash,Serialize)]
 #[serde(rename_all = "lowercase")]
