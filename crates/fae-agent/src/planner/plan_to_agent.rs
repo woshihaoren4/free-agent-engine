@@ -51,7 +51,7 @@ where
         Ok(())
     }
 
-    async fn exit(&self) -> anyhow::Result<()> {
+    async fn exit(&self) {
         self.f.exit().await
     }
 }

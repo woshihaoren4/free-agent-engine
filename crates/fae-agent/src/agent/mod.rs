@@ -4,11 +4,12 @@ use crate::session::{Message, Session};
 use crate::task::Task;
 use crate::{Env, EnvEvent, Error, TaskResult};
 use std::any::Any;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::Stream;
-use wd_tools::channel::Sender;
+use wd_tools::channel::{ChannelResult, Sender};
 
 /// 命令类型，表示系统和用户命令
 #[derive(Default, Debug)]
@@ -64,6 +65,29 @@ pub enum Event {
     Command(Command),
 }
 
+#[derive(Debug)]
+pub struct SenderMessageStream<T>{
+    sender: Sender<Message>,
+    inner: PhantomData<T>,
+}
+
+impl<T: Any + Send + Sync + 'static> SenderMessageStream<T> {
+    pub async fn send(&self, id:&str, message: T) -> anyhow::Result<()> {
+        if let Err(e) = self.sender.send(Message::new(id).set_content(message)).await{
+            return Err(anyhow::anyhow!("[SenderMessageStream] send message error: {:?}", e));
+        }
+        Ok(())
+    }
+}
+impl Event {
+    pub fn sender_message_to_stream_t<M>(sender:Sender<Message>)->SenderMessageStream<M> {
+        SenderMessageStream {
+            sender,
+            inner: PhantomData::<M>::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionMetaUser {
     pub user_id: String,
@@ -117,8 +141,7 @@ pub trait Agent: Sync {
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
 
     /// 退出
-    async fn exit(&self) -> anyhow::Result<()> {
-        Ok(())
+    async fn exit(&self) {
     }
 }
 

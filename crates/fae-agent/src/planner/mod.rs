@@ -7,7 +7,7 @@ use crate::{Env, Event, Task, TaskResult};
 pub trait AgentPlanningExt<T: Planning + Send + 'static>: Sync {
     fn id(&self) -> String;
     async fn generate_plan(&self, env: Env, event: Event) -> anyhow::Result<T>;
-    async fn exit(&self) -> anyhow::Result<()>;
+    async fn exit(&self);
 }
 
 #[derive(Debug, Default)]
@@ -138,6 +138,23 @@ macro_rules! define_planning_group {
         }
     };
 }
+
+
+#[derive(Debug)]
+pub struct NonePlan;
+#[async_trait::async_trait]
+impl Planning for NonePlan {
+    fn id(&self) -> String {
+        "".to_string()
+    }
+    async fn init(&mut self) -> anyhow::Result<PlanningResult> {
+        Ok(PlanningResult::End(None))
+    }
+    async fn next(&mut self, _event: TaskResult) -> anyhow::Result<PlanningResult> {
+        Ok(PlanningResult::End(None))
+    }
+}
+
 
 #[derive(Debug)]
 pub struct EndPlanTaskArgs {

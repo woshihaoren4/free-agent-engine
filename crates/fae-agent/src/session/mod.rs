@@ -49,7 +49,7 @@ impl Message {
         self.content = content;
         self
     }
-    pub fn set_content<T: Any + Send + Sync + 'static>(mut self, content: T) -> Self {
+    pub fn set_content<T: Any + Send + 'static>(mut self, content: T) -> Self {
         self.content = Box::new(content);
         self
     }
