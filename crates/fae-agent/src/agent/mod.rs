@@ -18,8 +18,6 @@ pub enum Command {
     /// 无命令
     #[default]
     None,
-    /// 系统重置命令
-    SystemReset,
     /// 系统退出命令
     SystemExit,
     /// 用户自定义命令
@@ -31,7 +29,6 @@ impl PartialEq for Command {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Command::None, Command::None) => true,
-            (Command::SystemReset, Command::SystemReset) => true,
             (Command::SystemExit, Command::SystemExit) => true,
             (Command::UserCustomCommand(a), Command::UserCustomCommand(b)) => a == b,
             (Command::Any(_), Command::Any(_)) => false, // 无法比较Any类型

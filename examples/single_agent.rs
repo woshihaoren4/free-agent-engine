@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         .session(
             "main_agent",
             SessionInfo {
-                session_id: "test_session".to_string(),
+                session_id: "test_session_2".to_string(),
                 ..Default::default()
             },
         )
