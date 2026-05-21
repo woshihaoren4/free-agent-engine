@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::memory::SessionMetaManager;
+use crate::memory::SessionConfig;
 
 /// 基于文件系统的会话元数据管理实现
 pub struct FileSessionMetaManager<T> {
@@ -43,7 +43,7 @@ impl<T> FileSessionMetaManager<T> {
 }
 
 #[async_trait::async_trait]
-impl<T> SessionMetaManager<T> for FileSessionMetaManager<T>
+impl<T> SessionConfig<T> for FileSessionMetaManager<T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
@@ -78,6 +78,19 @@ where
         let end = (offset + limit).min(metas.len());
 
         Ok(metas[start..end].to_vec())
+    }
+
+    async fn load(&self, session_id: &str) -> anyhow::Result<Option<T>> {
+        let file_path = self.get_file_path(session_id);
+        if !file_path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&file_path)
+            .await
+            .context("Failed to read session file")?;
+        let meta =
+            serde_json::from_str::<T>(&content).context("Failed to deserialize session meta")?;
+        Ok(Some(meta))
     }
 
     async fn update(&self, session_id: &str, meta: T) -> anyhow::Result<()> {

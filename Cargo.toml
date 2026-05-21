@@ -7,7 +7,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [workspace]
-members = ["crates/fae-agent", "crates/fae-engine"]
+members = ["crates/fae-agent", "crates/fae-engine", "examples"]
 
 [workspace.dependencies]
 wd_log = "0.1.8"

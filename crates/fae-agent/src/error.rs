@@ -9,8 +9,6 @@ pub const TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL: i32 = 999001003;
 // 计划被用户强行终止
 pub const TASK_ERROR_CODE_PLAN_ABORT_USER: i32 = 999001004;
 
-
-
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("NoSupport error: {0}")]

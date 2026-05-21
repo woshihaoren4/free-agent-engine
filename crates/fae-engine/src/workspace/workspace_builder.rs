@@ -1,5 +1,5 @@
-use crate::engine::{AgentLoader, RecallAgentRef};
 use crate::workspace::{Workspace, WorkspaceStatus};
+use crate::{AgentLoader, RecallAgentRef, SingleAgentLoaderFromFile};
 use fae_agent::{AgentRef, Env, Environment};
 use std::sync::Arc;
 
@@ -38,6 +38,15 @@ where
         }
     }
 
+    async fn create(
+        &self,
+        name: &str,
+        prompt: &str,
+        cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+    ) -> anyhow::Result<AgentRef> {
+        self.n.create(name, prompt, cfg).await
+    }
+
     async fn exit(&self) -> anyhow::Result<()> {
         if let Err(err) = self.n.exit().await {
             wd_log::log_error_ln!("[AgentLoaderLayer] exit new loader error: {:?}", err);
@@ -52,14 +61,15 @@ pub struct WorkspaceBuilder {
     pub(crate) env: Env,
 }
 impl WorkspaceBuilder {
-    pub fn new<N, L>(name: N, loader: L, env: Env) -> Self
+    pub fn new<N>(name: N, env: Env) -> Self
     where
         N: Into<String>,
-        L: AgentLoader + Send + 'static,
     {
+        let name = name.into();
+        let single_agent_loader = SingleAgentLoaderFromFile::new(name.as_str());
         WorkspaceBuilder {
-            name: name.into(),
-            loader: Arc::new(loader),
+            name,
+            loader: Arc::new(single_agent_loader),
             env,
         }
     }
@@ -85,7 +95,10 @@ impl WorkspaceBuilder {
         let loader = self.loader.clone();
         self.set_loader(AgentLoaderLayer::new(loader, layer))
     }
-    pub async fn add_env_layer(&mut self, mut layer: impl Environment + Send + 'static) -> &mut Self {
+    pub async fn add_env_layer(
+        &mut self,
+        mut layer: impl Environment + Send + 'static,
+    ) -> &mut Self {
         let env = self.env.clone();
         self.env = {
             layer.register_parent_env(env).await;

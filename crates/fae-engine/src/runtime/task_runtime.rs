@@ -1,3 +1,4 @@
+use crate::executors::ModelOpenAIApiExecutor;
 use fae_agent::{
     Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem,
     ThingSelect,
@@ -8,7 +9,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::PFErr;
 use wd_tools::channel::Channel;
-use crate::executors::ModelOpenAIApiExecutor;
 
 const DEFAULT_TASK_RUNTIME_ID: &str = "FAE_DEFAULT_TASK_EXECUTOR";
 const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
@@ -27,8 +27,8 @@ impl TaskRuntime {
             parent: None,
             executors: HashMap::new(),
         }
-            .register_executor(TaskType::Model, ModelOpenAIApiExecutor::new())
-            .into_self()
+        .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
+        .into_self()
     }
     pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
         format!("{}-{}", task_type, channel)
@@ -46,7 +46,7 @@ impl TaskRuntime {
         &mut self,
         task_type: TaskType,
         executor: T,
-    )->&mut Self{
+    ) -> &mut Self {
         self.raw_register_executor(task_type, Arc::new(executor));
         self
     }
@@ -72,11 +72,11 @@ impl TaskRuntime {
             ),
         }
     }
-    pub fn into_self(&mut self)->Self{
+    pub fn into_self(&mut self) -> Self {
         let events = std::mem::replace(&mut self.events, Channel::with_cap(1));
         let parent = std::mem::replace(&mut self.parent, None);
         let executors = std::mem::take(&mut self.executors);
-        Self{
+        Self {
             events,
             parent,
             executors,

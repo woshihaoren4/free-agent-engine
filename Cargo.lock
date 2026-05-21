@@ -315,10 +315,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fae-agent",
+ "fae-engine",
+ "tokio",
+ "tokio-stream",
+ "wd_log",
+]
+
+[[package]]
 name = "fae-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-openai",
  "async-trait",
  "serde",
  "serde_json",

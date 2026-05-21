@@ -1,4 +1,5 @@
-mod single_agent;
+pub mod single_agent;
+pub use single_agent::*;
 
 use crate::session::{Message, Session};
 use crate::task::Task;
@@ -66,21 +67,31 @@ pub enum Event {
 }
 
 #[derive(Debug)]
-pub struct SenderMessageStream<T>{
+pub struct SenderMessageStream<T> {
     sender: Sender<Message>,
     inner: PhantomData<T>,
 }
 
 impl<T: Any + Send + Sync + 'static> SenderMessageStream<T> {
-    pub async fn send(&self, id:&str, message: T) -> anyhow::Result<()> {
-        if let Err(e) = self.sender.send(Message::new(id).set_content(message)).await{
-            return Err(anyhow::anyhow!("[SenderMessageStream] send message error: {:?}", e));
+    pub async fn send(&self, id: &str, message: T) -> anyhow::Result<()> {
+        if let Err(e) = self
+            .sender
+            .send(Message::new(id).set_content(message))
+            .await
+        {
+            return Err(anyhow::anyhow!(
+                "[SenderMessageStream] send message error: {:?}",
+                e
+            ));
         }
         Ok(())
     }
+    pub fn close(&self) {
+        self.sender.close();
+    }
 }
 impl Event {
-    pub fn sender_message_to_stream_t<M>(sender:Sender<Message>)->SenderMessageStream<M> {
+    pub fn sender_message_to_stream_t<M>(sender: Sender<Message>) -> SenderMessageStream<M> {
         SenderMessageStream {
             sender,
             inner: PhantomData::<M>::default(),
@@ -94,14 +105,14 @@ pub struct SessionMetaUser {
 }
 
 /// 会话元数据，用于传递会话相关信息
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionInfo {
     /// 会话ID
     pub session_id: String,
     /// 使用者信息
     pub user: SessionMetaUser,
     /// 任意类型元数据，用于扩展
-    pub extend_any: Option<Box<dyn Any + Send + Sync + 'static>>,
+    pub extend_any: Option<Arc<dyn Any + Send + Sync + 'static>>,
 }
 
 impl Default for SessionInfo {
@@ -115,6 +126,7 @@ impl Default for SessionInfo {
         }
     }
 }
+
 impl SessionInfo {
     pub fn get_session_id(&self) -> &str {
         self.session_id.as_str()
@@ -141,10 +153,10 @@ pub trait Agent: Sync {
     async fn on_command(&self, env: Env, cmd: Command) -> anyhow::Result<()>;
 
     /// 退出
-    async fn exit(&self) {
-    }
+    async fn exit(&self) {}
 }
 
+#[derive(Clone)]
 pub struct AgentRef(Arc<dyn Agent + Send + 'static>);
 impl Deref for AgentRef {
     type Target = Arc<dyn Agent + Send + 'static>;

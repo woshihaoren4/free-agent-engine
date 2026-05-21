@@ -3,11 +3,10 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::{
     ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
-use fae_agent::{Task, TaskExecutor, TaskResult};
+use fae_agent::{EXECUTOR_OPENAI_API_CHANNEL, Task, TaskExecutor, TaskResult};
 use wd_tools::PFErr;
 
 pub const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
-pub const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
 
 pub struct ModelOpenAIApiExecutorTaskConfig<T> {
     pub req: T,
@@ -38,7 +37,8 @@ impl ModelOpenAIApiExecutor {
         }
     }
     pub fn set_channel(mut self, channel: &str) -> Self {
-        self.channel = channel.into();self
+        self.channel = channel.into();
+        self
     }
     pub fn get_channel(&self) -> String {
         self.channel.clone()
@@ -95,6 +95,12 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
         } else if task.assert::<CreateChatCompletionRequest>() {
             if let Some(req) = task.into_inner::<CreateChatCompletionRequest>() {
                 let result = TaskResult::success(task.id, task.agent_id);
+                if req.stream.unwrap_or(false) {
+                    // 流式请求
+                    let stream = self.chat_stream(req).await?;
+                    return Ok(result.set_raw_data(stream));
+                }
+                //非流式请求
                 let resp = self.chat(req).await?;
                 Ok(result.set_raw_data(resp))
             } else {
@@ -104,6 +110,16 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
         } else {
             return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] task args assert failed!")
                 .err();
+        }
+    }
+}
+
+impl Default for ModelOpenAIApiExecutor {
+    fn default() -> Self {
+        if let Ok(url) = std::env::var("OPENAI_API_URL") {
+            ModelOpenAIApiExecutor::with_config(OpenAIConfig::new().with_api_base(url))
+        } else {
+            Self::new()
         }
     }
 }

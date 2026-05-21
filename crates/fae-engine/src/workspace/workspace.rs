@@ -1,4 +1,4 @@
-use crate::engine::AgentLoader;
+use crate::AgentLoader;
 use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionInfo};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -58,12 +58,14 @@ impl Workspace {
                 match event {
                     EnvEvent::TaskResult(ref result) => {
                         // 分发任务执行结果给智能体
-                        let agent = match this.get_agent(result.agent_id.as_str()).await {
+                        let aid = result.agent_id.clone();
+                        let agent = match this.get_agent(aid.as_str()).await {
                             Ok(agent) => agent,
                             Err(e) => {
                                 wd_log::log_error_ln!(
-                                    "[Workspace::{}] load agent failed: {:?}",
+                                    "[Workspace::{}] load agent: {} failed: {:?}",
                                     this.name,
+                                    aid,
                                     e
                                 );
                                 continue;
@@ -92,6 +94,14 @@ impl Workspace {
     }
     pub async fn get_agent(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
         self.loader.load(agent_id).await
+    }
+    pub async fn create_agent(
+        &self,
+        name: &str,
+        prompt: &str,
+        cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+    ) -> anyhow::Result<AgentRef> {
+        self.loader.create(name, prompt, cfg).await
     }
     pub fn get_env(&self) -> Env {
         self.env.clone()

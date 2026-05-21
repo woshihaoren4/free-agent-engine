@@ -81,6 +81,13 @@ impl Message {
         Ok(msg)
     }
 }
+
+impl Default for Message {
+    fn default() -> Self {
+        Self::new(wd_tools::uuid::v4())
+    }
+}
+
 impl<T: Any + Send + Sync + 'static> Msg<T> {
     pub fn to_message(self) -> Message {
         self.message.set_content(self.content)

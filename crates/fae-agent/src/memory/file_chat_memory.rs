@@ -87,7 +87,10 @@ where
                     .append(true)
                     .open(&file_path)
                     .await
-                    .context("Failed to open session memory file for append")?;
+                    .context(format!(
+                        "Failed to open session memory file for append: {:?}",
+                        file_path
+                    ))?;
 
                 use tokio::io::AsyncWriteExt;
                 file.write_all(content.as_bytes()).await?;
@@ -234,6 +237,20 @@ pub struct ChatContent {
     /// 工具执行结果（当作为 Tool 角色返回结果时）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<String>,
+}
+
+impl crate::memory::MemoryRuler for ChatContent {
+    fn as_content(&self) -> String {
+        self.text.clone().unwrap_or_default()
+    }
+
+    fn from_content(content: String) -> Self {
+        Self {
+            text: Some(content),
+            tool_calls: None,
+            tool_result: None,
+        }
+    }
 }
 
 /// 工具调用信息

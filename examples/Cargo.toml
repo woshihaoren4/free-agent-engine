@@ -1,0 +1,22 @@
+[package]
+name = "examples"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fae-engine = { path = "../crates/fae-engine" }
+fae-agent = { path = "../crates/fae-agent" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+wd_log = { workspace = true }
+
+[[example]]
+name = "basic"
+path = "basic.rs"
+
+[[example]]
+name = "single_agent"
+path = "single_agent.rs"

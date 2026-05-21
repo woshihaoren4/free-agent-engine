@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use tokio_stream::Stream;
 use wd_tools::channel::{Channel, Receiver, Sender};
 use wd_tools::time::format::Item;
-use wd_tools::{PFBox, PFErr, PFOk};
+use wd_tools::{PFArc, PFBox, PFErr, PFOk};
 
 const SESSION_STREAM_CHANEL_COUNT: usize = 8;
 
@@ -72,14 +72,15 @@ impl<P: Planning + Send + 'static> SessionPlanLayer<P> {
 #[async_trait::async_trait]
 impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
     async fn call(&mut self, msg: Message) -> anyhow::Result<Message> {
-        let info = std::mem::take(&mut self.session_info);
+        let info = self.session_info.clone();
         let event = Event::SessionCall(info, msg);
         let plan = self
             .plan_builder
             .generate_plan(self.env.clone(), event)
             .await?;
         self.plan_id = plan.id().to_string();
-        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan).set_args(plan);
         let result = self.env.execute(task).await?;
         if result.is_error() {
             return Err(anyhow::anyhow!(
@@ -102,7 +103,7 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
         &mut self,
         input: Message,
     ) -> anyhow::Result<Box<dyn Stream<Item = Message> + Send + Sync>> {
-        let info = std::mem::take(&mut self.session_info);
+        let info = self.session_info.clone();
         let (sender, receiver) = wd_tools::channel::Channel::new(SESSION_STREAM_CHANEL_COUNT);
 
         let event = Event::SessionCallStream(info, input, sender);
@@ -111,7 +112,8 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
             .generate_plan(self.env.clone(), event)
             .await?;
         self.plan_id = plan.id().to_string();
-        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan).set_args(plan);
         self.env.spawn(vec![task]).await?;
         let stream: Box<dyn Stream<Item = Message> + Send + Sync> =
             ChannelReceiverImplStream::new(receiver).to_box();
@@ -129,7 +131,8 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
             .generate_plan(self.env.clone(), event)
             .await?;
         self.plan_id = plan.id().to_string();
-        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let mut task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan).set_args(plan);
         let mut result = self.env.execute(task).await?;
         if result.is_error() {
             return Err(anyhow::anyhow!(
@@ -157,7 +160,8 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
             .generate_plan(self.env.clone(), event)
             .await?;
         self.plan_id = plan.id().to_string();
-        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan);
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let task = Task::new(plan.id(), self.plan_builder.id(), TaskType::Plan).set_args(plan);
         self.env.spawn(vec![task]).await?;
         let stream: Box<dyn Stream<Item = Message> + Send + Sync> =
             ChannelReceiverImplStream::new(recv).to_box();
@@ -165,7 +169,11 @@ impl<P: Planning + Send + 'static> Session for SessionPlanLayer<P> {
     }
 
     async fn abort(&mut self) -> anyhow::Result<()> {
-        let args = EndPlanTaskArgs::new(self.plan_id.clone(), self.plan_builder.id(),"session abort".to_string());
+        let args = EndPlanTaskArgs::new(
+            self.plan_id.clone(),
+            self.plan_builder.id(),
+            "session abort".to_string(),
+        );
         let task = Task::new(
             self.plan_id.as_str(),
             self.plan_builder.id(),

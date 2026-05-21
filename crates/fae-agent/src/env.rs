@@ -22,7 +22,11 @@ impl EnvEvent {
         if let Self::None = *self { true } else { false }
     }
     pub fn is_task(&self) -> bool {
-        if let Self::TaskResult(_) = *self { true } else { false }
+        if let Self::TaskResult(_) = *self {
+            true
+        } else {
+            false
+        }
     }
 }
 

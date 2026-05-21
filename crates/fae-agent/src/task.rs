@@ -82,7 +82,9 @@ impl Task {
 
 impl Default for Task {
     fn default() -> Self {
-        Self::new("default", "default", TaskType::None)
+        let id = wd_tools::uuid::v4();
+        let aid = wd_tools::uuid::v4();
+        Self::new(id, aid, TaskType::None)
     }
 }
 
@@ -188,7 +190,12 @@ impl TaskResult {
     pub fn success<T: Into<String>, A: Into<String>>(task_id: T, agent_id: A) -> Self {
         Self::new(0, "success", task_id, agent_id)
     }
-    pub fn error<M: Into<String>, T: Into<String>, A: Into<String>>(code: i32, msg: M, task_id: T, agent_id: A) -> Self {
+    pub fn error<M: Into<String>, T: Into<String>, A: Into<String>>(
+        code: i32,
+        msg: M,
+        task_id: T,
+        agent_id: A,
+    ) -> Self {
         Self::new(code, msg, task_id, agent_id)
     }
     pub fn is_error(&self) -> bool {

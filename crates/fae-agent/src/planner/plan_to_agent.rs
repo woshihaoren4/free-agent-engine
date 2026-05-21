@@ -10,6 +10,12 @@ pub struct PlanToAgent<F, P> {
     p: PhantomData<P>,
 }
 
+impl<F, P> PlanToAgent<F, P> {
+    pub fn new(f: Arc<F>) -> Self {
+        Self { f, p: PhantomData }
+    }
+}
+
 #[async_trait::async_trait]
 impl<F, P> Agent for PlanToAgent<F, P>
 where

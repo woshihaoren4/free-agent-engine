@@ -1,4 +1,5 @@
-mod plan_to_agent;
+pub mod plan_to_agent;
+pub use plan_to_agent::*;
 
 use crate::{Env, Event, Task, TaskResult};
 
@@ -42,7 +43,11 @@ pub trait Planning: Sync {
     async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult>;
     /// 强制终止
     async fn abort(&mut self) {
-        wd_log::log_error_ln!("[Planning]::{} aborted, debug info:{}",self.id(),self.debug().await);
+        wd_log::log_error_ln!(
+            "[Planning]::{} aborted, debug info:{}",
+            self.id(),
+            self.debug().await
+        );
     }
 }
 
@@ -101,9 +106,12 @@ macro_rules! define_planning_group {
                 $variant:ident($inner:ty)
             ),* $(,)?
         }
+        $(where $($wh:tt)+)?
     ) => {
         $(#[$meta])*
-        $vis enum $name < $($gen),+ > {
+        $vis enum $name < $($gen),+ >
+        $(where $($wh)+)?
+        {
             $(
                 $(#[$variant_meta])*
                 $variant($inner),
@@ -111,7 +119,9 @@ macro_rules! define_planning_group {
         }
 
         #[async_trait::async_trait]
-        impl < $($gen: Send + Sync + 'static),+ > $crate::planner::Planning for $name < $($gen),+ > {
+        impl < $($gen: Send + Sync + 'static),+ > $crate::planner::Planning for $name < $($gen),+ >
+        $(where $($wh)+)?
+        {
             fn id(&self) -> String {
                 match self {
                     $( Self::$variant(inner) => inner.id(), )*
@@ -139,7 +149,6 @@ macro_rules! define_planning_group {
     };
 }
 
-
 #[derive(Debug)]
 pub struct NonePlan;
 #[async_trait::async_trait]
@@ -155,7 +164,6 @@ impl Planning for NonePlan {
     }
 }
 
-
 #[derive(Debug)]
 pub struct EndPlanTaskArgs {
     pub plan_id: String,
@@ -164,6 +172,10 @@ pub struct EndPlanTaskArgs {
 }
 impl EndPlanTaskArgs {
     pub fn new(plan_id: String, agent_id: String, reason: String) -> Self {
-        Self { plan_id, agent_id, reason }
+        Self {
+            plan_id,
+            agent_id,
+            reason,
+        }
     }
 }
