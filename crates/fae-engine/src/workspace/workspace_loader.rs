@@ -1,6 +1,6 @@
 use crate::{AgentLoader, RecallAgentRef};
-use fae_agent::{AgentConfigFile, FileChatMemory, FileSessionMetaManager};
-use fae_agent::{AgentRef, PlanToAgent, SingleAgent, SingleAgentSessionConfig};
+use fae_agent::{AgentConfigFile, AgentEventHandleImpl, FileChatMemory, FileSessionMetaManager};
+use fae_agent::{AgentRef, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ impl AgentLoader for SingleAgentLoaderFromFile {
             Arc::new(session_config),
             Arc::new(agent_config),
         );
-        let agent = PlanToAgent::new(Arc::new(single_agent));
+        let agent = AgentEventHandleImpl::new(Arc::new(single_agent));
         let agent_ref = AgentRef::from(agent);
 
         let mut cache = self.agents.write().await;

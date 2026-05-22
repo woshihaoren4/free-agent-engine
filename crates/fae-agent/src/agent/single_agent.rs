@@ -1,8 +1,8 @@
 use crate::memory::Memory;
-use crate::planner::{AgentPlanningExt, Planning};
+use crate::planner::{AgentEventHandle, Planning};
 use crate::{
-    AgentConfig, Command, Env, EnvEvent, Event, MemoryItem, MemoryRole, MemoryRuler, Message,
-    NonePlan, PlanningResult, SenderMessageStream, SessionConfig, SessionInfo, Task, TaskResult,
+    AgentConfig, Env, MemoryItem, MemoryRole, MemoryRuler,
+    NonePlan, PlanningResult, SessionConfig, Task, TaskResult,
     TaskType, define_planning_group,
 };
 use async_openai::types::{
@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
+use crate::define::{Msg, SenderMessageStream};
+use crate::SessionMD;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SingleAgentSessionConfig {
@@ -70,9 +72,8 @@ impl<M> SingleAgent<M> {
 pub struct SingleAgentPlanSessionCallStream<M> {
     id: String,
     env: Env,
-    session_info: SessionInfo,
-    message_id: String,
-    input: M,
+    session_id: String,
+    input: Msg<M>,
     output: SenderMessageStream<M>,
     memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
@@ -87,17 +88,15 @@ where
         env: Env,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
         memory: Arc<dyn Memory<M> + Send + 'static>,
-        session_info: SessionInfo,
-        message_id: String,
-        input: M,
+        session_id: String,
+        input: Msg<M>,
         output: SenderMessageStream<M>,
     ) -> Self {
         let id = wd_tools::uuid::v4();
         Self {
             env,
             id,
-            session_info,
-            message_id,
+            session_id,
             input,
             output,
             memory,
@@ -135,7 +134,7 @@ where
         //添加历史消息,最大10条
         for item in self
             .memory
-            .load(self.session_info.session_id.as_str(), 0, 10)
+            .load(self.session_id.as_str(), 0, 10)
             .await?
         {
             let content = item.content.as_content();
@@ -161,7 +160,7 @@ where
         // 添加用户query
         messages.push(
             ChatCompletionRequestUserMessageArgs::default()
-                .content(self.input.as_content())
+                .content(self.input.get_content().as_content())
                 .build()
                 .expect("build message failed!")
                 .into(),
@@ -211,7 +210,7 @@ where
                     if let Some(content) = &choice.delta.content {
                         full_response.push_str(content);
                         let msg = M::from_content(content.clone());
-                        self.output.send(&self.message_id, msg).await?;
+                        self.output.send(Msg::new(msg)).await?;
                     }
                 }
             }
@@ -226,18 +225,18 @@ where
             .as_secs();
         self.memory
             .push(MemoryItem {
-                id: self.message_id.clone(),
-                session_id: self.session_info.session_id.clone(),
+                id: self.input.get_id().to_string(),
+                session_id: self.session_id.clone(),
                 timestamp,
                 role: MemoryRole::User,
-                content: self.input.clone(),
+                content: self.input.get_content().clone(),
             })
             .await?;
 
         self.memory
             .push(MemoryItem {
                 id: wd_tools::uuid::v4(),
-                session_id: self.session_info.session_id.clone(),
+                session_id: self.session_id.clone(),
                 timestamp,
                 role: MemoryRole::Assistant,
                 content: M::from_content(full_response),
@@ -261,43 +260,19 @@ define_planning_group!(
 
 #[async_trait::async_trait]
 impl<M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>
-    AgentPlanningExt<SingleAgentPlan<M>> for SingleAgent<M>
+    AgentEventHandle<SingleAgentSessionConfig, M, M, SingleAgentPlan<M>> for SingleAgent<M>
 {
     fn id(&self) -> String {
         self.agent_id.clone()
     }
 
-    async fn generate_plan(&self, env: Env, event: Event) -> anyhow::Result<SingleAgentPlan<M>> {
-        let (info, mut msg, output) = match event {
-            Event::None => return Ok(SingleAgentPlan::None(NonePlan)),
-            Event::SessionCall(_, _) => {
-                return anyhow::anyhow!("[SingleAgent] SessionCall not supported").err();
-            }
-            Event::SessionCallStream(info, msg, output) => (info, msg, output),
-            Event::SessionStreamCall(_, _) => {
-                return anyhow::anyhow!("[SingleAgent] SessionStreamCall not supported").err();
-            }
-            Event::SessionStream(_, _, _) => {
-                return anyhow::anyhow!("[SingleAgent] SessionStream not supported").err();
-            }
-            Event::EnvEvent(_) => {
-                return anyhow::anyhow!("[SingleAgent] EnvEvent not supported").err();
-            }
-            Event::TaskOver(_) => {
-                return anyhow::anyhow!("[SingleAgent] TaskOver not supported").err();
-            }
-            Event::Command(cmd) => {
-                if cmd == Command::SystemExit {
-                    self.exit().await;
-                }
-                return Ok(SingleAgentPlan::None(NonePlan));
-            }
-        };
-        let input: M = if let Some(s) = msg.try_into_inner() {
-            s
-        } else {
-            return anyhow::anyhow!("[SingleAgent] SessionCallStream input unknown").err();
-        };
+    async fn on_session_call_stream(
+        &self,
+        env: Env,
+        info: &mut SessionMD<SingleAgentSessionConfig>,
+        input: Msg<M>,
+        output: SenderMessageStream<M>,
+    ) -> anyhow::Result<SingleAgentPlan<M>> {
         // session 没有则创建一个
         if self
             .session_config
@@ -308,18 +283,17 @@ impl<M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             self.session_config
                 .create(SingleAgentSessionConfig {
                     id: info.session_id.clone(),
-                    name: input.as_content(),
+                    name: input.get_content().as_content(),
                 })
                 .await?;
         }
+
         let memory = self.memory.clone();
-        let output = Event::sender_message_to_stream_t(output);
         let plan = SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::new(
             env,
             self.agent_config.clone(),
             memory,
-            info,
-            msg.id,
+            info.session_id.clone(),
             input,
             output,
         ));

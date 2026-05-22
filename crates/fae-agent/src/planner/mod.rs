@@ -1,21 +1,16 @@
-pub mod plan_to_agent;
-pub use plan_to_agent::*;
+mod agent_event_handle;
 
-use crate::{Env, Event, Task, TaskResult};
+pub use agent_event_handle::*;
+
+use crate::{Env, Task, TaskResult};
+use crate::define::Event;
 
 /// 构建规划
 #[async_trait::async_trait]
 pub trait AgentPlanningExt<T: Planning + Send + 'static>: Sync {
     fn id(&self) -> String;
-    async fn generate_plan(&self, env: Env, event: Event) -> anyhow::Result<T>;
+    async fn to_plan(&self, env: Env, event: Event) -> anyhow::Result<T>;
     async fn exit(&self);
-}
-
-#[derive(Debug, Default)]
-pub enum PlanningItem {
-    #[default]
-    Start,
-    Result(TaskResult),
 }
 
 #[derive(Debug)]
@@ -38,6 +33,7 @@ pub trait Planning: Sync {
     async fn debug(&self) -> String {
         format!("[{}] running...", self.id())
     }
+    /// 初始化规划
     async fn init(&mut self) -> anyhow::Result<PlanningResult>;
     /// 下一步规划
     async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult>;

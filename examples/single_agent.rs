@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, Message, SessionInfo};
+use fae_agent::{AgentConfigData, Message, SessionMetadata, SingleAgentSessionConfig};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -26,10 +26,11 @@ async fn main() -> anyhow::Result<()> {
     let mut session = ws
         .session(
             "main_agent",
-            SessionInfo {
-                session_id: "test_session_2".to_string(),
-                ..Default::default()
-            },
+            SessionMetadata::default()
+                .set_session_id("test_session_id_123")
+                .set_data(
+                SingleAgentSessionConfig::default()
+            ),
         )
         .await?;
 

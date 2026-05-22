@@ -10,6 +10,8 @@ pub enum EnvEvent {
     None,
     // 事件执行结果，
     TaskResult(TaskResult),
+    // 心跳
+    Heartbeat(String),
     // /// 键值对事件，携带键和值
     // KV(String, Value),
     // /// 自定义事件，携带自定义信息

@@ -1,16 +1,11 @@
 pub mod single_agent;
 pub use single_agent::*;
 
-use crate::session::{Message, Session};
-use crate::task::Task;
-use crate::{Env, EnvEvent, Error, TaskResult};
+use crate::session::{Session};
+use crate::{Env, EnvEvent, TaskResult};
 use std::any::Any;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio_stream::Stream;
-use wd_tools::channel::{ChannelResult, Sender};
 
 /// 命令类型，表示系统和用户命令
 #[derive(Default, Debug)]
@@ -18,115 +13,90 @@ pub enum Command {
     /// 无命令
     #[default]
     None,
-    /// 系统退出命令
+    /// 系统退出命令, /exit
     SystemExit,
-    /// 用户自定义命令
-    UserCustomCommand(String),
-    /// 任意类型命令，用于扩展
-    Any(Box<dyn Any + Send + Sync + 'static>),
+    /// 自定义命令
+    CustomCommand(String),
 }
 impl PartialEq for Command {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Command::None, Command::None) => true,
             (Command::SystemExit, Command::SystemExit) => true,
-            (Command::UserCustomCommand(a), Command::UserCustomCommand(b)) => a == b,
-            (Command::Any(_), Command::Any(_)) => false, // 无法比较Any类型
+            (Command::CustomCommand(a), Command::CustomCommand(b)) => a == b,
             _ => false,
         }
     }
 }
 
-/// 事件类型，表示系统中发生的各种事件
-#[derive(Default)]
-pub enum Event {
-    /// 无事件
-    #[default]
-    None,
-    /// session事件
-    SessionCall(SessionInfo, Message),
-    SessionCallStream(SessionInfo, Message, Sender<Message>),
-    SessionStreamCall(
-        SessionInfo,
-        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
-    ),
-    SessionStream(
-        SessionInfo,
-        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
-        Sender<Message>,
-    ),
-    /// 环境事件
-    EnvEvent(EnvEvent),
-    /// 任务完成事件
-    TaskOver(TaskResult),
-    /// 命令
-    Command(Command),
-}
+
 
 #[derive(Debug)]
-pub struct SenderMessageStream<T> {
-    sender: Sender<Message>,
-    inner: PhantomData<T>,
-}
-
-impl<T: Any + Send + Sync + 'static> SenderMessageStream<T> {
-    pub async fn send(&self, id: &str, message: T) -> anyhow::Result<()> {
-        if let Err(e) = self
-            .sender
-            .send(Message::new(id).set_content(message))
-            .await
-        {
-            return Err(anyhow::anyhow!(
-                "[SenderMessageStream] send message error: {:?}",
-                e
-            ));
-        }
-        Ok(())
-    }
-    pub fn close(&self) {
-        self.sender.close();
-    }
-}
-impl Event {
-    pub fn sender_message_to_stream_t<M>(sender: Sender<Message>) -> SenderMessageStream<M> {
-        SenderMessageStream {
-            sender,
-            inner: PhantomData::<M>::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct SessionMetaUser {
     pub user_id: String,
 }
 
 /// 会话元数据，用于传递会话相关信息
-#[derive(Debug, Clone)]
-pub struct SessionInfo {
+#[derive(Debug)]
+pub struct SessionMetadata {
     /// 会话ID
     pub session_id: String,
-    /// 使用者信息
-    pub user: SessionMetaUser,
     /// 任意类型元数据，用于扩展
-    pub extend_any: Option<Arc<dyn Any + Send + Sync + 'static>>,
+    pub data: Box<dyn Any + Send + Sync + 'static>,
 }
 
-impl Default for SessionInfo {
+pub struct SessionMD<T>{
+    /// 会话ID
+    pub session_id: String,
+    /// 会话数据
+    pub data: T,
+}
+
+impl Default for SessionMetadata {
     fn default() -> Self {
         Self {
-            session_id: String::new(),
-            user: SessionMetaUser {
-                user_id: String::new(),
-            },
-            extend_any: None,
+            session_id: wd_tools::uuid::v4(),
+            data: Box::new(()),
         }
     }
 }
 
-impl SessionInfo {
+impl SessionMetadata {
+    pub fn set_session_id<S:Into<String>>(mut self, session_id: S)->Self {
+        self.session_id = session_id.into();self
+    }
     pub fn get_session_id(&self) -> &str {
         self.session_id.as_str()
+    }
+    pub fn set_data<T:Any+Send+Sync+'static>(mut self, data: T)->Self {
+        self.data = Box::new(data);
+        self
+    }
+    pub fn try_to_session_md<T:Any>(mut self) -> Result<SessionMD<T>, SessionMetadata> {
+        match self.data.downcast::<T>() {
+            Ok(t) => {
+                Ok(SessionMD {
+                    session_id: self.session_id,
+                    data: *t,
+                })
+            }
+            Err(e) => {
+                self.data = e;
+                Err(self)
+            }
+        }
+    }
+}
+
+impl<T:Any> SessionMD<T> {
+    pub fn get_session_id(&self) -> &str {
+        self.session_id.as_str()
+    }
+    pub fn get_data(&self) -> &T{
+        &self.data
+    }
+    pub fn get_data_mut(&mut self) -> &mut T{
+        &mut self.data
     }
 }
 
@@ -143,7 +113,7 @@ pub trait Agent: Sync {
     async fn on_session(
         &self,
         env: Env,
-        meta: SessionInfo,
+        meta: SessionMetadata,
     ) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
 
     /// 处理命令

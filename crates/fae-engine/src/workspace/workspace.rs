@@ -1,5 +1,5 @@
 use crate::AgentLoader;
-use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionInfo};
+use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionMetadata};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -106,7 +106,7 @@ impl Workspace {
     pub fn get_env(&self) -> Env {
         self.env.clone()
     }
-    pub async fn session<T: Into<SessionInfo>>(
+    pub async fn session<T: Into<SessionMetadata>>(
         &self,
         agent: &str,
         meta: T,
