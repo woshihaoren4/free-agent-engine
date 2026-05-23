@@ -184,7 +184,7 @@ where
             //持续输出
             while let Some(chunk) = s.next().await {
                 let new_msg = M::stream_append(&mut records,chunk?);
-                self.output.send(Msg::new(new_msg.clone())).await?;
+                self.output.send(Msg::new(new_msg)).await?;
             }
             self.output.close();
         } else {

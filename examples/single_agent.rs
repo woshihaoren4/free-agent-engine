@@ -57,8 +57,14 @@ async fn main() -> anyhow::Result<()> {
 
         print!("Agent: ");
         io::stdout().flush()?;
+        let mut title = String::new();
         while let Some(mut resp) = stream.next().await {
             if let Some(record) = resp.try_into_inner::<Record>() {
+                let t = record.title();
+                if title != t {
+                    title = t;
+                    println!("\n---> {} <---", title);
+                }
                 print!("{}", record.content() );
                 io::stdout().flush()?;
             }

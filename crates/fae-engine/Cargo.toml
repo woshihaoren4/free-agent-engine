@@ -17,11 +17,10 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
-async-openai = {version = "0.40.2",features = ["full"], optional = true}
+async-openai = {path = "../async-openai", version = "0.40.2",features = ["full"]}
 fae-agent = {path = "../fae-agent", version = "0.1.0"}
 
 
 [features]
-default = ["openaiapi"]
-openaiapi = ["async-openai"]
+#openaiapi = ["async-openai"]
 

@@ -77,6 +77,9 @@ impl Record {
     pub fn set_model_output(&mut self, output: String) {
         self.item = RecordItem::ModelOutput(output);
     }
+    pub fn set_model_thought(&mut self, output: String) {
+        self.item = RecordItem::ModelThought(output);
+    }
 }
 impl From<RecordItem> for Record {
     fn from(item: RecordItem) -> Self {
@@ -165,7 +168,6 @@ impl OpenAIMemoryEntry for Record {
     where
         Self: Sized
     {
-        println!("---> {:?}",chunk);
         let mut exists = false;
         let mut new_msg = Self::default();
         for i in chunk.choices {
@@ -183,6 +185,22 @@ impl OpenAIMemoryEntry for Record {
                 //不存在记录则新增
                 if !exists {
                     list.push(Record::from(RecordItem::ModelOutput(txt)));
+                }
+            }
+            if let Some(txt) = i.delta.reasoning_content{
+                new_msg.set_model_thought(txt.clone());
+                exists = false;
+                //存在记录则合并
+                for i in list.iter_mut() {
+                    if let RecordItem::ModelThought(t) = &mut i.item {
+                        t.push_str(txt.as_str());
+                        exists = true;
+                        break
+                    }
+                }
+                //不存在记录则新增
+                if !exists {
+                    list.push(Record::from(RecordItem::ModelThought(txt)));
                 }
             }
             if let Some(t) = i.delta.tool_calls {
@@ -252,9 +270,9 @@ impl OpenAIMemoryEntry for Record {
                 ChatCompletionRequestUserMessageContent::Array(_) => "",
             },
             RecordItem::ModelThought(t) => t.as_str(),
-            RecordItem::ModelOutput(_) => "",
-            RecordItem::ToolCall(_) => "",
-            RecordItem::ToolOutput(m) => m.output.as_str(),
+            RecordItem::ModelOutput(t) => t.as_str(),
+            RecordItem::ToolCall(tc) => tc.arguments.as_str(),
+            RecordItem::ToolOutput(to) => to.output.as_str(),
             RecordItem::Custom(_,ctn) => ctn.as_str(),
             RecordItem::Wait => "",
         }
