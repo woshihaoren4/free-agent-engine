@@ -1,6 +1,6 @@
 use crate::{AgentLoader, RecallAgentRef};
 use fae_agent::{AgentConfigFile, AgentEventHandleImpl, FileChatMemory, FileSessionMetaManager};
-use fae_agent::{AgentRef, SingleAgent, SingleAgentSessionConfig};
+use fae_agent::{AgentRef, Record, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ impl AgentLoader for SingleAgentLoaderFromFile {
         let config_file = agent_dir.join("config.json");
 
         // 1. Session memory
-        let memory = FileChatMemory::<String>::new(&session_dir).await?;
+        let memory = FileChatMemory::<Record>::new(&session_dir).await?;
 
         // 2. Session config
         let session_config = FileSessionMetaManager::<SingleAgentSessionConfig>::new(
@@ -57,7 +57,7 @@ impl AgentLoader for SingleAgentLoaderFromFile {
         let agent_config = AgentConfigFile::load_or_default(&config_file).await?;
 
         // 4. Create the agent
-        let single_agent = SingleAgent::<String>::new(
+        let single_agent = SingleAgent::<Record>::new(
             agent_id,
             Arc::new(memory),
             Arc::new(session_config),

@@ -1,11 +1,7 @@
 use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{
-    AgentConfig, Env, MemoryItem, MemoryRole, MemoryRuler,
-    NonePlan, PlanningResult, SessionConfig, Task, TaskResult,
-    TaskType, define_planning_group,
-};
-use async_openai::types::{
+use crate::{AgentConfig, Env, NonePlan, PlanningResult, SessionConfig, Task, TaskResult, TaskType, define_planning_group, OpenAIMemoryEntry, OpenAIChatMsg, OpenAIResponse};
+use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream,
     CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
@@ -73,23 +69,23 @@ pub struct SingleAgentPlanSessionCallStream<M> {
     id: String,
     env: Env,
     session_id: String,
-    input: Msg<M>,
+    input: M,
     output: SenderMessageStream<M>,
     memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
-    doing: Vec<String>,
+    doing: Vec<M>,
 }
 
 impl<M> SingleAgentPlanSessionCallStream<M>
 where
-    M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     pub fn new(
         env: Env,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
         memory: Arc<dyn Memory<M> + Send + 'static>,
         session_id: String,
-        input: Msg<M>,
+        input: M,
         output: SenderMessageStream<M>,
     ) -> Self {
         let id = wd_tools::uuid::v4();
@@ -103,6 +99,12 @@ where
             agent_config,
             doing: Vec::new(),
         }
+    }
+    fn get_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
     pub async fn build_openai_api_request(&self) -> anyhow::Result<CreateChatCompletionRequest> {
         let model = self.agent_config.model().await?;
@@ -137,44 +139,20 @@ where
             .load(self.session_id.as_str(), 0, 10)
             .await?
         {
-            let content = item.content.as_content();
-            let msg: ChatCompletionRequestMessage = match item.role {
-                MemoryRole::System => {
-                    // ChatCompletionRequestSystemMessageArgs::default().content(content).build()?.into()
-                    continue;
-                }
-                MemoryRole::User => ChatCompletionRequestUserMessageArgs::default()
-                    .content(content)
-                    .build()?
-                    .into(),
-                MemoryRole::Assistant => {
-                    async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
-                        .content(content)
-                        .build()?
-                        .into()
-                }
-                _ => continue,
-            };
-            messages.push(msg);
+            if let Some(msg) = item.to_openai_message() {
+                messages.push(msg);
+            }
         }
         // 添加用户query
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(self.input.get_content().as_content())
-                .build()
-                .expect("build message failed!")
-                .into(),
-        );
+        if let Some(msg) = self.input.clone().to_openai_message() {
+            messages.push(msg);
+        }
         // 添加中间调用的消息
         for item in self.doing.iter() {
-            messages.push(
-                async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
-                    .content(item.as_str())
-                    .build()?
-                    .into(),
-            );
+            if let Some(msg) = item.clone().to_openai_message() {
+                messages.push(msg);
+            }
         }
-
         req.messages(messages);
 
         Ok(req.build()?)
@@ -184,7 +162,7 @@ where
 #[async_trait::async_trait]
 impl<M> Planning for SingleAgentPlanSessionCallStream<M>
 where
-    M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     fn id(&self) -> String {
         self.id.clone()
@@ -201,48 +179,28 @@ where
     }
 
     async fn next(&mut self, mut event: TaskResult) -> anyhow::Result<PlanningResult> {
-        let mut full_response = String::new();
+        let mut records = Vec::new();
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
             while let Some(chunk) = s.next().await {
-                let chunk = chunk?;
-                if let Some(choice) = chunk.choices.first() {
-                    if let Some(content) = &choice.delta.content {
-                        full_response.push_str(content);
-                        let msg = M::from_content(content.clone());
-                        self.output.send(Msg::new(msg)).await?;
-                    }
-                }
+                let new_msg = M::stream_append(&mut records,chunk?);
+                self.output.send(Msg::new(new_msg.clone())).await?;
             }
             self.output.close();
         } else {
             return anyhow::anyhow!("[SingleAgent] task result unknown, {:?}", event).err();
         }
+        // 合并记录
+        for msg in records{
+            self.memory.push(msg).await?;
+        }
         // 输入和输出内容添加到memory
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
         self.memory
-            .push(MemoryItem {
-                id: self.input.get_id().to_string(),
-                session_id: self.session_id.clone(),
-                timestamp,
-                role: MemoryRole::User,
-                content: self.input.get_content().clone(),
-            })
+            .push(self.input.clone())
             .await?;
-
-        self.memory
-            .push(MemoryItem {
-                id: wd_tools::uuid::v4(),
-                session_id: self.session_id.clone(),
-                timestamp,
-                role: MemoryRole::Assistant,
-                content: M::from_content(full_response),
-            })
-            .await?;
-
+        for msg in std::mem::take(&mut self.doing) {
+            self.memory.push(msg).await?;
+        }
         // self.memory.flush().await?;
         return Ok(PlanningResult::End(None));
     }
@@ -255,11 +213,11 @@ define_planning_group!(
         None(NonePlan),
         SessionCallStream(SingleAgentPlanSessionCallStream<M>),
     }
-    where M:MemoryRuler + Serialize + DeserializeOwned + Clone+Send + Sync + 'static
+    where M:OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone+Send + Sync + 'static
 );
 
 #[async_trait::async_trait]
-impl<M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>
+impl<M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>
     AgentEventHandle<SingleAgentSessionConfig, M, M, SingleAgentPlan<M>> for SingleAgent<M>
 {
     fn id(&self) -> String {
@@ -283,7 +241,7 @@ impl<M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             self.session_config
                 .create(SingleAgentSessionConfig {
                     id: info.session_id.clone(),
-                    name: input.get_content().as_content(),
+                    name: input.get_content().content().to_string(),
                 })
                 .await?;
         }
@@ -294,7 +252,7 @@ impl<M: MemoryRuler + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             self.agent_config.clone(),
             memory,
             info.session_id.clone(),
-            input,
+            input.content,
             output,
         ));
         Ok(plan)

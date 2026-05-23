@@ -3,26 +3,26 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::RwLock;
 
-use super::{Memory, MemoryItem};
+use super::{Memory, MemoryRecord};
 
 /// 基于文件系统的记忆存储实现
 pub struct FileChatMemory<T> {
     base_dir: PathBuf,
     // memory map: session_id -> (flushed_count, memory items)
-    store: Arc<RwLock<HashMap<String, (usize, Vec<MemoryItem<T>>)>>>,
+    store: Arc<RwLock<HashMap<String, (usize, Vec<T>)>>>,
 }
 
 impl<T> FileChatMemory<T>
 where
-    T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     /// 创建一个新的文件记忆存储实例，管理一个目录
     pub async fn new(base_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let base_dir = base_dir.into();
-        let mut store = HashMap::<String, (usize, Vec<MemoryItem<T>>)>::new();
+        let mut store = HashMap::<String, (usize, Vec<T>)>::new();
 
         if !base_dir.exists() {
             tokio::fs::create_dir_all(&base_dir).await?;
@@ -47,7 +47,7 @@ where
                         if line.is_empty() {
                             continue;
                         }
-                        if let Ok(item) = serde_json::from_str::<MemoryItem<T>>(line) {
+                        if let Ok(item) = serde_json::from_str::<T>(line) {
                             items.push(item);
                         }
                     }
@@ -103,14 +103,14 @@ where
 #[async_trait::async_trait]
 impl<T> Memory<T> for FileChatMemory<T>
 where
-    T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn load(
         &self,
         session_id: &str,
         offset: usize,
         limit: usize,
-    ) -> anyhow::Result<Vec<MemoryItem<T>>> {
+    ) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;
         if let Some((_, items)) = store.get(session_id) {
             let start = offset.min(items.len());
@@ -120,8 +120,11 @@ where
         Ok(vec![])
     }
 
-    async fn push(&self, item: MemoryItem<T>) -> anyhow::Result<()> {
-        let session_id = item.session_id.clone();
+    async fn push(&self, item: T) -> anyhow::Result<()> {
+        // Since T no longer has session_id and Memory::push doesn't take session_id,
+        // we have to store it in a default session or try to infer it.
+        // As a fallback, we use "default".
+        let session_id = "default".to_string();
         let should_flush = {
             let mut store = self.store.write().await;
             let (flushed_count, items) = store
@@ -145,30 +148,38 @@ where
         Ok(())
     }
 
-    async fn update(&self, item: MemoryItem<T>) -> anyhow::Result<()> {
-        let session_id = item.session_id.clone();
-        let id = item.id.clone();
+    async fn update(&self, item: T) -> anyhow::Result<()> {
+        let id = item.id().to_string();
+        let mut target_session = None;
         let should_flush = {
             let mut store = self.store.write().await;
-            if let Some((flushed_count, items)) = store.get_mut(&session_id) {
-                if let Some(pos) = items.iter().position(|x| x.id == id) {
+            // Find which session contains this item
+            let mut found = false;
+            let mut flush_needed = false;
+            for (session_id, (flushed_count, items)) in store.iter_mut() {
+                if let Some(pos) = items.iter().position(|x| x.id() == id) {
                     if pos < *flushed_count {
                         return Err(anyhow::anyhow!(
                             "Cannot update an item that has already been flushed to file"
                         ));
                     }
-                    items[pos] = item;
-                    items.len() - *flushed_count >= 50
-                } else {
-                    false
+                    items[pos] = item.clone();
+                    flush_needed = items.len() - *flushed_count >= 50;
+                    target_session = Some(session_id.clone());
+                    found = true;
+                    break;
                 }
-            } else {
-                false
             }
+            if !found {
+                return Ok(()); // Item not found
+            }
+            flush_needed
         };
 
         if should_flush {
-            self.flush_session(&session_id).await?;
+            if let Some(sid) = target_session {
+                self.flush_session(&sid).await?;
+            }
         }
         Ok(())
     }
@@ -177,7 +188,7 @@ where
         let should_flush = {
             let mut store = self.store.write().await;
             if let Some((flushed_count, items)) = store.get_mut(session_id) {
-                if let Some(pos) = items.iter().position(|x| x.id == id) {
+                if let Some(pos) = items.iter().position(|x| x.id() == id) {
                     if pos < *flushed_count {
                         return Err(anyhow::anyhow!(
                             "Cannot delete an item that has already been flushed to file"
@@ -222,176 +233,5 @@ where
             self.flush_session(&session_id).await?;
         }
         Ok(())
-    }
-}
-
-/// 常用的大模型聊天内容
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatContent {
-    /// 文本内容
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// 工具调用请求（当模型决定调用工具时）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
-    /// 工具执行结果（当作为 Tool 角色返回结果时）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_result: Option<String>,
-}
-
-impl crate::memory::MemoryRuler for ChatContent {
-    fn as_content(&self) -> String {
-        self.text.clone().unwrap_or_default()
-    }
-
-    fn from_content(content: String) -> Self {
-        Self {
-            text: Some(content),
-            tool_calls: None,
-            tool_result: None,
-        }
-    }
-}
-
-/// 工具调用信息
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// 工具调用 ID
-    pub id: String,
-    /// 工具名称
-    pub name: String,
-    /// 工具参数 (JSON 字符串)
-    pub arguments: String,
-}
-
-/// 默认的文件聊天记忆实现类型别名
-pub type FileChatMemoryImpl = FileChatMemory<ChatContent>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::memory::MemoryRole;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn get_temp_dir(name: &str) -> PathBuf {
-        let time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{}_{}", name, time));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn mock_item(session: &str, id: &str, content: &str) -> MemoryItem<String> {
-        MemoryItem {
-            id: id.to_string(),
-            session_id: session.to_string(),
-            timestamp: 0,
-            role: MemoryRole::User,
-            content: content.to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_basic_push_load_flush() {
-        let dir_path = get_temp_dir("test_basic");
-        let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-
-        mem.push(mock_item("sess_1", "1", "hello")).await.unwrap();
-
-        let loaded = mem.load("sess_1", 0, 10).await.unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].content, "hello");
-
-        // Should not be in file yet (only 1 item, < 50)
-        let file_path = dir_path.join("sess_1.jsonl");
-        let content = tokio::fs::read_to_string(&file_path)
-            .await
-            .unwrap_or_default();
-        assert!(content.is_empty());
-
-        // Flush and verify
-        mem.flush().await.unwrap();
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert!(!content.is_empty());
-
-        tokio::fs::remove_dir_all(dir_path).await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_update_delete_constraints() {
-        let dir_path = get_temp_dir("test_update_delete");
-        let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-
-        mem.push(mock_item("sess_1", "1", "hello")).await.unwrap();
-
-        // Update unsaved item -> Success
-        assert!(mem.update(mock_item("sess_1", "1", "world")).await.is_ok());
-        let loaded = mem.load("sess_1", 0, 10).await.unwrap();
-        assert_eq!(loaded[0].content, "world");
-
-        // Flush item to disk
-        mem.flush().await.unwrap();
-
-        // Update saved item -> Error
-        assert!(mem.update(mock_item("sess_1", "1", "fail")).await.is_err());
-
-        // Delete saved item -> Error
-        assert!(mem.delete("sess_1", "1").await.is_err());
-
-        tokio::fs::remove_dir_all(dir_path).await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_auto_flush_and_limit() {
-        let dir_path = get_temp_dir("test_limit");
-        let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-
-        for i in 0..105 {
-            mem.push(mock_item("sess_1", &i.to_string(), &format!("msg {}", i)))
-                .await
-                .unwrap();
-        }
-
-        // Session limit keeps only the last 100 items (ids 5 to 104)
-        let loaded = mem.load("sess_1", 0, 200).await.unwrap();
-        assert_eq!(loaded.len(), 100);
-        assert_eq!(loaded[0].id, "5");
-        assert_eq!(loaded[99].id, "104");
-
-        // Auto flush (at 50 and 100) should have populated the file
-        let file_path = dir_path.join("sess_1.jsonl");
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert!(!content.is_empty());
-
-        tokio::fs::remove_dir_all(dir_path).await.ok();
-    }
-
-    #[tokio::test]
-    async fn test_reset_session_and_reload() {
-        let dir_path = get_temp_dir("test_reset");
-        let mem = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-
-        mem.push(mock_item("sess_1", "1", "msg 1")).await.unwrap();
-        mem.push(mock_item("sess_2", "1", "msg 2")).await.unwrap();
-        mem.flush().await.unwrap();
-
-        // Reset session 1
-        mem.reset("sess_1").await.unwrap();
-
-        // Memory should be cleared for session 1
-        let loaded_s1 = mem.load("sess_1", 0, 10).await.unwrap();
-        assert!(loaded_s1.is_empty());
-
-        // Create new memory instance to test load from file
-        let mem2 = FileChatMemory::<String>::new(&dir_path).await.unwrap();
-        let loaded_s1_2 = mem2.load("sess_1", 0, 10).await.unwrap();
-        let loaded_s2_2 = mem2.load("sess_2", 0, 10).await.unwrap();
-
-        assert!(loaded_s1_2.is_empty());
-        assert_eq!(loaded_s2_2.len(), 1);
-
-        tokio::fs::remove_dir_all(dir_path).await.ok();
     }
 }

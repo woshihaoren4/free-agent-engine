@@ -1,6 +1,6 @@
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
-use async_openai::types::{
+use async_openai::types::chat::{
     ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
 use fae_agent::{EXECUTOR_OPENAI_API_CHANNEL, Task, TaskExecutor, TaskResult};
@@ -127,7 +127,7 @@ impl Default for ModelOpenAIApiExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::types::{
+    use async_openai::types::chat::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     };

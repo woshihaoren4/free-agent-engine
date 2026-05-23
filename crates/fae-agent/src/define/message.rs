@@ -108,6 +108,12 @@ impl<T> Msg<T> {
     pub fn set_content(&mut self, content: T) {
         self.content = content;
     }
+    pub fn set_id(&mut self, id: String) {
+        self.id = id;
+    }
+    pub fn set_part_id(&mut self, part_id: String) {
+        self.part_id = part_id;
+    }
 }
 
 // ------------------- Message 的流式输出 -------------------

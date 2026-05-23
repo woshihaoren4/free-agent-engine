@@ -26,11 +26,3 @@ pub enum Event {
     /// 命令
     Command(Command),
 }
-
-
-
-impl Event {
-    pub fn sender_message_to_stream_t<M:Send + Sync + 'static>(sender: Sender<Message>) -> SenderMessageStream<M> {
-        SenderMessageStream::<M>::new(sender)
-    }
-}

@@ -2,8 +2,7 @@ pub mod single_agent;
 pub use single_agent::*;
 
 use crate::session::{Session};
-use crate::{Env, EnvEvent, TaskResult};
-use std::any::Any;
+use crate::{Env, EnvEvent, SessionMetadata};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -26,77 +25,6 @@ impl PartialEq for Command {
             (Command::CustomCommand(a), Command::CustomCommand(b)) => a == b,
             _ => false,
         }
-    }
-}
-
-
-
-#[derive(Debug)]
-pub struct SessionMetaUser {
-    pub user_id: String,
-}
-
-/// 会话元数据，用于传递会话相关信息
-#[derive(Debug)]
-pub struct SessionMetadata {
-    /// 会话ID
-    pub session_id: String,
-    /// 任意类型元数据，用于扩展
-    pub data: Box<dyn Any + Send + Sync + 'static>,
-}
-
-pub struct SessionMD<T>{
-    /// 会话ID
-    pub session_id: String,
-    /// 会话数据
-    pub data: T,
-}
-
-impl Default for SessionMetadata {
-    fn default() -> Self {
-        Self {
-            session_id: wd_tools::uuid::v4(),
-            data: Box::new(()),
-        }
-    }
-}
-
-impl SessionMetadata {
-    pub fn set_session_id<S:Into<String>>(mut self, session_id: S)->Self {
-        self.session_id = session_id.into();self
-    }
-    pub fn get_session_id(&self) -> &str {
-        self.session_id.as_str()
-    }
-    pub fn set_data<T:Any+Send+Sync+'static>(mut self, data: T)->Self {
-        self.data = Box::new(data);
-        self
-    }
-    pub fn try_to_session_md<T:Any>(mut self) -> Result<SessionMD<T>, SessionMetadata> {
-        match self.data.downcast::<T>() {
-            Ok(t) => {
-                Ok(SessionMD {
-                    session_id: self.session_id,
-                    data: *t,
-                })
-            }
-            Err(e) => {
-                self.data = e;
-                Err(self)
-            }
-        }
-    }
-}
-
-impl<T:Any> SessionMD<T> {
-    pub fn get_session_id(&self) -> &str {
-        self.session_id.as_str()
-    }
-    pub fn get_data(&self) -> &T{
-        &self.data
-    }
-    pub fn get_data_mut(&mut self) -> &mut T{
-        &mut self.data
     }
 }
 

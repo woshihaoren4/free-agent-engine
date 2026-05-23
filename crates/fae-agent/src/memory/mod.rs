@@ -1,12 +1,12 @@
 mod file_agent_config;
 mod file_chat_memory;
 mod file_session_config;
-mod general_message;
+mod openai_api_memory_entry;
 
 pub use file_agent_config::*;
 pub use file_chat_memory::*;
 pub use file_session_config::*;
-pub use general_message::*;
+pub use openai_api_memory_entry::*;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -14,66 +14,25 @@ use serde::{Deserialize, Serialize};
 pub const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
 
-pub trait MemoryRuler {
-    // 内容
-    fn as_content(&self) -> String;
-    fn from_content(content: String) -> Self;
-}
-
-impl MemoryRuler for String {
-    fn as_content(&self) -> String {
-        self.clone()
-    }
-    fn from_content(content: String) -> Self {
-        content
-    }
-}
-
-#[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MemoryItem<T> {
-    /// 记忆 ID
-    pub id: String,
-    /// 用于关联记忆与具体的会话
-    pub session_id: String,
-    /// 时间戳
-    pub timestamp: u64,
-    /// 角色/类型
-    pub role: MemoryRole,
-    /// 记忆内容
-    pub content: T,
-}
-
-#[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MemoryRole {
-    /// 系统
-    System,
-    /// 用户
-    #[default]
-    User,
-    /// 助手/模型
-    Assistant,
-    /// 工具
-    Tool,
-    /// 自定义
-    Custom(String),
+pub trait MemoryRecord {
+    fn id(&self) -> &str;
 }
 
 #[async_trait::async_trait]
-pub trait Memory<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static>: Sync {
+pub trait Memory<T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>: Sync {
     /// 加载/获取记忆
     async fn load(
         &self,
         session_id: &str,
         offset: usize,
         limit: usize,
-    ) -> anyhow::Result<Vec<MemoryItem<T>>>;
+    ) -> anyhow::Result<Vec<T>>;
 
     /// 追加单条记忆
-    async fn push(&self, item: MemoryItem<T>) -> anyhow::Result<()>;
+    async fn push(&self, item: T) -> anyhow::Result<()>;
 
     /// 更新单条记忆内容
-    async fn update(&self, item: MemoryItem<T>) -> anyhow::Result<()>;
+    async fn update(&self, item:T) -> anyhow::Result<()>;
 
     /// 删除单条记忆
     async fn delete(&self, session_id: &str, id: &str) -> anyhow::Result<()>;

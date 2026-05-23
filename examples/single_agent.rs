@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, Message, SessionMetadata, SingleAgentSessionConfig};
+use fae_agent::{AgentConfigData, Message, OpenAIMemoryEntry, Record, SessionMetadata, SingleAgentSessionConfig};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -51,15 +51,15 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let msg = Message::default().set_content(input.to_string());
+        let msg = Message::default().set_content(Record::from_user_input(input));
         let stream = session.call_stream(msg).await?;
         let mut stream = Pin::from(stream);
 
         print!("Agent: ");
         io::stdout().flush()?;
         while let Some(mut resp) = stream.next().await {
-            if let Some(content) = resp.try_into_inner::<String>() {
-                print!("{}", content);
+            if let Some(record) = resp.try_into_inner::<Record>() {
+                print!("{}", record.content() );
                 io::stdout().flush()?;
             }
         }
