@@ -1,9 +1,15 @@
-use async_openai::types::chat::{ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent, CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall};
+use crate::Message;
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
+    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall,
+};
 use serde::{Deserialize, Serialize};
-use crate::{MemoryRecord};
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub enum OpenAIResponse{
+pub enum OpenAIResponse {
     Response(CreateChatCompletionResponse),
     StreamResponse(CreateChatCompletionStreamResponse),
 }
@@ -13,14 +19,21 @@ pub enum OpenAIChatMsg {
     User(ChatCompletionRequestUserMessage),
     Assistant(OpenAIResponse),
     Tool(RecordItemToolOut),
-    Custom(String,String),
+    Custom(String, String),
 }
 
-pub trait OpenAIMemoryEntry: MemoryRecord{
-    fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self> where Self: Sized;
+pub trait OpenAIMemoryEntry: Message {
+    fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self>
+    where
+        Self: Sized;
     // 合并流式响应
     // 返回 (合并后的记录列表, 新增内容)
-    fn stream_append(list:&mut Vec<Self>,chunk:CreateChatCompletionStreamResponse) -> Option<Self> where Self: Sized;
+    fn stream_append(
+        list: &mut Vec<Self>,
+        chunk: CreateChatCompletionStreamResponse,
+    ) -> Option<Self>
+    where
+        Self: Sized;
     fn title(&self) -> String;
     fn content(&self) -> &str;
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
@@ -28,8 +41,8 @@ pub trait OpenAIMemoryEntry: MemoryRecord{
 
 // ------------------- OpenAIMemoryEntry 的实现 -------------------
 
-#[derive(Debug,Default, Deserialize, Clone, PartialEq, Serialize)]
-pub struct RecordItemToolCall{
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Serialize)]
+pub struct RecordItemToolCall {
     pub index: u32,
     pub tool_call_id: String,
     pub tool_name: String,
@@ -37,7 +50,7 @@ pub struct RecordItemToolCall{
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub struct RecordItemToolOut{
+pub struct RecordItemToolOut {
     pub tool_call_id: String,
     pub tool_name: String,
     pub output: String,
@@ -51,7 +64,7 @@ pub enum RecordItem {
     ModelOutput(String),
     ToolCall(RecordItemToolCall),
     ToolOutput(RecordItemToolOut),
-    Custom(String,String),
+    Custom(String, String),
 }
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct Record {
@@ -59,10 +72,13 @@ pub struct Record {
     pub item: RecordItem,
 }
 impl Record {
-    pub fn from_user_input<S:Into<String>>(query:S)->Self{
-        Self::from(RecordItem::UserInput(ChatCompletionRequestUserMessageArgs::default()
-            .content(query.into())
-            .build().unwrap()))
+    pub fn from_user_input<S: Into<String>>(query: S) -> Self {
+        Self::from(RecordItem::UserInput(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(query.into())
+                .build()
+                .unwrap(),
+        ))
     }
     pub fn is_wait(&self) -> bool {
         matches!(self.item, RecordItem::Wait)
@@ -95,14 +111,13 @@ impl Default for Record {
     }
 }
 
-impl MemoryRecord for Record {
+impl Message for Record {
     fn id(&self) -> &str {
         &self.id
     }
 }
 
 impl OpenAIMemoryEntry for Record {
-
     fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self> {
         let mut msgs = vec![];
         match msg {
@@ -123,29 +138,32 @@ impl OpenAIMemoryEntry for Record {
                             for j in t {
                                 match j {
                                     ChatCompletionMessageToolCalls::Function(f) => {
-                                        msgs.push(Record::from(RecordItem::ToolCall(RecordItemToolCall {
-                                            index: i.index,
-                                            tool_call_id: f.id,
-                                            tool_name: f.function.name,
-                                            arguments: f.function.arguments,
-                                        })));
+                                        msgs.push(Record::from(RecordItem::ToolCall(
+                                            RecordItemToolCall {
+                                                index: i.index,
+                                                tool_call_id: f.id,
+                                                tool_name: f.function.name,
+                                                arguments: f.function.arguments,
+                                            },
+                                        )));
                                     }
                                     ChatCompletionMessageToolCalls::Custom(c) => {
-                                        msgs.push(Record::from(RecordItem::ToolCall(RecordItemToolCall {
-                                            index: i.index,
-                                            tool_call_id: c.id,
-                                            tool_name: c.custom_tool.name,
-                                            arguments: c.custom_tool.input,
-                                        })));
+                                        msgs.push(Record::from(RecordItem::ToolCall(
+                                            RecordItemToolCall {
+                                                index: i.index,
+                                                tool_call_id: c.id,
+                                                tool_name: c.custom_tool.name,
+                                                arguments: c.custom_tool.input,
+                                            },
+                                        )));
                                     }
                                 }
-
                             }
                         }
                     }
                 }
                 OpenAIResponse::StreamResponse(m) => {
-                    Self::stream_append(&mut msgs,m);
+                    Self::stream_append(&mut msgs, m);
                 }
             },
 
@@ -154,22 +172,25 @@ impl OpenAIMemoryEntry for Record {
             }
 
             OpenAIChatMsg::Custom(a, b) => {
-                msgs.push(Record::from(RecordItem::Custom(a,b)));
+                msgs.push(Record::from(RecordItem::Custom(a, b)));
             }
         }
 
         msgs
     }
 
-    fn stream_append(list:&mut Vec<Self>, chunk: CreateChatCompletionStreamResponse) -> Option<Self>
+    fn stream_append(
+        list: &mut Vec<Self>,
+        chunk: CreateChatCompletionStreamResponse,
+    ) -> Option<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
         let mut exists = false;
         let mut new_msg = Self::default();
         for i in chunk.choices {
-            if let Some(txt) = i.delta.reasoning_content{
-                if !txt.is_empty(){
+            if let Some(txt) = i.delta.reasoning_content {
+                if !txt.is_empty() {
                     new_msg.set_model_thought(txt.clone());
                     exists = false;
                     //存在记录则合并
@@ -177,7 +198,7 @@ impl OpenAIMemoryEntry for Record {
                         if let RecordItem::ModelThought(t) = &mut i.item {
                             t.push_str(txt.as_str());
                             exists = true;
-                            break
+                            break;
                         }
                     }
                     //不存在记录则新增
@@ -195,7 +216,7 @@ impl OpenAIMemoryEntry for Record {
                         if let RecordItem::ModelOutput(t) = &mut i.item {
                             t.push_str(txt.as_str());
                             exists = true;
-                            break
+                            break;
                         }
                     }
                     //不存在记录则新增
@@ -224,7 +245,7 @@ impl OpenAIMemoryEntry for Record {
                                         t.arguments.push_str(arguments.as_str());
                                     }
                                 }
-                                break
+                                break;
                             }
                         }
                     }
@@ -251,11 +272,10 @@ impl OpenAIMemoryEntry for Record {
         //重新排序
         if new_msg.is_wait() {
             None
-        }else{
+        } else {
             Some(new_msg)
         }
     }
-
 
     fn title(&self) -> String {
         match &self.item {
@@ -265,7 +285,7 @@ impl OpenAIMemoryEntry for Record {
             RecordItem::ModelOutput(_) => "Assistant".to_string(),
             RecordItem::ToolCall(tc) => format!("ToolCall: {}", tc.tool_name),
             RecordItem::ToolOutput(to) => format!("ToolOutput: {}", to.tool_name),
-            RecordItem::Custom(title,_) => title.to_string(),
+            RecordItem::Custom(title, _) => title.to_string(),
         }
     }
 
@@ -279,7 +299,7 @@ impl OpenAIMemoryEntry for Record {
             RecordItem::ModelOutput(t) => t.as_str(),
             RecordItem::ToolCall(tc) => tc.arguments.as_str(),
             RecordItem::ToolOutput(to) => to.output.as_str(),
-            RecordItem::Custom(_,ctn) => ctn.as_str(),
+            RecordItem::Custom(_, ctn) => ctn.as_str(),
             RecordItem::Wait => "",
         }
     }
@@ -287,38 +307,31 @@ impl OpenAIMemoryEntry for Record {
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage> {
         match self.item {
             RecordItem::UserInput(m) => Some(ChatCompletionRequestMessage::User(m)),
-            RecordItem::ModelOutput(text) => {
-                ChatCompletionRequestAssistantMessageArgs::default()
-                    .content(text)
-                    .build()
-                    .ok()
-                    .map(ChatCompletionRequestMessage::Assistant)
-            }
-            RecordItem::ToolCall(tc) => {
-                ChatCompletionRequestAssistantMessageArgs::default()
-                    .tool_calls(vec![ChatCompletionMessageToolCalls::Function(
-                        ChatCompletionMessageToolCall{
-                            id: tc.tool_call_id,
-                            function: FunctionCall {
-                                name: tc.tool_name,
-                                arguments: tc.arguments,
-                            },
-                        }
-                    )])
-                    .build()
-                    .ok()
-                    .map(ChatCompletionRequestMessage::Assistant)
-            }
-            RecordItem::ToolOutput(to) => {
-                ChatCompletionRequestToolMessageArgs::default()
-                    .tool_call_id(to.tool_call_id)
-                    .content(to.output)
-                    .build()
-                    .ok()
-                    .map(ChatCompletionRequestMessage::Tool)
-            }
+            RecordItem::ModelOutput(text) => ChatCompletionRequestAssistantMessageArgs::default()
+                .content(text)
+                .build()
+                .ok()
+                .map(ChatCompletionRequestMessage::Assistant),
+            RecordItem::ToolCall(tc) => ChatCompletionRequestAssistantMessageArgs::default()
+                .tool_calls(vec![ChatCompletionMessageToolCalls::Function(
+                    ChatCompletionMessageToolCall {
+                        id: tc.tool_call_id,
+                        function: FunctionCall {
+                            name: tc.tool_name,
+                            arguments: tc.arguments,
+                        },
+                    },
+                )])
+                .build()
+                .ok()
+                .map(ChatCompletionRequestMessage::Assistant),
+            RecordItem::ToolOutput(to) => ChatCompletionRequestToolMessageArgs::default()
+                .tool_call_id(to.tool_call_id)
+                .content(to.output)
+                .build()
+                .ok()
+                .map(ChatCompletionRequestMessage::Tool),
             _ => None,
         }
     }
-
 }

@@ -1,7 +1,7 @@
 pub mod single_agent;
 pub use single_agent::*;
 
-use crate::session::{Session};
+use crate::session::Session;
 use crate::{Env, EnvEvent, SessionMetadata};
 use std::ops::Deref;
 use std::sync::Arc;

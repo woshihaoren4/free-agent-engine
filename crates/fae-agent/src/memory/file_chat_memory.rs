@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::Memory;
+use crate::Message;
 use anyhow::Context;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
-
-use super::{Memory, MemoryRecord};
 
 /// 基于文件系统的记忆存储实现
 pub struct FileChatMemory<T> {
@@ -17,7 +17,7 @@ pub struct FileChatMemory<T> {
 
 impl<T> FileChatMemory<T>
 where
-    T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     /// 创建一个新的文件记忆存储实例，管理一个目录
     pub async fn new(base_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
@@ -103,14 +103,9 @@ where
 #[async_trait::async_trait]
 impl<T> Memory<T> for FileChatMemory<T>
 where
-    T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    async fn load(
-        &self,
-        session_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> anyhow::Result<Vec<T>> {
+    async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;
         if let Some((_, items)) = store.get(session_id) {
             let start = offset.min(items.len());

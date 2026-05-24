@@ -1,6 +1,11 @@
+use crate::SessionMD;
+use crate::define::{Msg, SenderMessageStream};
 use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, PlanningResult, SessionConfig, Task, TaskResult, TaskType, define_planning_group, OpenAIMemoryEntry, OpenAIChatMsg, OpenAIResponse, SessionMetadata};
+use crate::{
+    AgentConfig, Env, NonePlan, OpenAIChatMsg, OpenAIMemoryEntry, OpenAIResponse, PlanningResult,
+    SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group,
+};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream,
@@ -11,13 +16,17 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
-use crate::define::{Msg, SenderMessageStream};
-use crate::SessionMD;
 
 #[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SingleAgentSessionConfig {
     pub id: String,
     pub name: String,
+}
+impl SingleAgentSessionConfig {
+    pub fn set_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
 }
 
 impl From<SingleAgentSessionConfig> for SessionMetadata {
@@ -140,11 +149,7 @@ where
                 .into(),
         );
         //添加历史消息,最大10条
-        for item in self
-            .memory
-            .load(self.session_id.as_str(), 0, 10)
-            .await?
-        {
+        for item in self.memory.load(self.session_id.as_str(), 0, 10).await? {
             if let Some(msg) = item.to_openai_message() {
                 messages.push(msg);
             }
@@ -189,8 +194,8 @@ where
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
             while let Some(chunk) = s.next().await {
-                if let Some(msg) = M::stream_append(&mut records,chunk?) {
-                    self.output.send(Msg::new(msg)).await?;
+                if let Some(msg) = M::stream_append(&mut records, chunk?) {
+                    self.output.send(msg).await?;
                 }
             }
             self.output.close();
@@ -206,7 +211,7 @@ where
             self.memory.push(&self.session_id, msg).await?;
         }
         // 合并记录
-        for msg in records{
+        for msg in records {
             self.memory.push(&self.session_id, msg).await?;
         }
         // self.memory.flush().await?;
@@ -236,7 +241,7 @@ impl<M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync +
         &self,
         env: Env,
         info: &mut SessionMD<SingleAgentSessionConfig>,
-        input: Msg<M>,
+        input: M,
         output: SenderMessageStream<M>,
     ) -> anyhow::Result<SingleAgentPlan<M>> {
         // session 没有则创建一个
@@ -249,7 +254,7 @@ impl<M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync +
             self.session_config
                 .create(SingleAgentSessionConfig {
                     id: info.session_id.clone(),
-                    name: input.get_content().content().to_string(),
+                    name: input.content().to_string(),
                 })
                 .await?;
         }
@@ -260,7 +265,7 @@ impl<M: OpenAIMemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync +
             self.agent_config.clone(),
             memory,
             info.session_id.clone(),
-            input.content,
+            input,
             output,
         ));
         Ok(plan)

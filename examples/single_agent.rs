@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, OpenAIMemoryEntry, Record};
+use fae_agent::{AgentConfigData, OpenAIMemoryEntry, Record, SingleAgentSessionConfig};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -20,11 +20,12 @@ async fn main() -> anyhow::Result<()> {
         ws.create_agent("main_agent", prompt, config).await?;
     }
 
-
-
     println!("Creating session...");
     let mut session = ws
-        .session_call_stream::<_, Record, Record>("main_agent", "test_session_id_123")
+        .session_call_stream::<_, Record, Record>(
+            "main_agent",
+            SingleAgentSessionConfig::default().set_id("test_session_id_123"),
+        )
         .await?;
 
     println!("Session started. Type '/exit' to quit.");

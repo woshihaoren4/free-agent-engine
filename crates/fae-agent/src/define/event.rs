@@ -1,7 +1,7 @@
+use crate::define::{Message, SenderMessageStream};
+use crate::{Command, EnvEvent, Msg, SessionMetadata};
 use tokio_stream::Stream;
 use wd_tools::channel::Sender;
-use crate::define::{Message, SenderMessageStream};
-use crate::{Command, EnvEvent, SessionMetadata};
 
 /// 事件类型，表示系统中发生的各种事件
 #[derive(Default)]
@@ -10,16 +10,16 @@ pub enum Event {
     #[default]
     None,
     /// session事件
-    SessionCall(SessionMetadata, Message),
-    SessionCallStream(SessionMetadata, Message, Sender<Message>),
+    SessionCall(SessionMetadata, Msg),
+    SessionCallStream(SessionMetadata, Msg, Sender<Msg>),
     SessionStreamCall(
         SessionMetadata,
-        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
+        Box<dyn Stream<Item = Msg> + Send + Sync + 'static>,
     ),
     SessionStream(
         SessionMetadata,
-        Box<dyn Stream<Item = Message> + Send + Sync + 'static>,
-        Sender<Message>,
+        Box<dyn Stream<Item = Msg> + Send + Sync + 'static>,
+        Sender<Msg>,
     ),
     /// 环境事件
     EnvEvent(EnvEvent),

@@ -8,31 +8,25 @@ pub use file_chat_memory::*;
 pub use file_session_config::*;
 pub use openai_api_memory_entry::*;
 
+use crate::Message;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
 
-pub trait MemoryRecord {
-    fn id(&self) -> &str;
-}
-
 #[async_trait::async_trait]
-pub trait Memory<T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>: Sync {
+pub trait Memory<T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>:
+    Sync
+{
     /// 加载/获取记忆
-    async fn load(
-        &self,
-        session_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> anyhow::Result<Vec<T>>;
+    async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
 
     /// 追加单条记忆
     async fn push(&self, session_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 更新单条记忆内容
-    async fn update(&self, item:T) -> anyhow::Result<()>;
+    async fn update(&self, item: T) -> anyhow::Result<()>;
 
     /// 删除单条记忆
     async fn delete(&self, session_id: &str, id: &str) -> anyhow::Result<()>;
