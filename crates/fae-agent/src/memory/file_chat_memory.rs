@@ -120,15 +120,12 @@ where
         Ok(vec![])
     }
 
-    async fn push(&self, item: T) -> anyhow::Result<()> {
-        // Since T no longer has session_id and Memory::push doesn't take session_id,
-        // we have to store it in a default session or try to infer it.
-        // As a fallback, we use "default".
-        let session_id = "default".to_string();
+    async fn push(&self, session_id: &str, item: T) -> anyhow::Result<()> {
+        let session_id_owned = session_id.to_string();
         let should_flush = {
             let mut store = self.store.write().await;
             let (flushed_count, items) = store
-                .entry(session_id.clone())
+                .entry(session_id_owned.clone())
                 .or_insert_with(|| (0, Vec::new()));
             items.push(item);
 
@@ -143,7 +140,7 @@ where
         };
 
         if should_flush {
-            self.flush_session(&session_id).await?;
+            self.flush_session(&session_id_owned).await?;
         }
         Ok(())
     }

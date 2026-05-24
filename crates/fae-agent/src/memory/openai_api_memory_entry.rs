@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-use std::fmt::Arguments;
 use async_openai::types::chat::{ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent, CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall};
 use serde::{Deserialize, Serialize};
-use serde::de::DeserializeOwned;
 use crate::{MemoryRecord};
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
@@ -23,7 +20,7 @@ pub trait OpenAIMemoryEntry: MemoryRecord{
     fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self> where Self: Sized;
     // 合并流式响应
     // 返回 (合并后的记录列表, 新增内容)
-    fn stream_append(list:&mut Vec<Self>,chunk:CreateChatCompletionStreamResponse) -> Self where Self: Sized;
+    fn stream_append(list:&mut Vec<Self>,chunk:CreateChatCompletionStreamResponse) -> Option<Self> where Self: Sized;
     fn title(&self) -> String;
     fn content(&self) -> &str;
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
@@ -164,43 +161,47 @@ impl OpenAIMemoryEntry for Record {
         msgs
     }
 
-    fn stream_append(list:&mut Vec<Self>, chunk: CreateChatCompletionStreamResponse) -> Self
+    fn stream_append(list:&mut Vec<Self>, chunk: CreateChatCompletionStreamResponse) -> Option<Self>
     where
         Self: Sized
     {
         let mut exists = false;
         let mut new_msg = Self::default();
         for i in chunk.choices {
-            if let Some(txt) = i.delta.content {
-                new_msg.set_model_output(txt.clone());
-                exists = false;
-                //存在记录则合并
-                for i in list.iter_mut() {
-                    if let RecordItem::ModelOutput(t) = &mut i.item {
-                        t.push_str(txt.as_str());
-                        exists = true;
-                        break
+            if let Some(txt) = i.delta.reasoning_content{
+                if !txt.is_empty(){
+                    new_msg.set_model_thought(txt.clone());
+                    exists = false;
+                    //存在记录则合并
+                    for i in list.iter_mut() {
+                        if let RecordItem::ModelThought(t) = &mut i.item {
+                            t.push_str(txt.as_str());
+                            exists = true;
+                            break
+                        }
                     }
-                }
-                //不存在记录则新增
-                if !exists {
-                    list.push(Record::from(RecordItem::ModelOutput(txt)));
+                    //不存在记录则新增
+                    if !exists {
+                        list.push(Record::from(RecordItem::ModelThought(txt)));
+                    }
                 }
             }
-            if let Some(txt) = i.delta.reasoning_content{
-                new_msg.set_model_thought(txt.clone());
-                exists = false;
-                //存在记录则合并
-                for i in list.iter_mut() {
-                    if let RecordItem::ModelThought(t) = &mut i.item {
-                        t.push_str(txt.as_str());
-                        exists = true;
-                        break
+            if let Some(txt) = i.delta.content {
+                if !txt.is_empty() {
+                    new_msg.set_model_output(txt.clone());
+                    exists = false;
+                    //存在记录则合并
+                    for i in list.iter_mut() {
+                        if let RecordItem::ModelOutput(t) = &mut i.item {
+                            t.push_str(txt.as_str());
+                            exists = true;
+                            break
+                        }
                     }
-                }
-                //不存在记录则新增
-                if !exists {
-                    list.push(Record::from(RecordItem::ModelThought(txt)));
+                    //不存在记录则新增
+                    if !exists {
+                        list.push(Record::from(RecordItem::ModelOutput(txt)));
+                    }
                 }
             }
             if let Some(t) = i.delta.tool_calls {
@@ -247,7 +248,12 @@ impl OpenAIMemoryEntry for Record {
                 }
             }
         }
-        new_msg
+        //重新排序
+        if new_msg.is_wait() {
+            None
+        }else{
+            Some(new_msg)
+        }
     }
 
 

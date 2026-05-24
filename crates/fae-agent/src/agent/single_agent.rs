@@ -183,23 +183,25 @@ where
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
             while let Some(chunk) = s.next().await {
-                let new_msg = M::stream_append(&mut records,chunk?);
-                self.output.send(Msg::new(new_msg)).await?;
+                if let Some(msg) = M::stream_append(&mut records,chunk?) {
+                    self.output.send(Msg::new(msg)).await?;
+                }
             }
             self.output.close();
         } else {
             return anyhow::anyhow!("[SingleAgent] task result unknown, {:?}", event).err();
         }
-        // 合并记录
-        for msg in records{
-            self.memory.push(msg).await?;
-        }
+
         // 输入和输出内容添加到memory
         self.memory
-            .push(self.input.clone())
+            .push(&self.session_id, self.input.clone())
             .await?;
         for msg in std::mem::take(&mut self.doing) {
-            self.memory.push(msg).await?;
+            self.memory.push(&self.session_id, msg).await?;
+        }
+        // 合并记录
+        for msg in records{
+            self.memory.push(&self.session_id, msg).await?;
         }
         // self.memory.flush().await?;
         return Ok(PlanningResult::End(None));

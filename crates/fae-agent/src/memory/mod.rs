@@ -29,7 +29,7 @@ pub trait Memory<T: MemoryRecord + Serialize + DeserializeOwned + Clone + Send +
     ) -> anyhow::Result<Vec<T>>;
 
     /// 追加单条记忆
-    async fn push(&self, item: T) -> anyhow::Result<()>;
+    async fn push(&self, session_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 更新单条记忆内容
     async fn update(&self, item:T) -> anyhow::Result<()>;
