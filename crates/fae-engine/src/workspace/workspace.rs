@@ -106,14 +106,7 @@ impl Workspace {
     pub fn get_env(&self) -> Env {
         self.env.clone()
     }
-    pub async fn session<T: Into<SessionMetadata>>(
-        &self,
-        agent: &str,
-        meta: T,
-    ) -> anyhow::Result<Box<dyn Session + Send + 'static>> {
-        let agent = self.get_agent(agent).await?;
-        agent.on_session(self.env.clone(), meta.into()).await
-    }
+
     pub async fn exit(&self) {
         self.status.set_stopped();
         if let Err(e) = self.loader.exit().await {

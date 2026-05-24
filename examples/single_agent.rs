@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, Message, OpenAIMemoryEntry, Record, SessionMetadata, SingleAgentSessionConfig};
+use fae_agent::{AgentConfigData, OpenAIMemoryEntry, Record};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -24,14 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Creating session...");
     let mut session = ws
-        .session(
-            "main_agent",
-            SessionMetadata::default()
-                .set_session_id("test_session_id_123")
-                .set_data(
-                SingleAgentSessionConfig::default()
-            ),
-        )
+        .session_call_stream::<_, Record, Record>("main_agent", "test_session_id_123")
         .await?;
 
     println!("Session started. Type '/exit' to quit.");
@@ -51,23 +44,21 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let msg = Message::default().set_content(Record::from_user_input(input));
+        let msg = Record::from_user_input(input);
         let stream = session.call_stream(msg).await?;
         let mut stream = Pin::from(stream);
 
         print!("Agent: ");
         io::stdout().flush()?;
         let mut title = String::new();
-        while let Some(mut resp) = stream.next().await {
-            if let Some(record) = resp.try_into_inner::<Record>() {
-                let t = record.title();
-                if title != t {
-                    title = t;
-                    println!("\n---> {} <---", title);
-                }
-                print!("{}", record.content() );
-                io::stdout().flush()?;
+        while let Some(record) = stream.next().await {
+            let t = record.title();
+            if title != t {
+                title = t;
+                println!("\n---> {} <---", title);
             }
+            print!("{}", record.content());
+            io::stdout().flush()?;
         }
         println!();
     }

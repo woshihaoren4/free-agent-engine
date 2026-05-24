@@ -1,6 +1,7 @@
 mod workspace;
 mod workspace_builder;
 mod workspace_loader;
+mod workspace_session;
 
 use fae_agent::AgentRef;
 use std::any::Any;
@@ -8,6 +9,7 @@ use wd_tools::PFErr;
 pub use workspace::*;
 pub use workspace_builder::*;
 pub use workspace_loader::*;
+pub use workspace_session::*;
 
 pub struct RecallAgentRef {
     agent: AgentRef,

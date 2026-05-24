@@ -37,6 +37,12 @@ impl Default for SessionMetadata {
 }
 
 impl SessionMetadata {
+    pub fn with_session_id<S:Into<String>>(session_id: S) -> Self {
+        Self {
+            session_id: session_id.into(),
+            data: Box::new(()),
+        }
+    }
     pub fn set_session_id<S:Into<String>>(mut self, session_id: S)->Self {
         self.session_id = session_id.into();self
     }
@@ -62,6 +68,14 @@ impl SessionMetadata {
         }
     }
 }
+
+impl<T:ToString> From<T> for SessionMetadata {
+    fn from(value: T) -> Self {
+        Self::with_session_id(value.to_string())
+    }
+}
+
+// ----------------------  解析会话元数据 -----------------------------
 
 impl<T:Any> SessionMD<T> {
     pub fn get_session_id(&self) -> &str {
