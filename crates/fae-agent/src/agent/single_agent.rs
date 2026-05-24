@@ -1,6 +1,6 @@
 use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, PlanningResult, SessionConfig, Task, TaskResult, TaskType, define_planning_group, OpenAIMemoryEntry, OpenAIChatMsg, OpenAIResponse};
+use crate::{AgentConfig, Env, NonePlan, PlanningResult, SessionConfig, Task, TaskResult, TaskType, define_planning_group, OpenAIMemoryEntry, OpenAIChatMsg, OpenAIResponse, SessionMetadata};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream,
@@ -18,6 +18,12 @@ use crate::SessionMD;
 pub struct SingleAgentSessionConfig {
     pub id: String,
     pub name: String,
+}
+
+impl From<SingleAgentSessionConfig> for SessionMetadata {
+    fn from(value: SingleAgentSessionConfig) -> Self {
+        SessionMetadata::with_session_id(value.id.as_str()).set_data(value)
+    }
 }
 
 pub struct SingleAgent<M> {

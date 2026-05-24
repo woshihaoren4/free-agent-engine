@@ -78,6 +78,12 @@ impl<T:ToString> From<T> for SessionMetadata {
 // ----------------------  解析会话元数据 -----------------------------
 
 impl<T:Any> SessionMD<T> {
+    pub fn new(session_id: SessionMetadata, data: T) -> Self {
+        Self {
+            session_id: session_id.session_id,
+            data,
+        }
+    }
     pub fn get_session_id(&self) -> &str {
         self.session_id.as_str()
     }
