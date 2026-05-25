@@ -1,4 +1,4 @@
-use crate::{Task, TaskResult};
+use crate::{Task, TaskResult, Thing, ThingSelect};
 use std::any::Any;
 use std::marker::PhantomData;
 use wd_tools::PFErr;
@@ -10,6 +10,9 @@ pub trait TaskExecutor: Sync {
         "default".to_string()
     }
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
+    async fn query(&self, _select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+        Ok(vec![])
+    }
 }
 
 #[async_trait::async_trait]
@@ -25,6 +28,9 @@ pub trait TaskExecutorExt<In, Out>: Sync {
         user_id: String,
         input: In,
     ) -> anyhow::Result<Out>;
+    async fn query(&self, _select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+        Ok(vec![])
+    }
 }
 
 pub struct TaskExecutorExtImpl<T, In, Out> {

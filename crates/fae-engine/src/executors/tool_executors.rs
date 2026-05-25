@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use fae_agent::{
-    Error, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, ToolRequest,
-};
+use fae_agent::{Error, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -95,6 +93,14 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
             .call(IdenInfo::new(task_id, agent_id, user_id), req.arguments)
             .await?;
         Ok(result)
+    }
+    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+        if let ThingSelect::Tool(_,name) = select {
+            let tool = self.load_tool(name.as_str()).await?;
+            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string())).into_self();
+            return Ok(vec![thing]);
+        }
+        return Err(Error::NoSupport.into())
     }
 }
 
