@@ -11,8 +11,11 @@ pub const TASK_ERROR_CODE_PLAN_ABORT_USER: i32 = 999001004;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("NoSupport error: {0}")]
-    NoSupport(String),
+    #[error("NoSupport")]
+    NoSupport,
+
+    #[error("Session error: {0}")]
+    Session(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

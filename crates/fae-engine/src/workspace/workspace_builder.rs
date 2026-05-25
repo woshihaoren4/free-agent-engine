@@ -1,6 +1,6 @@
 use crate::workspace::{Workspace, WorkspaceStatus};
 use crate::{AgentLoader, RecallAgentRef, SingleAgentLoaderFromFile};
-use fae_agent::{AgentRef, Env, Environment};
+use fae_agent::{AgentRef, Env, Environment, Error};
 use std::sync::Arc;
 
 pub struct AgentLoaderLayer<T> {
@@ -19,22 +19,28 @@ where
     T: AgentLoader + Send + 'static,
 {
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
-        //先load新
-        if let Ok(o) = self.n.load(agent_id).await {
-            Ok(o)
-        } else {
-            //再load旧
-            self.o.load(agent_id).await
+        match self.n.load(agent_id).await {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                if let Some(Error::NoSupport) = e.downcast_ref::<Error>() {
+                    self.o.load(agent_id).await
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
-        //先recall新
-        if let Ok(o) = self.n.recall(task_desc).await {
-            Ok(o)
-        } else {
-            //再recall旧
-            self.o.recall(task_desc).await
+        match self.n.recall(task_desc).await {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                if let Some(Error::NoSupport) = e.downcast_ref::<Error>() {
+                    self.o.recall(task_desc).await
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -42,9 +48,18 @@ where
         &self,
         name: &str,
         prompt: &str,
-        cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+        cfg: &mut Box<dyn std::any::Any + Send + Sync + 'static>,
     ) -> anyhow::Result<AgentRef> {
-        self.n.create(name, prompt, cfg).await
+        match self.n.create(name, prompt, cfg).await {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                if let Some(Error::NoSupport) = e.downcast_ref::<Error>() {
+                    self.o.create(name, prompt, cfg).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn exit(&self) -> anyhow::Result<()> {

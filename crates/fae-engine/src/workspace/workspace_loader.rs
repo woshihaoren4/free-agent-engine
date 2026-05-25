@@ -1,5 +1,7 @@
 use crate::{AgentLoader, RecallAgentRef};
-use fae_agent::{AgentConfigFile, AgentEventHandleImpl, FileChatMemory, FileSessionMetaManager};
+use fae_agent::{
+    AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager,
+};
 use fae_agent::{AgentRef, Record, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,18 +75,24 @@ impl AgentLoader for SingleAgentLoaderFromFile {
     }
 
     async fn recall(&self, _task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
-        Ok(vec![])
+        Err(Error::NoSupport.into())
     }
 
     async fn create(
         &self,
         name: &str,
         prompt: &str,
-        cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+        cfg: &mut Box<dyn std::any::Any + Send + Sync + 'static>,
     ) -> anyhow::Result<AgentRef> {
+        if cfg.downcast_ref::<fae_agent::AgentConfigData>().is_none() {
+            return Err(Error::NoSupport.into());
+        }
+        let no_cfg: Box<dyn std::any::Any + Send + Sync + 'static> = Box::new(());
+        let cfg = std::mem::replace(cfg, no_cfg);
+
         let mut agent_config_data = match cfg.downcast::<fae_agent::AgentConfigData>() {
             Ok(data) => *data,
-            Err(_) => return Err(anyhow::anyhow!("CreateAgentNotSupported, name: {}", name)),
+            Err(_) => return Err(Error::NoSupport.into()),
         };
 
         let agent_dir = self.workspace_dir.join(name);

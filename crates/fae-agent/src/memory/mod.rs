@@ -12,7 +12,7 @@ use crate::Message;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const EXECUTOR_OPENAI_API_CHANNEL: &str = "OpenAI_API";
+pub const EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL: &str = "OpenAI-Compatible API";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
 
 #[async_trait::async_trait]
@@ -56,6 +56,9 @@ pub trait SessionConfig<T>: Sync {
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelCallConfig {
     pub model: String,
+
+    // 模型执行器渠道
+    pub channel: Option<String>,
     //    1:Minimal,2:Low, 3:Medium, 4:High,
     pub reasoning_effort: Option<i32>,
 
@@ -82,11 +85,6 @@ pub trait AgentConfig: Sync {
 
     /// 获取模型信息
     async fn model(&self) -> anyhow::Result<ModelCallConfig>;
-
-    /// 获取使用的渠道, 默认是 OpenAI_API
-    async fn channel(&self) -> anyhow::Result<String> {
-        Ok(EXECUTOR_OPENAI_API_CHANNEL.to_string())
-    }
 
     /// 获取系统 prompt
     async fn prompt(&self) -> anyhow::Result<String> {

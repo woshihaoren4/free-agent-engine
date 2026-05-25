@@ -99,9 +99,9 @@ impl Workspace {
         &self,
         name: &str,
         prompt: &str,
-        cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+        mut cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
     ) -> anyhow::Result<AgentRef> {
-        self.loader.create(name, prompt, cfg).await
+        self.loader.create(name, prompt, &mut cfg).await
     }
     pub fn get_env(&self) -> Env {
         self.env.clone()

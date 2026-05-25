@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
-use super::{AgentConfig, DEFAULT_SYSTEM_PROMPT, EXECUTOR_OPENAI_API_CHANNEL, ModelCallConfig};
+use super::{
+    AgentConfig, DEFAULT_SYSTEM_PROMPT, EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, ModelCallConfig,
+};
 
 /// AgentConfig 的序列化数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigData {
     pub name: String,
     pub model: ModelCallConfig,
-    #[serde(default = "default_channel")]
-    pub channel: String,
     #[serde(default = "default_prompt_dir")]
     pub prompt_dir: String,
     #[serde(default)]
@@ -28,7 +28,7 @@ pub struct AgentConfigData {
 }
 
 fn default_channel() -> String {
-    EXECUTOR_OPENAI_API_CHANNEL.to_string()
+    EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.to_string()
 }
 
 fn default_prompt_dir() -> String {
@@ -46,6 +46,7 @@ impl Default for AgentConfigData {
             name: "default_agent".to_string(),
             model: ModelCallConfig {
                 model: model_name,
+                channel: Some(default_channel()),
                 reasoning_effort: None,
                 frequency_penalty: None,
                 max_completion_tokens: None,
@@ -53,7 +54,6 @@ impl Default for AgentConfigData {
                 temperature: Some(1.0),
                 top_p: Some(1.0),
             },
-            channel: default_channel(),
             prompt_dir: default_prompt_dir(),
             tools: Vec::new(),
             skills: Vec::new(),
@@ -134,11 +134,6 @@ impl AgentConfig for AgentConfigFile {
         Ok(config.model.clone())
     }
 
-    async fn channel(&self) -> anyhow::Result<String> {
-        let config = self.config.read().await;
-        Ok(config.channel.clone())
-    }
-
     async fn prompt(&self) -> anyhow::Result<String> {
         let config = self.config.read().await;
         let prompt_path = PathBuf::from(&config.prompt_dir).join("prompt.txt");
@@ -212,8 +207,14 @@ mod tests {
         assert_eq!(config_file.name().await.unwrap(), "default_agent");
         assert_eq!(config_file.model().await.unwrap().model, "test-model-4o");
         assert_eq!(
-            config_file.channel().await.unwrap(),
-            EXECUTOR_OPENAI_API_CHANNEL
+            config_file
+                .model()
+                .await
+                .unwrap()
+                .channel
+                .as_deref()
+                .unwrap_or_default(),
+            EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL
         );
         assert_eq!(config_file.prompt().await.unwrap(), DEFAULT_SYSTEM_PROMPT);
 

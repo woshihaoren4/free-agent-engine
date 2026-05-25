@@ -3,7 +3,7 @@ mod workspace_builder;
 mod workspace_loader;
 mod workspace_session;
 
-use fae_agent::AgentRef;
+use fae_agent::{AgentRef, Error};
 use std::any::Any;
 use wd_tools::PFErr;
 pub use workspace::*;
@@ -24,7 +24,7 @@ pub trait AgentLoader: Sync {
         &self,
         name: &str,
         prompt: &str,
-        cfg: Box<dyn Any + Send + Sync + 'static>,
+        cfg: &mut Box<dyn Any + Send + Sync + 'static>,
     ) -> anyhow::Result<AgentRef>;
     async fn exit(&self) -> anyhow::Result<()>;
 }
@@ -38,11 +38,11 @@ impl AgentLoader for () {
     }
     async fn create(
         &self,
-        name: &str,
+        _name: &str,
         _prompt: &str,
-        _cfg: Box<dyn Any + Send + Sync + 'static>,
+        _cfg: &mut Box<dyn Any + Send + Sync + 'static>,
     ) -> anyhow::Result<AgentRef> {
-        anyhow::anyhow!("CreateAgentNotSupported, name: {}", name).err()
+        return Err(Error::NoSupport.into());
     }
     async fn exit(&self) -> anyhow::Result<()> {
         Ok(())

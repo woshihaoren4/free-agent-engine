@@ -1,9 +1,10 @@
+use crate::ToolExecutor;
 use crate::executors::ModelOpenAIApiExecutor;
 use fae_agent::{
-    Env, EnvEvent, Environment, Task, TaskExecutor, TaskResult, TaskType, Thing, ThingItem,
-    ThingSelect,
+    Env, EnvEvent, Environment, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl,
+    TaskResult, TaskType, Thing, ThingItem, ThingSelect,
 };
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ impl TaskRuntime {
             executors: HashMap::new(),
         }
         .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
+        .register_executor_ext(TaskType::Tool, ToolExecutor::default())
         .into_self()
     }
     pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
@@ -49,6 +51,19 @@ impl TaskRuntime {
     ) -> &mut Self {
         self.raw_register_executor(task_type, Arc::new(executor));
         self
+    }
+    pub fn register_executor_ext<T, In, Out>(
+        &mut self,
+        task_type: TaskType,
+        task_exec_ext: T,
+    ) -> &mut Self
+    where
+        T: TaskExecutorExt<In, Out> + Send + 'static,
+        In: Send + Sync + 'static,
+        Out: Any + Send + Sync,
+    {
+        let executor = TaskExecutorExtImpl::new(task_exec_ext);
+        self.register_executor(task_type, executor)
     }
     pub fn get_executor(
         &self,

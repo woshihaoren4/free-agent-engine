@@ -16,6 +16,8 @@ use wd_tools::PFErr;
 pub struct SessionMetadata {
     /// 会话ID
     pub session_id: String,
+    /// 用户ID
+    pub user_id: String,
     /// 任意类型元数据，用于扩展
     pub data: Box<dyn Any + Send + Sync + 'static>,
 }
@@ -23,6 +25,8 @@ pub struct SessionMetadata {
 pub struct SessionMD<T> {
     /// 会话ID
     pub session_id: String,
+    /// 用户ID
+    pub user_id: String,
     /// 会话数据
     pub data: T,
 }
@@ -31,6 +35,7 @@ impl Default for SessionMetadata {
     fn default() -> Self {
         Self {
             session_id: wd_tools::uuid::v4(),
+            user_id: "".to_string(),
             data: Box::new(()),
         }
     }
@@ -40,6 +45,7 @@ impl SessionMetadata {
     pub fn with_session_id<S: Into<String>>(session_id: S) -> Self {
         Self {
             session_id: session_id.into(),
+            user_id: "".to_string(),
             data: Box::new(()),
         }
     }
@@ -50,6 +56,13 @@ impl SessionMetadata {
     pub fn get_session_id(&self) -> &str {
         self.session_id.as_str()
     }
+    pub fn get_user_id(&self) -> &str {
+        self.user_id.as_str()
+    }
+    pub fn set_user_id<S: Into<String>>(mut self, user_id: S) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
     pub fn set_data<T: Any + Send + Sync + 'static>(mut self, data: T) -> Self {
         self.data = Box::new(data);
         self
@@ -58,6 +71,7 @@ impl SessionMetadata {
         match self.data.downcast::<T>() {
             Ok(t) => Ok(SessionMD {
                 session_id: self.session_id,
+                user_id: self.user_id,
                 data: *t,
             }),
             Err(e) => {
@@ -80,8 +94,12 @@ impl<T: Any> SessionMD<T> {
     pub fn new(session_id: SessionMetadata, data: T) -> Self {
         Self {
             session_id: session_id.session_id,
+            user_id: session_id.user_id,
             data,
         }
+    }
+    pub fn get_user_id(&self) -> &str {
+        self.user_id.as_str()
     }
     pub fn get_session_id(&self) -> &str {
         self.session_id.as_str()
@@ -99,7 +117,7 @@ impl<T: Any> SessionMD<T> {
 pub trait Session: Sync {
     /// 同步调用，返回单个消息
     async fn call(&mut self, _input: Msg) -> anyhow::Result<Msg> {
-        anyhow::Error::from(Error::NoSupport("Session.call".into())).err()
+        anyhow::Error::from(Error::Session("Session.call".into())).err()
     }
 
     /// 调用并返回流
@@ -107,7 +125,7 @@ pub trait Session: Sync {
         &mut self,
         _input: Msg,
     ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
-        anyhow::Error::from(Error::NoSupport("Session.call_stream".into())).err()
+        anyhow::Error::from(Error::Session("Session.call_stream".into())).err()
     }
 
     /// 流式调用，一次返回
@@ -115,7 +133,7 @@ pub trait Session: Sync {
         &mut self,
         _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
     ) -> anyhow::Result<Msg> {
-        anyhow::Error::from(Error::NoSupport("Session.stream_call".into())).err()
+        anyhow::Error::from(Error::Session("Session.stream_call".into())).err()
     }
 
     /// 双向流式调用
@@ -123,7 +141,7 @@ pub trait Session: Sync {
         &mut self,
         _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
     ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
-        anyhow::Error::from(Error::NoSupport("Session.stream".into())).err()
+        anyhow::Error::from(Error::Session("Session.stream".into())).err()
     }
 
     /// 终止

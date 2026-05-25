@@ -1,4 +1,3 @@
-use crate::SessionMD;
 use crate::define::{Msg, SenderMessageStream};
 use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
@@ -6,6 +5,7 @@ use crate::{
     AgentConfig, Env, NonePlan, OpenAIChatMsg, OpenAIMemoryEntry, OpenAIResponse, PlanningResult,
     SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group,
 };
+use crate::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, SessionMD};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream,
@@ -179,7 +179,12 @@ where
         self.id.clone()
     }
     async fn init(&mut self) -> anyhow::Result<PlanningResult> {
-        let exec_channel = self.agent_config.channel().await?;
+        let exec_channel = self
+            .agent_config
+            .model()
+            .await?
+            .channel
+            .unwrap_or(EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.to_string());
         let req = self.build_openai_api_request().await?;
         let task = Task::default()
             .set_type(TaskType::Model)

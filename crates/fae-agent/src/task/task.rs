@@ -1,92 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::any::Any;
-use std::fmt::Display;
-
-/// 任务类型，表示智能体需要执行的任务
-#[derive(Debug)]
-pub struct Task {
-    pub id: String,
-    pub agent_id: String,
-    pub r#type: TaskType,
-    pub exec_channel: String,
-    pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
-}
-impl Task {
-    pub fn new<I: Into<String>, A: Into<String>>(id: I, agent_id: A, r#type: TaskType) -> Self {
-        let id = id.into();
-        let agent_id = agent_id.into();
-        Self {
-            id,
-            agent_id,
-            r#type,
-            args: None,
-            exec_channel: "default".into(),
-        }
-    }
-    pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
-        self.id = id.into();
-        self
-    }
-    pub fn get_id(&self) -> &str {
-        self.id.as_str()
-    }
-    pub fn get_agent_id(&self) -> &str {
-        self.agent_id.as_str()
-    }
-    pub fn get_exec_channel(&self) -> &str {
-        self.exec_channel.as_str()
-    }
-    pub fn set_type<T: Into<TaskType>>(mut self, t: T) -> Self {
-        self.r#type = t.into();
-        self
-    }
-    pub fn get_type(&self) -> &TaskType {
-        &self.r#type
-    }
-    pub fn set_exec_channel<T: Into<String>>(mut self, t: T) -> Self {
-        self.exec_channel = t.into();
-        self
-    }
-    pub fn set_agent_id<T: Into<String>>(mut self, agent_id: T) -> Self {
-        self.agent_id = agent_id.into();
-        self
-    }
-    pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
-        self.args = Some(args);
-        self
-    }
-    pub fn set_args<T: Any + Send + Sync + 'static>(self, args: T) -> Self {
-        self.set_args_raw(Box::new(args))
-    }
-    pub fn assert<T: Any>(&self) -> bool {
-        if let Some(ref args) = self.args {
-            args.downcast_ref::<T>().is_some()
-        } else {
-            false
-        }
-    }
-    pub fn into_inner<T: Any>(&mut self) -> Option<T> {
-        if let Some(args) = self.args.take() {
-            match args.downcast::<T>() {
-                Ok(t) => Some(*t),
-                Err(e) => {
-                    self.args = Some(e);
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    }
-}
-
-impl Default for Task {
-    fn default() -> Self {
-        let id = wd_tools::uuid::v4();
-        let aid = wd_tools::uuid::v4();
-        Self::new(id, aid, TaskType::None)
-    }
-}
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize)]
@@ -160,6 +75,102 @@ impl Display for TaskType {
         write!(f, "{}", s)
     }
 }
+
+/// 任务类型，表示智能体需要执行的任务
+#[derive(Debug)]
+pub struct Task {
+    pub id: String,
+    pub agent_id: String,
+    pub r#type: TaskType,
+    pub exec_channel: String,
+    pub user_id: String,
+    pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
+}
+impl Task {
+    pub fn new<I: Into<String>, A: Into<String>>(id: I, agent_id: A, r#type: TaskType) -> Self {
+        let id = id.into();
+        let agent_id = agent_id.into();
+        Self {
+            id,
+            agent_id,
+            r#type,
+            args: None,
+            user_id: "".into(),
+            exec_channel: "default".into(),
+        }
+    }
+    pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
+        self.id = id.into();
+        self
+    }
+    pub fn get_id(&self) -> &str {
+        self.id.as_str()
+    }
+    pub fn get_agent_id(&self) -> &str {
+        self.agent_id.as_str()
+    }
+    pub fn get_exec_channel(&self) -> &str {
+        self.exec_channel.as_str()
+    }
+    pub fn set_type<T: Into<TaskType>>(mut self, t: T) -> Self {
+        self.r#type = t.into();
+        self
+    }
+    pub fn get_type(&self) -> &TaskType {
+        &self.r#type
+    }
+    pub fn set_exec_channel<T: Into<String>>(mut self, t: T) -> Self {
+        self.exec_channel = t.into();
+        self
+    }
+    pub fn set_agent_id<T: Into<String>>(mut self, agent_id: T) -> Self {
+        self.agent_id = agent_id.into();
+        self
+    }
+    pub fn set_user_id<T: Into<String>>(mut self, user_id: T) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+    pub fn get_user_id(&self) -> &str {
+        self.user_id.as_str()
+    }
+    pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
+        self.args = Some(args);
+        self
+    }
+    pub fn set_args<T: Any + Send + Sync + 'static>(self, args: T) -> Self {
+        self.set_args_raw(Box::new(args))
+    }
+    pub fn assert<T: Any>(&self) -> bool {
+        if let Some(ref args) = self.args {
+            args.downcast_ref::<T>().is_some()
+        } else {
+            false
+        }
+    }
+    pub fn into_inner<T: Any>(&mut self) -> Option<T> {
+        if let Some(args) = self.args.take() {
+            match args.downcast::<T>() {
+                Ok(t) => Some(*t),
+                Err(e) => {
+                    self.args = Some(e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        let id = wd_tools::uuid::v4();
+        let aid = wd_tools::uuid::v4();
+        Self::new(id, aid, TaskType::None)
+    }
+}
+
 #[derive(Debug)]
 pub struct TaskResult {
     pub code: i32,
@@ -227,11 +238,12 @@ impl TaskResult {
     }
 }
 
-#[async_trait::async_trait]
-pub trait TaskExecutor: Sync {
-    fn desc(&self) -> String;
-    fn channel(&self) -> String {
-        "default".to_string()
+impl Display for TaskResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[TaskResult] code: {}, msg: {}, task_id: {}, agent_id: {}, data: {:?}",
+            self.code, self.msg, self.task_id, self.agent_id, self.data
+        )
     }
-    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
 }

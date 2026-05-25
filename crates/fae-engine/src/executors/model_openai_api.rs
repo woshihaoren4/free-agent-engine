@@ -3,7 +3,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
-use fae_agent::{EXECUTOR_OPENAI_API_CHANNEL, Task, TaskExecutor, TaskResult};
+use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, Task, TaskExecutor, TaskResult};
 use wd_tools::PFErr;
 
 pub const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
@@ -24,7 +24,7 @@ impl ModelOpenAIApiExecutor {
         let client = Client::new();
         Self {
             desc: DEFAULT_OPENAI_MODEL_DESC.into(),
-            channel: EXECUTOR_OPENAI_API_CHANNEL.into(),
+            channel: EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
             client,
         }
     }
@@ -32,7 +32,7 @@ impl ModelOpenAIApiExecutor {
         let client = Client::with_config(cfg);
         Self {
             desc: DEFAULT_OPENAI_MODEL_DESC.into(),
-            channel: EXECUTOR_OPENAI_API_CHANNEL.into(),
+            channel: EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
             client,
         }
     }
