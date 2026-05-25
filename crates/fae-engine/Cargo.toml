@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 async-openai = {path = "../async-openai", version = "0.40.2",features = ["full"]}
 fae-agent = {path = "../fae-agent", version = "0.1.0"}
+reqwest = { version = "0.13.3", features = ["json"] }
 
 
 [features]

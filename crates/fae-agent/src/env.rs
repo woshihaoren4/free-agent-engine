@@ -44,7 +44,7 @@ pub enum ThingSelect {
     Executor(TaskType, String),
     /// plan 执行计划，PlanID,AgentID
     Plan(String, String),
-    /// tool 工具: 渠道，工具名称
+    /// tools 工具: 渠道，工具名称
     Tool(String, String),
     /// Custom
     Custom(String),

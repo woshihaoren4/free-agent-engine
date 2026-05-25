@@ -58,7 +58,7 @@ impl ToolSet for ToolSetImplMap {
         if let Some(tool) = tool {
             Ok(tool)
         } else {
-            Err(anyhow::anyhow!("tool not found: {}", name))
+            Err(anyhow::anyhow!("tools not found: {}", name))
         }
     }
 
@@ -75,7 +75,7 @@ pub struct ToolExecutor {
 #[async_trait::async_trait]
 impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
     fn desc(&self) -> String {
-        "default tool executor".to_string()
+        "default tools executor".to_string()
     }
 
     fn channel(&self) -> String {
@@ -130,14 +130,29 @@ impl ToolExecutor {
                 }
             }
         }
-        return Err(anyhow::anyhow!("[ToolExecutor] tool not found: {}", name));
+        return Err(anyhow::anyhow!("[ToolExecutor] tools not found: {}", name));
     }
 }
 
 impl Default for ToolExecutor {
     fn default() -> Self {
+        let mut tools = HashMap::new();
+        
+        let tool_list: Vec<Arc<dyn Tool + Send + 'static>> = vec![
+            Arc::new(crate::tools::ExecuteCommand),
+            Arc::new(crate::tools::SendHttpRequest),
+            Arc::new(crate::tools::ReadFile),
+            Arc::new(crate::tools::WriteFile),
+            Arc::new(crate::tools::ListDirectory),
+            Arc::new(crate::tools::ExecutePython),
+        ];
+
+        for tool in tool_list {
+            tools.insert(tool.name().to_string(), tool);
+        }
+
         Self {
-            tools_loader: vec![Box::new(ToolSetImplMap::default())],
+            tools_loader: vec![Box::new(ToolSetImplMap { tools })],
         }
     }
 }

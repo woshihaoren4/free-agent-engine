@@ -3,6 +3,7 @@ mod engine_builder;
 mod executors;
 mod runtime;
 mod workspace;
+mod tools;
 
 pub use engine::*;
 pub use executors::*;
