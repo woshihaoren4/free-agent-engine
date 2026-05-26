@@ -9,21 +9,21 @@ use async_openai::types::chat::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub enum OpenAIResponse {
+pub enum ModelResponse {
     Response(CreateChatCompletionResponse),
     StreamResponse(CreateChatCompletionStreamResponse),
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub enum OpenAIChatMsg {
+pub enum ChatMsg {
     User(ChatCompletionRequestUserMessage),
-    Assistant(OpenAIResponse),
+    Assistant(ModelResponse),
     Tool(RecordItemToolOut),
     Custom(String, String),
 }
 
-pub trait OpenAIMemoryEntry: Message {
-    fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self>
+pub trait MemoryEntry: Message {
+    fn from_openai_msg(msg: ChatMsg) -> Vec<Self>
     where
         Self: Sized;
     // 合并流式响应
@@ -37,6 +37,10 @@ pub trait OpenAIMemoryEntry: Message {
     fn title(&self) -> String;
     fn content(&self) -> &str;
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
+    // 是否需要记住该条记录，落盘
+    fn is_remember(&self) -> bool{
+        false
+    }
 }
 
 // ------------------- OpenAIMemoryEntry 的实现 -------------------
@@ -54,6 +58,18 @@ pub struct RecordItemToolOut {
     pub tool_call_id: String,
     pub tool_name: String,
     pub output: String,
+}
+impl RecordItemToolOut {
+    pub fn new(tool_call_id: String, tool_name: String) -> Self {
+        Self {
+            tool_call_id,
+            tool_name,
+            output: "".to_string(),
+        }
+    }
+    pub fn set_output(&mut self, output: String) {
+        self.output = output;
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
@@ -117,18 +133,18 @@ impl Message for Record {
     }
 }
 
-impl OpenAIMemoryEntry for Record {
-    fn from_openai_msg(msg: OpenAIChatMsg) -> Vec<Self> {
+impl MemoryEntry for Record {
+    fn from_openai_msg(msg: ChatMsg) -> Vec<Self> {
         let mut msgs = vec![];
         match msg {
-            OpenAIChatMsg::User(m) => {
+            ChatMsg::User(m) => {
                 msgs.push(Record {
                     id: wd_tools::uuid::v4(),
                     item: RecordItem::UserInput(m),
                 });
             }
-            OpenAIChatMsg::Assistant(m) => match m {
-                OpenAIResponse::Response(m) => {
+            ChatMsg::Assistant(m) => match m {
+                ModelResponse::Response(m) => {
                     for i in m.choices {
                         if let Some(t) = i.message.content {
                             msgs.push(Record::from(RecordItem::ModelOutput(t)));
@@ -162,16 +178,16 @@ impl OpenAIMemoryEntry for Record {
                         }
                     }
                 }
-                OpenAIResponse::StreamResponse(m) => {
+                ModelResponse::StreamResponse(m) => {
                     Self::stream_append(&mut msgs, m);
                 }
             },
 
-            OpenAIChatMsg::Tool(m) => {
+            ChatMsg::Tool(m) => {
                 msgs.push(Record::from(RecordItem::ToolOutput(m)));
             }
 
-            OpenAIChatMsg::Custom(a, b) => {
+            ChatMsg::Custom(a, b) => {
                 msgs.push(Record::from(RecordItem::Custom(a, b)));
             }
         }
@@ -332,6 +348,14 @@ impl OpenAIMemoryEntry for Record {
                 .ok()
                 .map(ChatCompletionRequestMessage::Tool),
             _ => None,
+        }
+    }
+
+    fn is_remember(&self) -> bool {
+        match self.item {
+            RecordItem::UserInput(_) => true,
+            RecordItem::ModelOutput(_) => true,
+            _ => false,
         }
     }
 }

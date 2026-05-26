@@ -91,13 +91,18 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
         let tool = self.load_tool(req.get_tool_name()).await?;
         let result = tool
             .call(IdenInfo::new(task_id, agent_id, user_id), req.arguments)
-            .await?;
-        Ok(result)
+            .await;
+        match result {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                Ok(format!("Tool[{}] call failed. error: {}", tool.name(), e))
+            }
+        }
     }
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
         if let ThingSelect::Tool(_,name) = select {
             let tool = self.load_tool(name.as_str()).await?;
-            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string())).into_self();
+            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string(),tool.arguments().to_string())).into_self();
             return Ok(vec![thing]);
         }
         return Err(Error::NoSupport.into())
@@ -139,10 +144,10 @@ impl Default for ToolExecutor {
         let mut tools = HashMap::new();
         
         let tool_list: Vec<Arc<dyn Tool + Send + 'static>> = vec![
-            Arc::new(crate::tools::ExecuteCommand),
+            Arc::new(crate::tools::ExecuteCommand::default()),
             Arc::new(crate::tools::SendHttpRequest),
             Arc::new(crate::tools::ReadFile),
-            Arc::new(crate::tools::WriteFile),
+            Arc::new(crate::tools::WriteFile::default()),
             Arc::new(crate::tools::ListDirectory),
             Arc::new(crate::tools::ExecutePython),
         ];

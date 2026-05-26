@@ -92,8 +92,8 @@ pub enum ThingItem {
     Plan(String),
     /// 模块
     Module(String),
-    /// 工具，工具描述
-    Tool(String),
+    /// 工具:工具描述,工具参数
+    Tool(String,String),
     /// 智能体
     Agent(String),
     /// 技能

@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, OpenAIMemoryEntry, Record, SingleAgentSessionConfig};
+use fae_agent::{AgentConfigData, MemoryEntry, Record, SingleAgentSessionConfig};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;

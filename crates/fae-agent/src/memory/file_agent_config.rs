@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
-
+use crate::ToolConfig;
 use super::{
     AgentConfig, DEFAULT_SYSTEM_PROMPT, EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, ModelCallConfig,
 };
@@ -16,7 +16,7 @@ pub struct AgentConfigData {
     #[serde(default = "default_prompt_dir")]
     pub prompt_dir: String,
     #[serde(default)]
-    pub tools: Vec<String>,
+    pub tools: Vec<ToolConfig>,
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -46,7 +46,9 @@ impl Default for AgentConfigData {
             name: "default_agent".to_string(),
             model: ModelCallConfig {
                 model: model_name,
-                channel: Some(default_channel()),
+                channel: default_channel(),
+                max_chat_history_round: 30,
+                //    1:Minimal,2:Low, 3:Medium, 4:High,
                 reasoning_effort: None,
                 frequency_penalty: None,
                 max_completion_tokens: None,
@@ -55,7 +57,13 @@ impl Default for AgentConfigData {
                 top_p: Some(1.0),
             },
             prompt_dir: default_prompt_dir(),
-            tools: Vec::new(),
+            tools: vec![
+                ToolConfig::new("execute_command"),
+                ToolConfig::new("read_file"),
+                ToolConfig::new("write_file"),
+                ToolConfig::new("send_http_request"),
+                ToolConfig::new("execute_python"),
+            ],
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             sub_agents: Vec::new(),
@@ -147,7 +155,7 @@ impl AgentConfig for AgentConfigFile {
         }
     }
 
-    async fn tools(&self) -> anyhow::Result<Vec<String>> {
+    async fn tools(&self) -> anyhow::Result<Vec<ToolConfig>> {
         let config = self.config.read().await;
         Ok(config.tools.clone())
     }
@@ -211,9 +219,7 @@ mod tests {
                 .model()
                 .await
                 .unwrap()
-                .channel
-                .as_deref()
-                .unwrap_or_default(),
+                .channel,
             EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL
         );
         assert_eq!(config_file.prompt().await.unwrap(), DEFAULT_SYSTEM_PROMPT);
