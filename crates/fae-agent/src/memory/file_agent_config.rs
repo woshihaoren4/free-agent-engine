@@ -205,13 +205,13 @@ impl AgentConfig for AgentConfigFile {
         self.config.custom.get(key).cloned()
     }
     fn agent_info(&self) -> String {
-        let info = format!("Your personal information:\nyour name :`{}`\nyyour config file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/config.json", self.name());
+        let info = format!("Your personal information:\nyour name :`{}`\nyyour model config file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/config.json", self.name());
         if self.config.prompt_dir.starts_with("/") {
             // 绝对路径
-            format!("{}\nyour prompt file path: {}", info, self.config.prompt_dir)
+            format!("{}\nyour enactment prompt file path: {}", info, self.config.prompt_dir)
         }else{
             // 相对路径
-            format!("{}\nyour prompt file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/{}", info, self.config.prompt_dir)
+            format!("{}\nyour enactment prompt file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/{}", info, self.config.prompt_dir)
         }
     }
 }
