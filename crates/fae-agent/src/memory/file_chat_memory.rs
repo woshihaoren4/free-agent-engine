@@ -111,7 +111,7 @@ where
         if self.base_dir.starts_with("/"){
             Ok(format!("{}\nsession description file path: {}/$SESSION_ID.desc", info,self.base_dir.display()))
         }else{
-            Ok(format!("{}\nsession description file path: $FAE_HOME/$WORKSPACE/$AgentName/session/$SESSION_ID.desc", info))
+            Ok(format!("{}\nsession description file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/session/$SESSION_ID.desc", info))
         }
     }
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
