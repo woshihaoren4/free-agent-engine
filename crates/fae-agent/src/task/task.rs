@@ -218,9 +218,15 @@ impl TaskResult {
     pub fn is_error(&self) -> bool {
         self.code != 0
     }
-    pub fn set_raw_data<T: Any + Send + 'static>(mut self, data: T) -> Self {
+    pub fn is_success(&self) -> bool {
+        self.code == 0
+    }
+    pub fn set_data<T: Any + Send + 'static>(mut self, data: T) -> Self {
         self.data = Some(Box::new(data));
         self
+    }
+    pub fn set_data_raw(mut self, data: Box<dyn Any + Send + 'static>) -> Self {
+        self.data = Some(data);self
     }
     pub fn assert<T: Any>(&self) -> bool {
         if let Some(ref data) = self.data {

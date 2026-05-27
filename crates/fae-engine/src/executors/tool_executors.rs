@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use fae_agent::{Error, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest};
+use fae_agent::{Error, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
-
+use serde_json::Value;
 // pub trait Identity:Sync{
 //     fn get(&self) -> String;
 //     fn user_id(&self) -> String;
@@ -12,6 +12,7 @@ pub struct IdenInfo {
     pub task_id: String,
     pub agent_id: String,
     pub user_id: String,
+    pub extend: HashMap<String, String>,
     // pub identity: Box<dyn Identity+Send+'static>,
 }
 impl IdenInfo {
@@ -20,6 +21,7 @@ impl IdenInfo {
             task_id,
             agent_id,
             user_id,
+            extend: HashMap::new(),
         }
     }
     pub fn get_task_id(&self) -> &str {
@@ -31,13 +33,19 @@ impl IdenInfo {
     pub fn get_user_id(&self) -> &str {
         &self.user_id
     }
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.extend.get(key)
+    }
+    pub fn set(&mut self, key: String, value: String) {
+        self.extend.insert(key, value);
+    }
 }
 
 #[async_trait]
 pub trait Tool: Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn arguments(&self) -> &str;
+    fn arguments(&self) -> Value;
     async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<String>;
 }
 
@@ -102,7 +110,7 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
         if let ThingSelect::Tool(_,name) = select {
             let tool = self.load_tool(name.as_str()).await?;
-            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string(),tool.arguments().to_string())).into_self();
+            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string(),tool.arguments())).into_self();
             return Ok(vec![thing]);
         }
         return Err(Error::NoSupport.into())

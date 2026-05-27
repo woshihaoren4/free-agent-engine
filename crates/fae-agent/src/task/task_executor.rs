@@ -82,7 +82,7 @@ where
                 .unwrap();
             return Ok(*task_result);
         }
-        Ok(TaskResult::success(task.id.clone(), task.agent_id.clone()))
+        Ok(TaskResult::success(task.id.clone(), task.agent_id.clone()).set_data(output))
     }
     async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
         self.executor.query(select).await

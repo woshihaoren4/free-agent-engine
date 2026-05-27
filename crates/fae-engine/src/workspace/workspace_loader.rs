@@ -105,14 +105,7 @@ impl AgentLoader for SingleAgentLoaderFromFile {
             tokio::fs::create_dir_all(&session_dir).await?;
         }
 
-        let config_file = agent_dir.join("config.json");
-        let prompt_file = agent_dir.join("prompt.txt");
-
-        agent_config_data.prompt_dir = agent_dir.to_string_lossy().to_string();
-
-        let config_json = serde_json::to_string_pretty(&agent_config_data)?;
-        tokio::fs::write(&config_file, config_json).await?;
-        tokio::fs::write(&prompt_file, prompt).await?;
+        agent_config_data.init(&agent_dir, prompt.to_string()).await?;
 
         self.load(name).await
     }

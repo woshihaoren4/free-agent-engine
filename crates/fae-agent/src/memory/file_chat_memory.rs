@@ -105,6 +105,15 @@ impl<T> Memory<T> for FileChatMemory<T>
 where
     T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
+    /// 记忆信息
+    async fn info(&self, session_id: &str) -> anyhow::Result<String>{
+        let info = format!("This dialogue identifier $SESSION_ID: `{}`\n ", session_id);
+        if self.base_dir.starts_with("/"){
+            Ok(format!("{}\nsession description file path: {}/$SESSION_ID.desc", info,self.base_dir.display()))
+        }else{
+            Ok(format!("{}\nsession description file path: $FAE_HOME/$WORKSPACE/$AgentName/session/$SESSION_ID.desc", info))
+        }
+    }
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;
         if let Some((_, items)) = store.get(session_id) {

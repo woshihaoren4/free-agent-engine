@@ -1,7 +1,13 @@
 use crate::{Task, TaskResult, TaskType};
 use std::any::Any;
+use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::Arc;
+use serde_json::Value;
+
+pub const FAE_WORKSPACE: &str = "FAE_WORKSPACE";
+pub const FAE_HOME: &str = "FAE_HOME";
+
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
 pub enum EnvEvent {
@@ -39,7 +45,7 @@ pub enum ThingSelect {
     #[default]
     None,
     /// 环境变量
-    EnvVar(String),
+    Env(String),
     /// 任务执行器：任务类型,渠道
     Executor(TaskType, String),
     /// plan 执行计划，PlanID,AgentID
@@ -93,7 +99,9 @@ pub enum ThingItem {
     /// 模块
     Module(String),
     /// 工具:工具描述,工具参数
-    Tool(String,String),
+    Tool(String,Value),
+    /// 环境变量
+    EnvVar(String),
     /// 智能体
     Agent(String),
     /// 技能
@@ -106,6 +114,24 @@ pub enum ThingItem {
     Info(String),
     /// 任意类型事物，用于扩展
     Any(Box<dyn Any + Send + Sync + 'static>),
+}
+impl ThingItem {
+    pub fn string(&self)->String{
+        match self {
+            Self::None => "".to_string(),
+            Self::Executor(s) => s.to_string(),
+            Self::Plan(s) => s.to_string(),
+            Self::Module(s) => s.to_string(),
+            Self::Tool( s,_) => s.to_string(),
+            Self::EnvVar( s) => s.to_string(),
+            Self::Agent( s) => s.to_string(),
+            Self::Skill( s) => s.to_string(),
+            Self::Custom( s) => s.to_string(),
+            Self::McpServer( s) => s.to_string(),
+            Self::Info( s) => s.to_string(),
+            Self::Any(_) => "".to_string(),
+        }
+    }
 }
 
 /// 环境 trait，定义智能体运行的环境接口

@@ -2,6 +2,7 @@ use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
 use tokio::process::Command;
 use std::process::Stdio;
+use serde_json::Value;
 
 pub struct ExecutePython;
 
@@ -15,8 +16,8 @@ impl Tool for ExecutePython {
         "Execute a Python script."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "script": {
@@ -25,8 +26,9 @@ impl Tool for ExecutePython {
                 }
             },
             "required": ["script"]
-        }"#
+        })
     }
+
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;

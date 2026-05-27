@@ -2,6 +2,7 @@ mod workspace;
 mod workspace_builder;
 mod workspace_loader;
 mod workspace_session;
+mod workspace_runtime;
 
 use fae_agent::{AgentRef, Error};
 use std::any::Any;

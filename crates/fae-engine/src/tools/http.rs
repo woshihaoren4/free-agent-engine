@@ -1,5 +1,6 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
+use serde_json::Value;
 
 pub struct SendHttpRequest;
 
@@ -13,8 +14,8 @@ impl Tool for SendHttpRequest {
         "Send an HTTP request and return the response."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "method": {
@@ -35,7 +36,7 @@ impl Tool for SendHttpRequest {
                 }
             },
             "required": ["url"]
-        }"#
+        })
     }
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {

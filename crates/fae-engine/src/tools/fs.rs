@@ -1,5 +1,6 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::fs;
 
 pub struct ReadFile;
@@ -14,8 +15,8 @@ impl Tool for ReadFile {
         "Read the contents of a file."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -24,7 +25,7 @@ impl Tool for ReadFile {
                 }
             },
             "required": ["path"]
-        }"#
+        })
     }
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
@@ -66,8 +67,8 @@ impl Tool for WriteFile {
         "Write content to a file. Can only write files in the allowed directory."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -80,7 +81,7 @@ impl Tool for WriteFile {
                 }
             },
             "required": ["path", "content"]
-        }"#
+        })
     }
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
@@ -125,8 +126,8 @@ impl Tool for ListDirectory {
         "List the contents of a directory."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -135,7 +136,7 @@ impl Tool for ListDirectory {
                 }
             },
             "required": ["path"]
-        }"#
+        })
     }
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {

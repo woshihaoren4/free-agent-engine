@@ -3,9 +3,11 @@ use async_trait::async_trait;
 use tokio::process::Command;
 use std::sync::Mutex;
 use std::collections::HashMap;
+use serde_json::Value;
 
 pub struct ExecuteCommand {
-    pending_confirmations: Mutex<HashMap<String, String>>,
+    // 待确认的命令：key为确认码，value为截至时间戳utc时间second
+    pending_confirmations: Mutex<HashMap<String, u64>>,
     blacklist: Vec<String>,
 }
 
@@ -46,19 +48,19 @@ impl ExecuteCommand {
         self
     }
 
-    fn generate_confirm_code(&self, iden_key: String) -> String {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let generated_code = format!("{:016x}", nanos);
+    fn generate_confirm_code(&self) -> String {
+        let iden_key = format!("{}",wd_tools::uuid::v4());
+        // 3分钟过期时间
+        let expire_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60 * 3;
         let mut pending = self.pending_confirmations.lock().unwrap();
-        pending.insert(iden_key, generated_code.clone());
-        generated_code
+        pending.insert(iden_key.clone(), expire_time);
+        iden_key
     }
 
-    fn verify_and_remove_confirm_code(&self, iden_key: &str, code: &str) -> Result<bool, String> {
+    fn verify_and_remove_confirm_code(&self, code: &str) -> Result<bool, String> {
         let mut pending = self.pending_confirmations.lock().unwrap();
-        if let Some(expected_code) = pending.get(iden_key) {
-            if code == expected_code {
-                pending.remove(iden_key);
+        if let Some(expire_time) = pending.remove(code) {
+            if expire_time > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
                 Ok(true)
             } else {
                 Err("Invalid confirm_code. Command execution denied.".to_string())
@@ -79,8 +81,8 @@ impl Tool for ExecuteCommand {
         "Execute a shell command."
     }
 
-    fn arguments(&self) -> &str {
-        r#"{
+    fn arguments(&self) -> Value {
+        serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
@@ -97,10 +99,10 @@ impl Tool for ExecuteCommand {
                 }
             },
             "required": ["command"]
-        }"#
+        })
     }
 
-    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let cmd_str = args_val["command"].as_str().ok_or_else(|| anyhow::anyhow!("command is required"))?;
         let cwd = args_val["cwd"].as_str();
@@ -113,11 +115,10 @@ impl Tool for ExecuteCommand {
         };
 
         if is_dangerous {
-            let iden_key = format!("{}:{}", iden.get_agent_id(),wd_tools::uuid::v4());
             let mut require_confirm = false;
             
             if let Some(code) = confirm_code {
-                match self.verify_and_remove_confirm_code(&iden_key, code) {
+                match self.verify_and_remove_confirm_code(code) {
                     Ok(true) => {} // Valid, proceed
                     Ok(false) => require_confirm = true, // Code not found, require new confirmation
                     Err(e) => return Err(anyhow::anyhow!(e)),
@@ -127,8 +128,8 @@ impl Tool for ExecuteCommand {
             }
 
             if require_confirm {
-                let generated_code = self.generate_confirm_code(iden_key);
-                return Ok(format!("Warning: You are trying to execute a dangerous command. please user to confirm, please call this tool again with the parameter `confirm_code` set to `{}`", generated_code));
+                let generated_code = self.generate_confirm_code();
+                return Ok(format!("Warning: You are trying to execute a dangerous command. Immediately terminate the session and ask the user for manual confirmation. After the user confirms a second time, set `confirm_code` is `{}`", generated_code));
             }
         }
 

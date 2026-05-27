@@ -19,6 +19,10 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
 pub trait Memory<T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>:
     Sync
 {
+    /// 记忆信息
+    async fn info(&self, session_id: &str) -> anyhow::Result<String>{
+        Ok("".to_string())
+    }
     /// 加载/获取记忆
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
 
@@ -111,43 +115,43 @@ impl ToolConfig {
 #[async_trait::async_trait]
 pub trait AgentConfig: Sync {
     /// 获取智能体名称，唯一标识
-    async fn name(&self) -> anyhow::Result<String>;
+    fn name(&self) -> String;
 
     /// 获取模型信息
-    async fn model(&self) -> anyhow::Result<ModelCallConfig>;
+    fn model(&self) -> ModelCallConfig;
 
     /// 获取系统 prompt
-    async fn prompt(&self) -> anyhow::Result<String> {
-        Ok(DEFAULT_SYSTEM_PROMPT.to_string())
+    fn prompt(&self) -> String {
+        DEFAULT_SYSTEM_PROMPT.to_string()
     }
 
     /// 获取启用的工具列表
-    async fn tools(&self) -> anyhow::Result<Vec<ToolConfig>> {
-        Ok(Vec::new())
+    fn tools(&self) -> Vec<ToolConfig> {
+        Vec::new()
     }
 
     /// 获取启用的技能 (skill) 列表
-    async fn skills(&self) -> anyhow::Result<Vec<String>> {
-        Ok(Vec::new())
+    fn skills(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// 获取配置的 mcp 服务列表
-    async fn mcp_servers(&self) -> anyhow::Result<Vec<String>> {
-        Ok(Vec::new())
+    fn mcp_servers(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// 获取子 agent 列表
-    async fn sub_agents(&self) -> anyhow::Result<Vec<String>> {
-        Ok(Vec::new())
+    fn sub_agents(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// 获取其他自定义配置项
-    async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
-        Ok(None)
+    fn get(&self, key: &str) ->Option<String> {
+        None
     }
 
-    /// 设置其他自定义配置项
-    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        Ok(())
+    /// agent信息, 包括workspace相关
+    fn agent_info(&self) -> String {
+        "".to_string()
     }
 }

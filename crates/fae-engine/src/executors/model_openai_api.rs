@@ -83,10 +83,10 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
                 let result = TaskResult::success(task.id, task.agent_id);
                 return if req.streaming {
                     let stream = self.chat_stream(req.req).await?;
-                    Ok(result.set_raw_data(stream))
+                    Ok(result.set_data(stream))
                 } else {
                     let resp = self.chat(req.req).await?;
-                    Ok(result.set_raw_data(resp))
+                    Ok(result.set_data(resp))
                 };
             } else {
                 return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!")
@@ -98,11 +98,11 @@ impl TaskExecutor for ModelOpenAIApiExecutor {
                 if req.stream.unwrap_or(false) {
                     // 流式请求
                     let stream = self.chat_stream(req).await?;
-                    return Ok(result.set_raw_data(stream));
+                    return Ok(result.set_data(stream));
                 }
                 //非流式请求
                 let resp = self.chat(req).await?;
-                Ok(result.set_raw_data(resp))
+                Ok(result.set_data(resp))
             } else {
                 return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!")
                     .err();

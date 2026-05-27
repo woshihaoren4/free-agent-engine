@@ -2,6 +2,7 @@ use crate::workspace::{Workspace, WorkspaceStatus};
 use crate::{AgentLoader, RecallAgentRef, SingleAgentLoaderFromFile};
 use fae_agent::{AgentRef, Env, Environment, Error};
 use std::sync::Arc;
+use crate::workspace::workspace_runtime::WorkspaceRuntime;
 
 pub struct AgentLoaderLayer<T> {
     o: Arc<dyn AgentLoader + Send + 'static>,
@@ -81,12 +82,20 @@ impl WorkspaceBuilder {
         N: Into<String>,
     {
         let name = name.into();
-        let single_agent_loader = SingleAgentLoaderFromFile::new(name.as_str());
+
         WorkspaceBuilder {
             name,
-            loader: Arc::new(single_agent_loader),
+            loader: Arc::new(()),
             env,
         }
+    }
+    pub async fn default_init(mut self) ->Self{
+        let single_agent_loader = SingleAgentLoaderFromFile::new(self.name.as_str());
+        self.set_loader(single_agent_loader);
+
+        let workspace_env = WorkspaceRuntime::new(self.name.clone());
+        self.add_env_layer(workspace_env).await;
+        self
     }
     pub fn build(self) -> Workspace {
         let ws = Workspace {
