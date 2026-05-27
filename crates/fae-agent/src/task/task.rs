@@ -134,6 +134,12 @@ impl Task {
     pub fn get_user_id(&self) -> &str {
         self.user_id.as_str()
     }
+    pub fn set_channel<T: Into<String>>(mut self, channel: T) -> Self {
+        self.exec_channel = channel.into();self
+    }
+    pub fn get_channel(&self) -> &str {
+        self.exec_channel.as_str()
+    }
     pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
         self.args = Some(args);
         self
@@ -166,7 +172,7 @@ impl Task {
 impl Default for Task {
     fn default() -> Self {
         let id = wd_tools::uuid::v4();
-        let aid = wd_tools::uuid::v4();
+        let aid = "".to_string();
         Self::new(id, aid, TaskType::None)
     }
 }

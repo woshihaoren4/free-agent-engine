@@ -7,7 +7,7 @@ use fae_agent::{Env, Environment};
 
 impl AgentsEngine {
     pub async fn default() -> Self {
-        AgentsEngine::new(TaskRuntime::new())
+        AgentsEngine::new(TaskRuntime::default())
             .assemble_runtime(PlanRuntime::new())
             .await
     }

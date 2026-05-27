@@ -15,11 +15,38 @@ pub enum ModelResponse {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
+pub struct ToolOut {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub output: String,
+}
+impl ToolOut {
+    pub fn new(tool_call_id: String, tool_name: String) -> Self {
+        Self {
+            tool_call_id,
+            tool_name,
+            output: "".to_string(),
+        }
+    }
+    pub fn set_output(&mut self, output: String) {
+        self.output = output;
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub enum ChatMsg {
     User(ChatCompletionRequestUserMessage),
     Assistant(ModelResponse),
-    Tool(RecordItemToolOut),
+    Tool(ToolOut),
     Custom(String, String),
+}
+
+#[derive(Debug, Default, Deserialize, Clone, PartialEq, Serialize)]
+pub struct ToolCall {
+    pub index: u32,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments: String,
 }
 
 pub trait MemoryEntry: Message {
@@ -41,36 +68,12 @@ pub trait MemoryEntry: Message {
     fn is_remember(&self) -> bool{
         false
     }
-}
-
-// ------------------- OpenAIMemoryEntry 的实现 -------------------
-
-#[derive(Debug, Default, Deserialize, Clone, PartialEq, Serialize)]
-pub struct RecordItemToolCall {
-    pub index: u32,
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub arguments: String,
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
-pub struct RecordItemToolOut {
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub output: String,
-}
-impl RecordItemToolOut {
-    pub fn new(tool_call_id: String, tool_name: String) -> Self {
-        Self {
-            tool_call_id,
-            tool_name,
-            output: "".to_string(),
-        }
-    }
-    pub fn set_output(&mut self, output: String) {
-        self.output = output;
+    fn try_to_tool_call(&self) -> Option<ToolCall> {
+        None
     }
 }
+
+// ------------------- MemoryEntry 的实现 -------------------
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub enum RecordItem {
@@ -78,8 +81,8 @@ pub enum RecordItem {
     UserInput(ChatCompletionRequestUserMessage),
     ModelThought(String),
     ModelOutput(String),
-    ToolCall(RecordItemToolCall),
-    ToolOutput(RecordItemToolOut),
+    ToolCall(ToolCall),
+    ToolOutput(ToolOut),
     Custom(String, String),
 }
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
@@ -155,7 +158,7 @@ impl MemoryEntry for Record {
                                 match j {
                                     ChatCompletionMessageToolCalls::Function(f) => {
                                         msgs.push(Record::from(RecordItem::ToolCall(
-                                            RecordItemToolCall {
+                                            ToolCall {
                                                 index: i.index,
                                                 tool_call_id: f.id,
                                                 tool_name: f.function.name,
@@ -165,7 +168,7 @@ impl MemoryEntry for Record {
                                     }
                                     ChatCompletionMessageToolCalls::Custom(c) => {
                                         msgs.push(Record::from(RecordItem::ToolCall(
-                                            RecordItemToolCall {
+                                            ToolCall {
                                                 index: i.index,
                                                 tool_call_id: c.id,
                                                 tool_name: c.custom_tool.name,
@@ -266,7 +269,7 @@ impl MemoryEntry for Record {
                         }
                     }
                     if !exists {
-                        let mut t = RecordItemToolCall::default();
+                        let mut t = ToolCall::default();
                         t.index = chunk.index;
                         if let Some(id) = chunk.id {
                             t.tool_call_id = id;
@@ -356,6 +359,16 @@ impl MemoryEntry for Record {
             RecordItem::UserInput(_) => true,
             RecordItem::ModelOutput(_) => true,
             _ => false,
+        }
+    }
+
+    fn try_to_tool_call(&self) -> Option<ToolCall>
+    where
+        Self: Sized
+    {
+        match &self.item {
+            RecordItem::ToolCall(tc) => Some(tc.clone()),
+            _ => None,
         }
     }
 }

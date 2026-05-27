@@ -28,9 +28,6 @@ impl TaskRuntime {
             parent: None,
             executors: HashMap::new(),
         }
-        .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
-        .register_executor_ext(TaskType::Tool, ToolExecutor::default())
-        .into_self()
     }
     pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
         format!("{}-{}", task_type, channel)
@@ -96,6 +93,14 @@ impl TaskRuntime {
             parent,
             executors,
         }
+    }
+}
+
+impl Default for TaskRuntime {
+    fn default() -> Self {
+        Self::new().register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
+            .register_executor_ext(TaskType::Tool, ToolExecutor::default())
+            .into_self()
     }
 }
 
