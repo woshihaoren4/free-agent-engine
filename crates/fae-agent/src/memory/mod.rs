@@ -151,7 +151,7 @@ pub trait AgentConfig: Sync {
     }
 
     /// agent信息, 包括workspace相关
-    fn agent_info(&self) -> String {
+    fn metadata(&self,id:&str) -> String {
         "".to_string()
     }
 }

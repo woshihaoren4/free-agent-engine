@@ -79,7 +79,9 @@ impl AgentConfigData {
         let prompt_dir = if self.prompt_dir.starts_with("/") {
             self.prompt_dir.clone()
         }else{
-            format!("{}/{}", path.display(), self.prompt_dir)
+            let dir = format!("{}/{}", path.display(), self.prompt_dir);
+            self.prompt_dir = dir.clone();
+            dir
         };
         //创建prompt文件
         let prompt_path = PathBuf::from(prompt_dir);
@@ -110,7 +112,7 @@ pub struct AgentConfigFile {
 impl AgentConfigFile {
 
     /// 从指定文件路径加载配置，如果文件不存在则创建默认配置
-    pub async fn load_or_default<P: Into<PathBuf>>(file_path: P) -> anyhow::Result<Self> {
+    pub async fn load<P: Into<PathBuf>>(file_path: P) -> anyhow::Result<Self> {
         let path = file_path.into();
         let config_data = if path.exists() {
             let content = tokio::fs::read_to_string(&path)
@@ -118,30 +120,7 @@ impl AgentConfigFile {
                 .context("Failed to read agent config file")?;
             serde_json::from_str::<AgentConfigData>(&content).unwrap_or_default()
         } else {
-            let mut default_data = AgentConfigData::default();
-            if let Some(parent) = path.parent() {
-                if !parent.exists() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .context("Failed to create agent config directory")?;
-                }
-                // 默认将 prompt_dir 设置为配置文件同目录
-                default_data.prompt_dir = format!("{}/{}", parent.display(), default_prompt_dir());
-            }
-            let content = serde_json::to_string_pretty(&default_data)?;
-            tokio::fs::write(&path, content)
-                .await
-                .context("Failed to write default agent config")?;
-
-            // 写入默认的 prompt.txt
-            let prompt_path = PathBuf::from(&default_data.prompt_dir);
-            if !prompt_path.exists() {
-                tokio::fs::write(&prompt_path, DEFAULT_SYSTEM_PROMPT)
-                    .await
-                    .context("Failed to write default prompt file")?;
-            }
-
-            default_data
+            return Err(anyhow::anyhow!("Agent config file not found: {}", path.display()));
         };
 
         let prompt_path = path.join(&config_data.prompt_dir);
@@ -204,14 +183,11 @@ impl AgentConfig for AgentConfigFile {
     fn get(&self, key: &str) -> Option<String> {
         self.config.custom.get(key).cloned()
     }
-    fn agent_info(&self) -> String {
-        let info = format!("Your personal information:\nyour name :`{}`\nyyour model config file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/config.json", self.name());
-        if self.config.prompt_dir.starts_with("/") {
-            // 绝对路径
-            format!("{}\nyour enactment prompt file path: {}", info, self.config.prompt_dir)
-        }else{
-            // 相对路径
-            format!("{}\nyour enactment prompt file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/{}", info, self.config.prompt_dir)
-        }
+    fn metadata(&self,id:&str) -> String {
+        let mut meta = "\n## Your Agent Metadata:".to_string();
+        meta.push_str(&format!("\n - your Agent Name: `{}`", self.name()));
+        meta.push_str(&format!("\n - your Agent Id: `{}`", id));
+        meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path: {}", self.file_path.display()));
+        format!("{}\n - your enactment prompt file path: {}", meta, self.config.prompt_dir)
     }
 }

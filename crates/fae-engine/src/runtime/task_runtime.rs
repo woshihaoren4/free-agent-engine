@@ -1,6 +1,6 @@
 use crate::ToolExecutor;
 use crate::executors::ModelOpenAIApiExecutor;
-use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskType, Thing, ThingItem, ThingSelect, FAE_HOME};
+use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::ops::Deref;

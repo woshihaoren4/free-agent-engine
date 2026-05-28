@@ -1,7 +1,5 @@
 use crate::{AgentLoader, RecallAgentRef};
-use fae_agent::{
-    AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager,
-};
+use fae_agent::{AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager, FAE_WORKSPACE};
 use fae_agent::{AgentRef, Record, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,9 +14,15 @@ pub struct SingleAgentLoaderFromFile {
 }
 
 impl SingleAgentLoaderFromFile {
-    pub fn new<P: Into<PathBuf>>(workspace_dir: P) -> Self {
+    pub fn new<P: Into<PathBuf>>(workspace_name: P) -> Self {
+        let base_dir = std::env::var(FAE_WORKSPACE)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
         Self {
-            workspace_dir: workspace_dir.into(),
+            workspace_dir: base_dir.join(workspace_name.into()),
             agents: RwLock::new(HashMap::new()),
         }
     }
@@ -56,7 +60,7 @@ impl AgentLoader for SingleAgentLoaderFromFile {
         .await?;
 
         // 3. Agent config
-        let agent_config = AgentConfigFile::load_or_default(&config_file).await?;
+        let agent_config = AgentConfigFile::load(&config_file).await?;
 
         // 4. Create the agent
         let single_agent = SingleAgent::<Record>::new(

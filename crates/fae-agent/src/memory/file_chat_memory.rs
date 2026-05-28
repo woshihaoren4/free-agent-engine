@@ -107,12 +107,10 @@ where
 {
     /// 记忆信息
     async fn info(&self, session_id: &str) -> anyhow::Result<String>{
-        let info = format!("This dialogue identifier $SESSION_ID: `{}`\n ", session_id);
-        if self.base_dir.starts_with("/"){
-            Ok(format!("{}\nsession description file path: {}/$SESSION_ID.desc", info,self.base_dir.display()))
-        }else{
-            Ok(format!("{}\nsession description file path: $FAE_HOME/$WORKSPACE/$AGENT_ID/session/$SESSION_ID.desc", info))
-        }
+        let mut info = "\nYour memory Metadata:".to_string();
+        info.push_str(&format!("\n - This dialogue identifier $SESSION_ID: `{}`", session_id));
+        info.push_str(&format!("\n - session description file path: {}/{}.desc", self.base_dir.display(), session_id));
+        Ok(info)
     }
     async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;

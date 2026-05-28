@@ -6,7 +6,6 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub const FAE_WORKSPACE: &str = "FAE_WORKSPACE";
-pub const FAE_HOME: &str = "FAE_HOME";
 
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, FAE_WORKSPACE, FAE_HOME};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest};
 use crate::{SessionMD};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs};
 use serde::de::DeserializeOwned;
@@ -200,12 +200,9 @@ where
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
-        let fae_home = self.env.query(ThingSelect::Env(FAE_HOME.to_string())).await?.pop().unwrap_or_default().items.pop().unwrap_or_default().string();
-        let workspace = self.env.query(ThingSelect::Env(FAE_WORKSPACE.to_string())).await?.pop().unwrap_or_default().items.pop().unwrap_or_default().string();
-
-        let memory_info = self.memory.info(self.session_id.as_str()).await?;
-        let agent_info = self.agent_config.agent_info();
-        self.agent_info = format!("Your Metadata:\nFAE_HOME: `{}`\nWORKSPACE: `{}`\n AGENT_ID: `{}`\n{}\n{}\n", fae_home, workspace, self.agent_id, agent_info, memory_info);
+        let agent_metadata = self.agent_config.metadata(&self.agent_id);
+        let memory_metdata = self.memory.info(&self.session_id).await?;
+        self.agent_info = agent_metadata + &memory_metdata;
         Ok(())
     }
     pub async fn load_tools(&mut self) -> anyhow::Result<()> {
