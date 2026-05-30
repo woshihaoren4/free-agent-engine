@@ -1,5 +1,5 @@
 use crate::{AgentCtl, RecallAgentRef, ErasedAgentConfig};
-use fae_agent::{AgentConfig, AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager, FAE_WORKSPACE};
+use fae_agent::{AgentConfig, AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionCtl, FAE_WORKSPACE};
 use fae_agent::{AgentRef, Record, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl AgentCtl for SingleAgentCtlFromFile {
         let memory = FileChatMemory::<Record>::new(&agent_dir).await?;
 
         // 2. Session config
-        let session_config = FileSessionMetaManager::<SingleAgentSessionConfig>::new(
+        let session_config = FileSessionCtl::<SingleAgentSessionConfig>::new(
             &agent_dir,
             |meta| meta.id.clone(),
             |_| 0, // SingleAgentSessionConfig doesn't have updated_at, return 0

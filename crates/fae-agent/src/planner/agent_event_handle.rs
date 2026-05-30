@@ -1,5 +1,5 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{Agent, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionEventLayer, SessionMD, SessionMetadata, TaskResult};
+use crate::{Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -16,8 +16,11 @@ where
     fn desc(&self) -> String {
         String::new()
     }
+    async fn on_info(&self) -> Arc<dyn AgentConfig+Send+'static>;
     /// 处理无事件
-    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static>;
+    async fn on_memory(&self) -> Arc<dyn Memory + Send + 'static>;
+    /// 处理会话事件
+    async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static>;
 
     async fn on_none(&self) {}
     /// 处理会话调用事件
@@ -144,8 +147,17 @@ where
         self.agent_event_ext.desc()
     }
 
-    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static> {
+    async fn on_info(&self) -> Arc<dyn AgentConfig + Send + 'static> {
+        self.agent_event_ext.on_info().await
+    }
+
+    async fn on_memory(&self) -> Arc<dyn Memory + Send + 'static> {
         self.agent_event_ext.on_memory().await
+    }
+
+    /// 处理会话事件
+    async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static> {
+        self.agent_event_ext.on_session_ctl().await
     }
 
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()> {

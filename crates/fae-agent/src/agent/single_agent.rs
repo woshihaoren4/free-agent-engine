@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadataInterface};
 use crate::{SessionMD};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
@@ -48,11 +48,16 @@ impl From<SingleAgentSessionConfig> for SessionMetadata {
         SessionMetadata::with_session_id(value.id.as_str()).set_user_id(value.user_id.as_str()).set_data(value)
     }
 }
+impl SessionMetadataInterface for SingleAgentSessionConfig {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+}
 
 pub struct SingleAgent<M> {
     agent_id: String,
     memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-    session_config: Arc<dyn SessionConfig<SingleAgentSessionConfig> + Send + 'static>,
+    session_config: Arc<dyn SessionCtlExt<SingleAgentSessionConfig> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
 }
 
@@ -60,7 +65,7 @@ impl<M> SingleAgent<M> {
     pub fn new(
         agent_id: impl Into<String>,
         memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-        session_config: Arc<dyn SessionConfig<SingleAgentSessionConfig> + Send + 'static>,
+        session_config: Arc<dyn SessionCtlExt<SingleAgentSessionConfig> + Send + 'static>,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
     ) -> Self {
         Self {
@@ -410,8 +415,16 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
         self.agent_config.desc()
     }
 
-    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static> {
-        Box::new(self.memory.clone())
+    async fn on_info(&self) -> Arc<dyn AgentConfig+Send+'static> {
+        self.agent_config.clone()
+    }
+
+    async fn on_memory(&self) -> Arc<dyn Memory + Send + 'static> {
+        Arc::new(self.memory.clone())
+    }
+    
+    async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static> {
+        Arc::new(self.session_config.clone())
     }
 
     async fn on_session_call_stream(
@@ -424,12 +437,12 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
         // session 没有则创建一个
         if self
             .session_config
-            .load(&info.user_id, info.session_id.as_str())
+            .load_ext(&info.user_id, info.session_id.as_str())
             .await?
             .is_none()
         {
             self.session_config
-                .create(&info.user_id, SingleAgentSessionConfig {
+                .create_ext(&info.user_id, SingleAgentSessionConfig {
                     id: info.session_id.clone(),
                     user_id: info.user_id.clone(),
                     name: input.content().to_string(),

@@ -1,8 +1,13 @@
 pub mod single_agent;
+mod agent_config;
+
 pub use single_agent::*;
+pub use agent_config::*;
+
+
 
 use crate::session::Session;
-use crate::{Command, Env, EnvEvent, Memory, MemoryMessageExt, SessionMetadata};
+use crate::{Command, Env, EnvEvent, Memory, SessionCtl, SessionMetadata};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -19,11 +24,17 @@ pub trait Agent: Sync {
         String::new()
     }
     
-    /// 获取memory
-    async fn on_memory(&self) -> Box<dyn Memory+Send+'static>;
-    
-    /// 
-    
+    /// 智能体信息
+    async fn on_info(&self) -> Arc<dyn AgentConfig+Send+'static>;
+
+
+    /// 处理memory操作
+    async fn on_memory(&self) -> Arc<dyn Memory+Send+'static>;
+
+    /// 处理session操作
+
+    async fn on_session_ctl(&self) -> Arc<dyn SessionCtl+Send+'static>;
+
 
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;

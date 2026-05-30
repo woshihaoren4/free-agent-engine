@@ -1,15 +1,62 @@
 mod session_event_layer;
 mod session_trait_ext;
+pub mod file_session_ctl;
+mod session_ext;
 
 pub use session_event_layer::*;
 pub use session_trait_ext::*;
+pub use session_ext::*;
 use std::any::Any;
+
+
 
 use crate::Msg;
 use crate::define::Message;
 use crate::error::Error;
 use tokio_stream::Stream;
 use wd_tools::PFErr;
+
+// ----------------------  通信会话 -----------------------------
+
+/// 会话 trait，定义智能体与外部交互的接口
+#[async_trait::async_trait]
+pub trait Session: Sync {
+    /// 同步调用，返回单个消息
+    async fn call(&mut self, _input: Msg) -> anyhow::Result<Msg> {
+        anyhow::Error::from(Error::Session("Session.call".into())).err()
+    }
+
+    /// 调用并返回流
+    async fn call_stream(
+        &mut self,
+        _input: Msg,
+    ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
+        anyhow::Error::from(Error::Session("Session.call_stream".into())).err()
+    }
+
+    /// 流式调用，一次返回
+    async fn stream_call(
+        &mut self,
+        _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
+    ) -> anyhow::Result<Msg> {
+        anyhow::Error::from(Error::Session("Session.stream_call".into())).err()
+    }
+
+    /// 双向流式调用
+    async fn stream(
+        &mut self,
+        _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
+    ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
+        anyhow::Error::from(Error::Session("Session.stream".into())).err()
+    }
+
+    /// 终止
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// ----------------------  会话管理 -----------------------------
 
 /// 会话元数据，用于传递会话相关信息
 #[derive(Debug)]
@@ -87,6 +134,22 @@ impl<T: ToString> From<T> for SessionMetadata {
         Self::with_session_id(value.to_string())
     }
 }
+// ----------------------  会话管理 -----------------------------
+
+/// 会话管理 trait，定义会话管理的接口
+#[async_trait::async_trait]
+pub trait SessionCtl: Sync {
+    // 加载session列表
+    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMetadata>>;
+    // 加载session详情
+    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMetadata>>;
+    // 更改session
+    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMetadata) -> anyhow::Result<()>;
+    // 创建session
+    async fn create(&self, user_id: &str, meta: SessionMetadata) -> anyhow::Result<()>;
+    // 删除session
+    async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
+}
 
 // ----------------------  解析会话元数据 -----------------------------
 
@@ -110,42 +173,7 @@ impl<T: Any> SessionMD<T> {
     pub fn get_data_mut(&mut self) -> &mut T {
         &mut self.data
     }
-}
-
-/// 会话 trait，定义智能体与外部交互的接口
-#[async_trait::async_trait]
-pub trait Session: Sync {
-    /// 同步调用，返回单个消息
-    async fn call(&mut self, _input: Msg) -> anyhow::Result<Msg> {
-        anyhow::Error::from(Error::Session("Session.call".into())).err()
-    }
-
-    /// 调用并返回流
-    async fn call_stream(
-        &mut self,
-        _input: Msg,
-    ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
-        anyhow::Error::from(Error::Session("Session.call_stream".into())).err()
-    }
-
-    /// 流式调用，一次返回
-    async fn stream_call(
-        &mut self,
-        _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
-    ) -> anyhow::Result<Msg> {
-        anyhow::Error::from(Error::Session("Session.stream_call".into())).err()
-    }
-
-    /// 双向流式调用
-    async fn stream(
-        &mut self,
-        _input: Box<dyn Stream<Item = Msg> + Send + Sync>,
-    ) -> anyhow::Result<Box<dyn Stream<Item = Msg> + Send + Sync>> {
-        anyhow::Error::from(Error::Session("Session.stream".into())).err()
-    }
-
-    /// 终止
-    async fn abort(&mut self) -> anyhow::Result<()> {
-        Ok(())
+    pub fn into_data(self) -> T {
+        self.data
     }
 }

@@ -2,12 +2,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use serde_json::Value;
-use tokio::sync::RwLock;
 use wd_tools::PFErr;
-use crate::{utils, ToolConfig, FAE_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL};
-use super::{
-    AgentConfig, DEFAULT_SYSTEM_PROMPT, EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, ModelCallConfig,
+use crate::{utils, AgentConfig, ModelCallConfig, ToolConfig, FAE_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL};
+use super::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL,
 };
 
 /// AgentConfig 的序列化数据结构

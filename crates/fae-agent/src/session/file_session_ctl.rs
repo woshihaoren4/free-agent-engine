@@ -1,18 +1,18 @@
 use anyhow::Context;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::memory::SessionConfig;
+use crate::SessionCtlExt;
 
 /// 基于文件系统的会话元数据管理实现
-pub struct FileSessionMetaManager<T> {
+pub struct FileSessionCtl<T> {
     dir_path: PathBuf,
     id_extractor: fn(&T) -> String,
     updated_at_extractor: fn(&T) -> u64,
 }
 
-impl<T> FileSessionMetaManager<T> {
+impl<T> FileSessionCtl<T> {
     /// 创建一个新的 FileSessionMetaManager
     ///
     /// # 参数
@@ -43,11 +43,11 @@ impl<T> FileSessionMetaManager<T> {
 }
 
 #[async_trait::async_trait]
-impl<T> SessionConfig<T> for FileSessionMetaManager<T>
+impl<T> SessionCtlExt<T> for FileSessionCtl<T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    async fn session_list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
+    async fn list_ext(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let user_dir = self.dir_path.join(user_id);
         if !user_dir.exists() {
             return Ok(vec![]);
@@ -84,7 +84,7 @@ where
         Ok(metas[start..end].to_vec())
     }
 
-    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<T>> {
+    async fn load_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<T>> {
         let file_path = self.get_file_path(user_id, session_id);
         if !file_path.exists() {
             return Ok(None);
@@ -97,7 +97,7 @@ where
         Ok(Some(meta))
     }
 
-    async fn update(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()> {
+    async fn update_ext(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()> {
         let file_path = self.get_file_path(user_id, session_id);
         if !file_path.exists() {
             anyhow::bail!("Session {} does not exist", session_id);
@@ -110,7 +110,7 @@ where
         Ok(())
     }
 
-    async fn create(&self, user_id: &str, meta: T) -> anyhow::Result<()> {
+    async fn create_ext(&self, user_id: &str, meta: T) -> anyhow::Result<()> {
         let session_id = (self.id_extractor)(&meta);
         let user_dir = self.dir_path.join(user_id);
         if !user_dir.exists() {
@@ -128,7 +128,7 @@ where
         Ok(())
     }
 
-    async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+    async fn delete_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         let file_path = self.get_file_path(user_id, session_id);
         if file_path.exists() {
             fs::remove_file(file_path)
