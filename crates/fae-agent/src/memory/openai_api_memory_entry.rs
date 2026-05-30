@@ -301,9 +301,9 @@ impl MemoryEntry for Record {
             RecordItem::Wait => "Wait".to_string(),
             RecordItem::UserInput(_) => "User".to_string(),
             RecordItem::ModelThought(_) => "Thought".to_string(),
-            RecordItem::ModelOutput(_) => "Assistant".to_string(),
-            RecordItem::ToolCall(tc) => format!("ToolCall: {}", tc.tool_name),
-            RecordItem::ToolOutput(to) => format!("ToolOutput: {}", to.tool_name),
+            RecordItem::ModelOutput(_) => "Output".to_string(),
+            RecordItem::ToolCall(tc) => format!("ToolCall({})", tc.tool_name),
+            RecordItem::ToolOutput(to) => format!("ToolOutput({})", to.tool_name),
             RecordItem::Custom(title, _) => title.to_string(),
         }
     }

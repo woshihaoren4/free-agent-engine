@@ -34,6 +34,11 @@ pub trait Agent: Sync {
     /// 智能体ID
     fn id(&self) -> String;
 
+    /// 智能体描述
+    fn desc(&self) -> String {
+        String::new()
+    }
+
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;
 

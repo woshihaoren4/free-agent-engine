@@ -21,7 +21,7 @@ pub struct RunStepObject {
     /// The Unix timestamp (in seconds) for when the run step was created.
     pub created_at: u64,
 
-    /// The ID of the [assistant](https://platform.openai.com/docs/api-reference/assistants) associated with the run step.
+    /// The ID of the [claw](https://platform.openai.com/docs/api-reference/assistants) associated with the run step.
     pub assistant_id: Option<String>,
 
     /// The ID of the [thread](https://platform.openai.com/docs/api-reference/threads) that was run.

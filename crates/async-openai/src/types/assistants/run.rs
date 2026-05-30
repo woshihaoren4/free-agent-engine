@@ -22,7 +22,7 @@ pub struct RunObject {
     ///The ID of the [thread](https://platform.openai.com/docs/api-reference/threads) that was executed on as a part of this run.
     pub thread_id: String,
 
-    /// The ID of the [assistant](https://platform.openai.com/docs/api-reference/assistants) used for execution of this run.
+    /// The ID of the [claw](https://platform.openai.com/docs/api-reference/assistants) used for execution of this run.
     pub assistant_id: Option<String>,
 
     /// The status of the run, which can be either `queued`, `in_progress`, `requires_action`, `cancelling`, `cancelled`, `failed`, `completed`, `incomplete`, or `expired`.
@@ -48,13 +48,13 @@ pub struct RunObject {
     /// Details on why the run is incomplete. Will be `null` if the run is not incomplete.
     pub incomplete_details: Option<RunObjectIncompleteDetails>,
 
-    /// The model that the [assistant](https://platform.openai.com/docs/api-reference/assistants) used for this run.
+    /// The model that the [claw](https://platform.openai.com/docs/api-reference/assistants) used for this run.
     pub model: String,
 
-    /// The instructions that the [assistant](https://platform.openai.com/docs/api-reference/assistants) used for this run.
+    /// The instructions that the [claw](https://platform.openai.com/docs/api-reference/assistants) used for this run.
     pub instructions: String,
 
-    /// The list of tools that the [assistant](https://platform.openai.com/docs/api-reference/assistants) used for this run.
+    /// The list of tools that the [claw](https://platform.openai.com/docs/api-reference/assistants) used for this run.
     pub tools: Vec<AssistantTools>,
 
     pub metadata: Option<HashMap<String, serde_json::Value>>,
@@ -185,14 +185,14 @@ pub struct RunCompletionUsage {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct CreateRunRequest {
-    /// The ID of the [assistant](https://platform.openai.com/docs/api-reference/assistants) to use to execute this run.
+    /// The ID of the [claw](https://platform.openai.com/docs/api-reference/assistants) to use to execute this run.
     pub assistant_id: String,
 
-    /// The ID of the [Model](https://platform.openai.com/docs/api-reference/models) to be used to execute this run. If a value is provided here, it will override the model associated with the assistant. If not, the model associated with the assistant will be used.
+    /// The ID of the [Model](https://platform.openai.com/docs/api-reference/models) to be used to execute this run. If a value is provided here, it will override the model associated with the claw. If not, the model associated with the claw will be used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Overrides the [instructions](https://platform.openai.com/docs/api-reference/assistants/createAssistant) of the assistant. This is useful for modifying the behavior on a per-run basis.
+    /// Overrides the [instructions](https://platform.openai.com/docs/api-reference/assistants/createAssistant) of the claw. This is useful for modifying the behavior on a per-run basis.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
@@ -204,7 +204,7 @@ pub struct CreateRunRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_messages: Option<Vec<CreateMessageRequest>>,
 
-    /// Override the tools the assistant can use for this run. This is useful for modifying the behavior on a per-run basis.
+    /// Override the tools the claw can use for this run. This is useful for modifying the behavior on a per-run basis.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 

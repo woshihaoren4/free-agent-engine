@@ -3,7 +3,6 @@ mod file_chat_memory;
 mod file_session_config;
 mod openai_api_memory_entry;
 
-use std::any::Any;
 pub use file_agent_config::*;
 pub use file_chat_memory::*;
 pub use file_session_config::*;
@@ -12,10 +11,9 @@ pub use openai_api_memory_entry::*;
 use crate::Message;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub const EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL: &str = "OpenAI-Compatible API";
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a claw.";
 
 #[async_trait::async_trait]
 pub trait Memory<T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>:
@@ -123,6 +121,11 @@ impl ToolConfig {
 pub trait AgentConfig:Sync {
     /// 获取智能体名称，唯一标识
     fn name(&self) -> String;
+
+    /// 获取智能体描述
+    fn desc(&self) -> String {
+        String::new()
+    }
 
     /// 获取模型信息
     fn model(&self) -> ModelCallConfig;

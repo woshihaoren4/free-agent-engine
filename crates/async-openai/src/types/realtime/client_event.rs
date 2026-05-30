@@ -72,7 +72,7 @@ pub struct RealtimeClientEventConversationItemTruncate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
 
-    /// The ID of the assistant message item to truncate. Only assistant message items can be truncated.
+    /// The ID of the claw message item to truncate. Only claw message items can be truncated.
     pub item_id: String,
 
     /// The index of the content part to truncate. Set this to `0`.
@@ -163,7 +163,7 @@ pub enum RealtimeClientEvent {
 
     /// Add a new Item to the Conversation's context, including messages, function calls, and function call responses.
     /// This event can be used both to populate a "history" of the conversation and to add new items mid-stream,
-    /// but has the current limitation that it cannot populate assistant audio messages.
+    /// but has the current limitation that it cannot populate claw audio messages.
     ///
     /// If successful, the server will respond with a `conversation.item.created` event, otherwise an `error` event will be sent.
     #[serde(rename = "conversation.item.create")]
@@ -176,7 +176,7 @@ pub enum RealtimeClientEvent {
     #[serde(rename = "conversation.item.retrieve")]
     ConversationItemRetrieve(RealtimeClientEventConversationItemRetrieve),
 
-    /// Send this event to truncate a previous assistant message's audio. The server will produce audio faster than realtime,
+    /// Send this event to truncate a previous claw message's audio. The server will produce audio faster than realtime,
     /// so this event is useful when the user interrupts to truncate audio that has already been sent to the client but not
     /// yet played. This will synchronize the server's understanding of the audio with the client's playback.
     ///

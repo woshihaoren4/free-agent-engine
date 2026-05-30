@@ -16,6 +16,9 @@ where
     P: Planning + Send + 'static,
 {
     fn id(&self) -> String;
+    fn desc(&self) -> String {
+        String::new()
+    }
     async fn on_none(&self) {}
     /// 处理会话调用事件
     async fn on_session_call(
@@ -135,6 +138,10 @@ where
 {
     fn id(&self) -> String {
         self.agent_event_ext.id()
+    }
+
+    fn desc(&self) -> String {
+        self.agent_event_ext.desc()
     }
 
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()> {

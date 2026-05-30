@@ -359,7 +359,7 @@ pub struct RealtimeSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// Maximum number of output tokens for a single assistant response,
+    /// Maximum number of output tokens for a single claw response,
     /// inclusive of tool calls. Provide an integer between 1 and 4096 to limit output tokens,
     /// or `inf` for the maximum available tokens for a given model. Defaults to `inf`.
     #[serde(skip_serializing_if = "Option::is_none")]

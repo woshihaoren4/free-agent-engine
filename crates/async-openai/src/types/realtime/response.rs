@@ -179,7 +179,7 @@ pub struct RealtimeResponseCreateParams {
     /// the `session.created` event at the start of the session.
     pub instructions: String,
 
-    /// Maximum number of output tokens for a single assistant response, inclusive of tool calls.
+    /// Maximum number of output tokens for a single claw response, inclusive of tool calls.
     /// Provide an integer between 1 and 4096 to limit output tokens, or inf for the maximum
     /// available tokens for a given model. Defaults to `inf`.
     pub max_output_tokens: MaxOutputTokens,
@@ -230,7 +230,7 @@ pub struct RealtimeResponse {
     /// The unique ID of the response, will look like `resp_1234`.
     pub id: String,
 
-    /// Maximum number of output tokens for a single assistant response, inclusive of tool calls,
+    /// Maximum number of output tokens for a single claw response, inclusive of tool calls,
     /// that was used in this response.
     pub max_output_tokens: MaxOutputTokens,
 

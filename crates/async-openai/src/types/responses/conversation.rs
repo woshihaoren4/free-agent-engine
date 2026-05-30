@@ -159,12 +159,12 @@ pub struct Message {
     /// The status of item. One of `in_progress`, `completed`, or `incomplete`. Populated when items are
     /// returned via API.
     pub status: MessageStatus,
-    /// The role of the message. One of `unknown`, `user`, `assistant`, `system`, `critic`,
+    /// The role of the message. One of `unknown`, `user`, `claw`, `system`, `critic`,
     /// `discriminator`, `developer`, or `tool`.
     pub role: MessageRole,
     /// The content of the message.
     pub content: Vec<MessageContent>,
-    /// Labels an `assistant` message as intermediate commentary (`commentary`) or the final
+    /// Labels an `claw` message as intermediate commentary (`commentary`) or the final
     /// answer (`final_answer`). Not used for user messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<MessagePhase>,
@@ -221,7 +221,7 @@ pub enum IncludeParam {
     /// Include image urls from the input message.
     #[serde(rename = "message.input_image.image_url")]
     MessageInputImageImageUrl,
-    /// Include logprobs with assistant messages.
+    /// Include logprobs with claw messages.
     #[serde(rename = "message.output_text.logprobs")]
     MessageOutputTextLogprobs,
     /// Include an encrypted version of reasoning tokens in reasoning item outputs.

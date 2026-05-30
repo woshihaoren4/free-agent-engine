@@ -327,7 +327,7 @@ impl Display for Role {
             match self {
                 Role::User => "user",
                 Role::System => "system",
-                Role::Assistant => "assistant",
+                Role::Assistant => "claw",
                 Role::Function => "function",
                 Role::Tool => "tool",
             }

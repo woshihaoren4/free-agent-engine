@@ -26,6 +26,7 @@ pub trait AgentCtl: Sync {
     }
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef>;
     async fn recall(&self, task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>>;
+    async fn list(&self, limit: usize, offset: usize) -> anyhow::Result<Vec<AgentRef>>;
     async fn create(
         &self,
         agent_ctl_id: &str,
@@ -44,6 +45,9 @@ impl AgentCtl for () {
     }
     async fn recall(&self, _task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
         Ok(Vec::new())
+    }
+    async fn list(&self, _limit: usize, _offset: usize) -> anyhow::Result<Vec<AgentRef>> {
+        Err(Error::NoSupport.into())
     }
     async fn create(
         &self,
@@ -114,6 +118,19 @@ where
             Err(e) => {
                 if let Some(Error::NoSupport) = e.downcast_ref::<Error>() {
                     self.o.recall(task_desc).await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    async fn list(&self, limit: usize, offset: usize) -> anyhow::Result<Vec<AgentRef>> {
+        match self.n.list(limit, offset).await {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                if let Some(Error::NoSupport) = e.downcast_ref::<Error>() {
+                    self.o.list(limit, offset).await
                 } else {
                     Err(e)
                 }

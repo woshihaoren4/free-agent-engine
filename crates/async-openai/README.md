@@ -132,7 +132,7 @@ let response: Value = client
             "messages": [
                 {
                     "role": "developer",
-                    "content": "You are a helpful assistant"
+                    "content": "You are a helpful claw"
                 },
                 {
                     "role": "user",

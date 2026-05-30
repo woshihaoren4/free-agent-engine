@@ -118,7 +118,7 @@ pub struct ContainerFileResource {
     pub bytes: u32,
     /// Path of the file in the container.
     pub path: String,
-    /// Source of the file (e.g., `user`, `assistant`).
+    /// Source of the file (e.g., `user`, `claw`).
     pub source: String,
 }
 

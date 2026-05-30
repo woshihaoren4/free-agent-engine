@@ -17,7 +17,7 @@ pub struct AssistantToolCodeInterpreterResources {
 
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 pub struct AssistantToolFileSearchResources {
-    /// The ID of the [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) attached to this assistant. There can be a maximum of 1 vector store attached to the assistant.
+    /// The ID of the [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) attached to this claw. There can be a maximum of 1 vector store attached to the claw.
     pub vector_store_ids: Vec<String>,
 }
 
@@ -39,9 +39,9 @@ pub struct CreateAssistantToolResources {
 
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 pub struct CreateAssistantToolFileSearchResources {
-    ///  The [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) attached to this assistant. There can be a maximum of 1 vector store attached to the assistant.
+    ///  The [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) attached to this claw. There can be a maximum of 1 vector store attached to the claw.
     pub vector_store_ids: Option<Vec<String>>,
-    /// A helper to create a [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) with file_ids and attach it to this assistant. There can be a maximum of 1 vector store attached to the assistant.
+    /// A helper to create a [vector store](https://platform.openai.com/docs/api-reference/vector-stores/object) with file_ids and attach it to this claw. There can be a maximum of 1 vector store attached to the claw.
     pub vector_stores: Option<Vec<AssistantVectorStore>>,
 }
 
@@ -68,7 +68,7 @@ pub enum AssistantVectorStoreChunkingStrategy {
     Static { r#static: StaticChunkingStrategy },
 }
 
-/// Represents an `assistant` that can call the model and use tools.
+/// Represents an `claw` that can call the model and use tools.
 #[deprecated(
     note = "Assistants API is deprecated and will be removed in August 2026. Use the Responses API."
 )]
@@ -76,22 +76,22 @@ pub enum AssistantVectorStoreChunkingStrategy {
 pub struct AssistantObject {
     /// The identifier, which can be referenced in API endpoints.
     pub id: String,
-    /// The object type, which is always `assistant`.
+    /// The object type, which is always `claw`.
     pub object: String,
-    /// The Unix timestamp (in seconds) for when the assistant was created.
+    /// The Unix timestamp (in seconds) for when the claw was created.
     pub created_at: u64,
-    /// The name of the assistant. The maximum length is 256 characters.
+    /// The name of the claw. The maximum length is 256 characters.
     pub name: Option<String>,
-    /// The description of the assistant. The maximum length is 512 characters.
+    /// The description of the claw. The maximum length is 512 characters.
     pub description: Option<String>,
     /// ID of the model to use. You can use the [List models](https://platform.openai.com/docs/api-reference/models/list) API to see all of your available models, or see our [Model overview](https://platform.openai.com/docs/models) for descriptions of them.
     pub model: String,
-    /// The system instructions that the assistant uses. The maximum length is 256,000 characters.
+    /// The system instructions that the claw uses. The maximum length is 256,000 characters.
     pub instructions: Option<String>,
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the claw. There can be a maximum of 128 tools per claw. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(default)]
     pub tools: Vec<AssistantTools>,
-    /// A set of resources that are used by the assistant's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are used by the claw's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     pub tool_resources: Option<AssistantToolResources>,
     /// Set of 16 key-value pairs that can be attached to an object. This can be useful for storing additional information about the object in a structured format. Keys can be a maximum of 64 characters long and values can be a maximum of 512 characters long.
     pub metadata: Option<HashMap<String, String>>,
@@ -186,23 +186,23 @@ pub struct CreateAssistantRequest {
     /// ID of the model to use. You can use the [List models](https://platform.openai.com/docs/api-reference/models/list) API to see all of your available models, or see our [Model overview](https://platform.openai.com/docs/models/overview) for descriptions of them.
     pub model: String,
 
-    /// The name of the assistant. The maximum length is 256 characters.
+    /// The name of the claw. The maximum length is 256 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// The description of the assistant. The maximum length is 512 characters.
+    /// The description of the claw. The maximum length is 512 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// The system instructions that the assistant uses. The maximum length is 256,000 characters.
+    /// The system instructions that the claw uses. The maximum length is 256,000 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the claw. There can be a maximum of 128 tools per claw. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 
-    /// A set of resources that are used by the assistant's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are used by the claw's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_resources: Option<CreateAssistantToolResources>,
 
@@ -238,23 +238,23 @@ pub struct ModifyAssistantRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// The name of the assistant. The maximum length is 256 characters.
+    /// The name of the claw. The maximum length is 256 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// The description of the assistant. The maximum length is 512 characters.
+    /// The description of the claw. The maximum length is 512 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// The system instructions that the assistant uses. The maximum length is 256,000 characters.
+    /// The system instructions that the claw uses. The maximum length is 256,000 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// A list of tool enabled on the assistant. There can be a maximum of 128 tools per assistant. Tools can be of types `code_interpreter`, `file_search`, or `function`.
+    /// A list of tool enabled on the claw. There can be a maximum of 128 tools per claw. Tools can be of types `code_interpreter`, `file_search`, or `function`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 
-    /// A set of resources that are used by the assistant's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are used by the claw's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_resources: Option<AssistantToolResources>,
     /// Set of 16 key-value pairs that can be attached to an object. This can be useful for storing additional information about the object in a structured format. Keys can be a maximum of 64 characters long and values can be a maxium of 512 characters long.

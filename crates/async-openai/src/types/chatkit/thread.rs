@@ -103,7 +103,7 @@ pub enum ThreadItem {
     /// Thread item that renders a widget payload.
     #[serde(rename = "chatkit.widget")]
     Widget(WidgetMessageItem),
-    /// Record of a client side tool invocation initiated by the assistant.
+    /// Record of a client side tool invocation initiated by the claw.
     #[serde(rename = "chatkit.client_tool_call")]
     ClientToolCall(ClientToolCallItem),
     /// Task emitted by the workflow to show progress and status updates.
@@ -176,7 +176,7 @@ pub enum AttachmentType {
     File,
 }
 
-/// Model and tool overrides applied when generating the assistant response.
+/// Model and tool overrides applied when generating the claw response.
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 pub struct InferenceOptions {
     /// Preferred tool to invoke. Defaults to null when ChatKit should auto-select.
@@ -187,7 +187,7 @@ pub struct InferenceOptions {
     pub model: Option<String>,
 }
 
-/// Tool selection that the assistant should honor when executing the item.
+/// Tool selection that the claw should honor when executing the item.
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq, Default)]
 pub struct ToolChoice {
     /// Identifier of the requested tool.
@@ -206,7 +206,7 @@ pub struct AssistantMessageItem {
     pub created_at: u64,
     /// Identifier of the parent thread.
     pub thread_id: String,
-    /// Ordered assistant response segments.
+    /// Ordered claw response segments.
     pub content: Vec<ResponseOutputText>,
 }
 
@@ -311,7 +311,7 @@ pub struct WidgetMessageItem {
     pub widget: String,
 }
 
-/// Record of a client side tool invocation initiated by the assistant.
+/// Record of a client side tool invocation initiated by the claw.
 #[derive(Clone, Serialize, Debug, Deserialize, PartialEq)]
 pub struct ClientToolCallItem {
     /// Identifier of the thread item.

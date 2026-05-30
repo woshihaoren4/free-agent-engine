@@ -27,7 +27,7 @@ impl<'c, C: Config> Assistants<'c, C> {
         }
     }
 
-    /// Create an assistant with a model and instructions.
+    /// Create an claw with a model and instructions.
     #[crate::byot(T0 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn create(
         &self,
@@ -38,7 +38,7 @@ impl<'c, C: Config> Assistants<'c, C> {
             .await
     }
 
-    /// Retrieves an assistant.
+    /// Retrieves an claw.
     #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn retrieve(&self, assistant_id: &str) -> Result<AssistantObject, OpenAIError> {
         self.client
@@ -49,7 +49,7 @@ impl<'c, C: Config> Assistants<'c, C> {
             .await
     }
 
-    /// Modifies an assistant.
+    /// Modifies an claw.
     #[crate::byot(T0 = std::fmt::Display, T1 = serde::Serialize, R = serde::de::DeserializeOwned)]
     pub async fn update(
         &self,
@@ -65,7 +65,7 @@ impl<'c, C: Config> Assistants<'c, C> {
             .await
     }
 
-    /// Delete an assistant.
+    /// Delete an claw.
     #[crate::byot(T0 = std::fmt::Display, R = serde::de::DeserializeOwned)]
     pub async fn delete(&self, assistant_id: &str) -> Result<DeleteAssistantResponse, OpenAIError> {
         self.client

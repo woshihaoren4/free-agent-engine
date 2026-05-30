@@ -18,17 +18,21 @@ impl SingleAgentCtlFromFile {
     pub fn get_id() -> &'static str {
         "default_single_agent"
     }
-    pub fn new<P: Into<PathBuf>>(workspace_name: P) -> Self {
+    pub fn new<P: Into<PathBuf>>(workspace_dir: P) -> Self {
+        Self {
+            workspace_dir: workspace_dir.into(),
+            agents: RwLock::new(HashMap::new()),
+        }
+    }
+}
+impl Default for SingleAgentCtlFromFile {
+    fn default() -> Self {
         let base_dir = std::env::var(FAE_WORKSPACE)
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-        Self {
-            workspace_dir: base_dir.join(workspace_name.into()),
-            agents: RwLock::new(HashMap::new()),
-        }
+        Self::new(base_dir)
     }
 }
 
@@ -86,6 +90,42 @@ impl AgentCtl for SingleAgentCtlFromFile {
 
     async fn recall(&self, _task_desc: &str) -> anyhow::Result<Vec<RecallAgentRef>> {
         Err(Error::NoSupport.into())
+    }
+
+    async fn list(&self, limit: usize, offset: usize) -> anyhow::Result<Vec<AgentRef>> {
+        if !self.workspace_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = tokio::fs::read_dir(&self.workspace_dir).await?;
+        let mut agents_info = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir() {
+                let metadata = entry.metadata().await?;
+                let created = metadata.created().or_else(|_| metadata.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if let Ok(name) = entry.file_name().into_string() {
+                    agents_info.push((name, created));
+                }
+            }
+        }
+
+        // Sort descending by creation time
+        agents_info.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut result = Vec::new();
+        let paginated_agents = agents_info.into_iter().skip(offset).take(limit);
+
+        for (agent_id, _) in paginated_agents {
+            match self.load(&agent_id).await {
+                Ok(agent) => result.push(agent),
+                Err(e) => {
+                    wd_log::log_warn_ln!("[SingleAgentCtlFromFile::{}] skip load agent {}: {}", self.id(), agent_id, e);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     async fn create(

@@ -138,21 +138,3 @@ where
         Ok(())
     }
 }
-
-#[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionMeta {
-    pub id: String,
-    pub title: String,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-/// 默认的文件会话元数据管理实现类型别名
-pub type DefaultFileSessionMetaManager = FileSessionMetaManager<SessionMeta>;
-
-impl FileSessionMetaManager<SessionMeta> {
-    /// 为默认的 SessionMeta 创建一个文件管理器
-    pub async fn new_default<P: Into<PathBuf>>(dir_path: P) -> anyhow::Result<Self> {
-        Self::new(dir_path, |meta| meta.id.clone(), |meta| meta.updated_at).await
-    }
-}

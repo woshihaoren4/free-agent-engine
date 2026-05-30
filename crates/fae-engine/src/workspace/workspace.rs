@@ -95,6 +95,9 @@ impl Workspace {
     pub async fn get_agent(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
         self.loader.load(agent_id).await
     }
+    pub async fn list_agents(&self, limit: usize, offset: usize) -> anyhow::Result<Vec<AgentRef>> {
+        self.loader.list(limit, offset).await
+    }
     pub async fn create_single_agent<Cfg: AgentConfig + Send + 'static>(
         &self,
         agent_id: &str,

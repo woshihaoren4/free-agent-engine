@@ -12,9 +12,10 @@ use serde_json::Value;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
 
-#[derive(Default, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SingleAgentSessionConfig {
     pub id: String,
+    pub user_id: String,
     pub name: String,
 }
 impl SingleAgentSessionConfig {
@@ -22,11 +23,29 @@ impl SingleAgentSessionConfig {
         self.id = id.into();
         self
     }
+    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+    pub fn set_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+}
+
+impl Default for SingleAgentSessionConfig {
+    fn default() -> Self {
+        Self {
+            id: "main_session_id_1".to_string(),
+            user_id: "master".to_string(),
+            name: String::new(),
+        }
+    }
 }
 
 impl From<SingleAgentSessionConfig> for SessionMetadata {
     fn from(value: SingleAgentSessionConfig) -> Self {
-        SessionMetadata::with_session_id(value.id.as_str()).set_data(value)
+        SessionMetadata::with_session_id(value.id.as_str()).set_user_id(value.user_id.as_str()).set_data(value)
     }
 }
 
@@ -387,6 +406,10 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
         self.agent_id.clone()
     }
 
+    fn desc(&self) -> String {
+        self.agent_config.desc()
+    }
+
     async fn on_session_call_stream(
         &self,
         env: Env,
@@ -404,6 +427,7 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             self.session_config
                 .create(&info.user_id, SingleAgentSessionConfig {
                     id: info.session_id.clone(),
+                    user_id: info.user_id.clone(),
                     name: input.content().to_string(),
                 })
                 .await?;

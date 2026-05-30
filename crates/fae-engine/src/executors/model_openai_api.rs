@@ -153,7 +153,7 @@ mod tests {
             .build()
             .expect("build request failed!");
 
-        let task = Task::new("1", "assistant", TaskType::Model).set_args(request);
+        let task = Task::new("1", "claw", TaskType::Model).set_args(request);
 
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
@@ -183,7 +183,7 @@ mod tests {
             .build()
             .expect("build request failed!");
         let request = ModelOpenAIApiExecutor::build_stream_chat_request(request);
-        let task = Task::new("1", "assistant", TaskType::Model).set_args(request);
+        let task = Task::new("1", "claw", TaskType::Model).set_args(request);
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
             .into_inner::<ChatCompletionResponseStream>()

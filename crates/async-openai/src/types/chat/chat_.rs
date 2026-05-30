@@ -313,10 +313,10 @@ pub struct ChatCompletionRequestAssistantMessageAudio {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct ChatCompletionRequestAssistantMessage {
-    /// The contents of the assistant message. Required unless `tool_calls` or `function_call` is specified.
+    /// The contents of the claw message. Required unless `tool_calls` or `function_call` is specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ChatCompletionRequestAssistantMessageContent>,
-    /// The refusal message by the assistant.
+    /// The refusal message by the claw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
     /// An optional name for the participant. Provides the model information to differentiate between participants of the same role.

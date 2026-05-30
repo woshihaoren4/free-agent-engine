@@ -11,15 +11,18 @@ struct InitArgs {
 
 #[derive(Args, Debug)]
 pub struct AgentArgs {
-    #[arg(short, long, default_value_t = false, help = "show all agents")]
-    pub list: bool,
+    #[arg(short, long, help = "agent name, default is main")]
+    pub name: Option<String>,
+    #[arg(short, long, help = "agent chat")]
+    pub chat: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
-    /// 初始化项目
+    /// init workspace agent and default config ...
     Init,
-    /// 管理智能体
+    /// manage agent
+    #[command(alias = "a")]
     Agent(AgentArgs),
 }
 

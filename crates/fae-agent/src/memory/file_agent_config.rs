@@ -14,6 +14,8 @@ use super::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigData {
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub model: ModelCallConfig,
     #[serde(default = "default_prompt_dir")]
     pub prompt_dir: String,
@@ -46,6 +48,7 @@ impl Default for AgentConfigData {
 
         Self {
             name: "风筝引擎".to_string(),
+            description: String::new(),
             model: ModelCallConfig {
                 model: model_name,
                 channel: default_channel(),
@@ -112,6 +115,14 @@ impl AgentConfigData {
     pub fn set_prompt_path<P: Into<String>>(mut self, prompt_path: P)->Self {
         self.prompt_dir = prompt_path.into();self
     }
+    pub fn set_name(mut self, name: &str) ->Self {
+        self.name = name.to_string();
+        self
+    }
+    pub fn set_description(mut self, description: &str)->Self {
+        self.description = description.to_string();
+        self
+    }
 }
 
 /// 基于文件系统的 AgentConfig 实现
@@ -176,6 +187,10 @@ impl AgentConfigFile {
 impl AgentConfig for AgentConfigFile {
     fn name(&self) -> String {
         self.config.name.clone()
+    }
+
+    fn desc(&self) -> String {
+        self.config.description.clone()
     }
 
     fn model(&self) -> ModelCallConfig {

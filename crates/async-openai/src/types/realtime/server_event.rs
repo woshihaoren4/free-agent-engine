@@ -189,7 +189,7 @@ pub struct RealtimeServerEventConversationItemInputAudioTranscriptionFailed {
 pub struct RealtimeServerEventConversationItemTruncated {
     /// The unique ID of the server event.
     pub event_id: String,
-    /// The ID of the assistant message item that was truncated.
+    /// The ID of the claw message item that was truncated.
     pub item_id: String,
     /// The index of the content part that was truncated.
     pub content_index: u32,
@@ -637,7 +637,7 @@ pub enum RealtimeServerEvent {
         RealtimeServerEventConversationItemInputAudioTranscriptionFailed,
     ),
 
-    /// Returned when an earlier assistant audio message item is truncated by the client with a `conversation.item.truncate` event.
+    /// Returned when an earlier claw audio message item is truncated by the client with a `conversation.item.truncate` event.
     /// This event is used to synchronize the server's understanding of the audio with the client's playback.
     ///
     /// This action will truncate the audio and remove the server-side text transcript to ensure there is no text in the
@@ -742,11 +742,11 @@ pub enum RealtimeServerEvent {
     #[serde(rename = "response.output_item.done")]
     ResponseOutputItemDone(RealtimeServerEventResponseOutputItemDone),
 
-    /// Returned when a new content part is added to an assistant message item during response generation.
+    /// Returned when a new content part is added to an claw message item during response generation.
     #[serde(rename = "response.content_part.added")]
     ResponseContentPartAdded(RealtimeServerEventResponseContentPartAdded),
 
-    /// Returned when a content part is done streaming in an assistant message item.
+    /// Returned when a content part is done streaming in an claw message item.
     /// Also emitted when a Response is interrupted, incomplete, or cancelled.
     #[serde(rename = "response.content_part.done")]
     ResponseContentPartDone(RealtimeServerEventResponseContentPartDone),

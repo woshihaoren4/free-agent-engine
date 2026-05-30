@@ -21,7 +21,7 @@ pub struct ThreadObject {
     /// The Unix timestamp (in seconds) for when the thread was created.
     pub created_at: u64,
 
-    /// A set of resources that are made available to the assistant's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are made available to the claw's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     pub tool_resources: Option<AssistantToolResources>,
 
     pub metadata: Option<HashMap<String, serde_json::Value>>,
@@ -38,7 +38,7 @@ pub struct CreateThreadRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<CreateMessageRequest>>,
 
-    /// A set of resources that are made available to the assistant's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are made available to the claw's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_resources: Option<CreateAssistantToolResources>,
 
@@ -51,7 +51,7 @@ pub struct ModifyThreadRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 
-    /// A set of resources that are made available to the assistant's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are made available to the claw's tools in this thread. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_resources: Option<AssistantToolResources>,
 }
@@ -70,26 +70,26 @@ pub struct DeleteThreadResponse {
 #[builder(derive(Debug))]
 #[builder(build_fn(error = "OpenAIError"))]
 pub struct CreateThreadAndRunRequest {
-    /// The ID of the [assistant](https://platform.openai.com/docs/api-reference/assistants) to use to execute this run.
+    /// The ID of the [claw](https://platform.openai.com/docs/api-reference/assistants) to use to execute this run.
     pub assistant_id: String,
 
     /// If no thread is provided, an empty thread will be created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread: Option<CreateThreadRequest>,
 
-    /// The ID of the [Model](https://platform.openai.com/docs/api-reference/models) to be used to execute this run. If a value is provided here, it will override the model associated with the assistant. If not, the model associated with the assistant will be used.
+    /// The ID of the [Model](https://platform.openai.com/docs/api-reference/models) to be used to execute this run. If a value is provided here, it will override the model associated with the claw. If not, the model associated with the claw will be used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Override the default system message of the assistant. This is useful for modifying the behavior on a per-run basis.
+    /// Override the default system message of the claw. This is useful for modifying the behavior on a per-run basis.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
-    /// Override the tools the assistant can use for this run. This is useful for modifying the behavior on a per-run basis.
+    /// Override the tools the claw can use for this run. This is useful for modifying the behavior on a per-run basis.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AssistantTools>>,
 
-    /// A set of resources that are used by the assistant's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
+    /// A set of resources that are used by the claw's tools. The resources are specific to the type of tool. For example, the `code_interpreter` tool requires a list of file IDs, while the `file_search` tool requires a list of vector store IDs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_resources: Option<AssistantToolResources>,
 

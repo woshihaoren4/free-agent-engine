@@ -1,5 +1,5 @@
 [package]
-name = "fae-ctl"
+name = "fae"
 version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
@@ -12,3 +12,11 @@ readme.workspace = true
 wd_log = "0.4.0"
 wd_tools = "0.14.10"
 clap = {version =  "4.5.50",features = ["derive"] }
+fae-agent = { version = "0.1.0", path = "../../crates/fae-agent" }
+fae-engine = { version = "0.1.0", path = "../../crates/fae-engine" }
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+tokio-stream = { workspace = true }
+dirs = "6.0.0"
+crossterm = "0.29.0"
+ratatui = "0.30.0"
+tui-input = "0.15.3"
