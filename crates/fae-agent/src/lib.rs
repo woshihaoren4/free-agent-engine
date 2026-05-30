@@ -6,6 +6,7 @@ mod memory;
 mod planner;
 mod session;
 mod task;
+mod utils;
 
 pub use agent::*;
 pub use define::*;

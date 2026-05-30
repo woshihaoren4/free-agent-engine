@@ -35,7 +35,7 @@ impl Default for SessionMetadata {
     fn default() -> Self {
         Self {
             session_id: wd_tools::uuid::v4(),
-            user_id: "".to_string(),
+            user_id: "master".to_string(),
             data: Box::new(()),
         }
     }
@@ -45,7 +45,7 @@ impl SessionMetadata {
     pub fn with_session_id<S: Into<String>>(session_id: S) -> Self {
         Self {
             session_id: session_id.into(),
-            user_id: "".to_string(),
+            user_id: "master".to_string(),
             data: Box::new(()),
         }
     }

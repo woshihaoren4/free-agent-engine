@@ -4,7 +4,7 @@ use crate::memory::Memory;
 use crate::planner::{AgentEventHandle, Planning};
 use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest};
 use crate::{SessionMD};
-use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs};
+use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -79,6 +79,7 @@ pub struct SingleAgentPlanSessionCallStream<M> {
     id: String,
     agent_id: String,
     env: Env,
+    user_id: String,
     session_id: String,
     input: M,
     output: SenderMessageStream<M>,
@@ -102,6 +103,7 @@ where
         env: Env,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
         memory: Arc<dyn Memory<M> + Send + 'static>,
+        user_id: String,
         session_id: String,
         input: M,
         output: SenderMessageStream<M>,
@@ -111,6 +113,7 @@ where
             agent_id,
             env,
             id,
+            user_id,
             session_id,
             input,
             output,
@@ -145,6 +148,23 @@ where
         if let Some(max_completion_tokens) = model.max_completion_tokens {
             req.max_completion_tokens(max_completion_tokens);
         }
+        if let Some(l) = model.reasoning_effort {
+            match l {
+                1 => {
+                    req.reasoning_effort(ReasoningEffort::Minimal);
+                }
+                2 => {
+                    req.reasoning_effort(ReasoningEffort::Low);
+                }
+                3 => {
+                    req.reasoning_effort(ReasoningEffort::Medium);
+                }
+                4 => {
+                    req.reasoning_effort(ReasoningEffort::High);
+                }
+                _ => {}
+            }
+        }
         let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
         //添加prompt
         let mut prompt = self.agent_config.prompt();
@@ -157,8 +177,20 @@ where
                 .expect("build message failed!")
                 .into(),
         );
+        // 添加user_info
+        if let Ok(user_info) = self.memory.get_user_info(&self.user_id).await {
+            if !user_info.is_empty() {
+                messages.push(
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content(user_info)
+                        .build()
+                        .expect("build message failed!")
+                        .into(),
+                );
+            }
+        }
         //添加历史消息
-        for item in self.memory.load(self.session_id.as_str(), 0, model.max_chat_history_round as usize).await? {
+        for item in self.memory.load(&self.user_id, self.session_id.as_str(), 0, model.max_chat_history_round as usize).await? {
             if let Some(msg) = item.to_openai_message() {
                 messages.push(msg);
             }
@@ -201,7 +233,7 @@ where
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
         let agent_metadata = self.agent_config.metadata(&self.agent_id);
-        let memory_metdata = self.memory.info(&self.session_id).await?;
+        let memory_metdata = self.memory.metadata(&self.user_id, &self.session_id).await?;
         self.agent_info = agent_metadata + &memory_metdata;
         Ok(())
     }
@@ -296,7 +328,7 @@ where
         // 仅为模型输出
         for msg in std::mem::take(&mut self.exec_records)  {
             if msg.is_remember() {
-                self.memory.push(&self.session_id, msg).await?;
+                self.memory.push(&self.user_id, &self.session_id, msg).await?;
             }
         }
         self.output.close();
@@ -316,9 +348,11 @@ where
         // 初始化agent信息
         self.init_agent_info().await?;
         //添加query到memory
-        self.memory
-            .push(&self.session_id, self.input.clone())
-            .await?;
+        if self.input.is_remember() {
+            self.memory
+                .push(&self.user_id, &self.session_id, self.input.clone())
+                .await?;
+        }
         //加载工具
         self.load_tools().await?;
         //发起任务
@@ -363,12 +397,12 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
         // session 没有则创建一个
         if self
             .session_config
-            .load(info.session_id.as_str())
+            .load(&info.user_id, info.session_id.as_str())
             .await?
             .is_none()
         {
             self.session_config
-                .create(SingleAgentSessionConfig {
+                .create(&info.user_id, SingleAgentSessionConfig {
                     id: info.session_id.clone(),
                     name: input.content().to_string(),
                 })
@@ -382,6 +416,7 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             env,
             self.agent_config.clone(),
             memory,
+            info.user_id.clone(),
             info.session_id.clone(),
             input,
             output,

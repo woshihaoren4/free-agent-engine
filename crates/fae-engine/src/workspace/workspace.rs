@@ -1,5 +1,5 @@
-use crate::AgentLoader;
-use fae_agent::{AgentRef, Env, EnvEvent, Environment, Session, SessionMetadata};
+use crate::{AgentCtl, SingleAgentCtlFromFile};
+use fae_agent::{AgentConfig, AgentRef, Env, EnvEvent, Environment, Session, SessionMetadata};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -26,7 +26,7 @@ impl WorkspaceStatus {
 pub struct Workspace {
     pub(crate) status: WorkspaceStatus,
     pub(crate) name: String,
-    pub(crate) loader: Arc<dyn AgentLoader + Send + 'static>,
+    pub(crate) loader: Arc<dyn AgentCtl + Send + 'static>,
     pub(crate) env: Env,
 }
 
@@ -95,13 +95,20 @@ impl Workspace {
     pub async fn get_agent(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
         self.loader.load(agent_id).await
     }
-    pub async fn create_agent(
+    pub async fn create_single_agent<Cfg: AgentConfig + Send + 'static>(
         &self,
-        name: &str,
-        prompt: &str,
-        mut cfg: Box<dyn std::any::Any + Send + Sync + 'static>,
+        agent_id: &str,
+        cfg: Cfg,
     ) -> anyhow::Result<AgentRef> {
-        self.loader.create(name, prompt, &mut cfg).await
+        self.create_agent(SingleAgentCtlFromFile::get_id(), agent_id, cfg).await
+    }
+    pub async fn create_agent<Cfg: AgentConfig + Send + 'static>(
+        &self,
+        agent_ctl_id: &str,
+        agent_id: &str,
+        cfg: Cfg,
+    ) -> anyhow::Result<AgentRef> {
+        self.loader.create(agent_ctl_id, agent_id, Box::new(cfg)).await
     }
     pub fn get_env(&self) -> Env {
         self.env.clone()

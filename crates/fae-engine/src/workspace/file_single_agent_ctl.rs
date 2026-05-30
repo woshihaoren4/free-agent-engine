@@ -1,19 +1,23 @@
-use crate::{AgentLoader, RecallAgentRef};
-use fae_agent::{AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager, FAE_WORKSPACE};
+use crate::{AgentCtl, RecallAgentRef, ErasedAgentConfig};
+use fae_agent::{AgentConfig, AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory, FileSessionMetaManager, FAE_WORKSPACE};
 use fae_agent::{AgentRef, Record, SingleAgent, SingleAgentSessionConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::collections::HashMap;
+use serde_json::Value;
 use tokio::sync::RwLock;
 
 /// A loader that loads agents from a workspace directory structure.
-pub struct SingleAgentLoaderFromFile {
+pub struct SingleAgentCtlFromFile {
     workspace_dir: PathBuf,
     agents: RwLock<HashMap<String, AgentRef>>,
 }
 
-impl SingleAgentLoaderFromFile {
+impl SingleAgentCtlFromFile {
+    pub fn get_id() -> &'static str {
+        "default_single_agent"
+    }
     pub fn new<P: Into<PathBuf>>(workspace_name: P) -> Self {
         let base_dir = std::env::var(FAE_WORKSPACE)
             .ok()
@@ -29,7 +33,11 @@ impl SingleAgentLoaderFromFile {
 }
 
 #[async_trait::async_trait]
-impl AgentLoader for SingleAgentLoaderFromFile {
+impl AgentCtl for SingleAgentCtlFromFile {
+    fn id(&self) -> &str {
+        Self::get_id()
+    }
+
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef> {
         {
             let cache = self.agents.read().await;
@@ -40,27 +48,25 @@ impl AgentLoader for SingleAgentLoaderFromFile {
         let agent_dir = self.workspace_dir.join(agent_id);
         if !agent_dir.exists() {
             return Err(anyhow::anyhow!(
-                "Agent directory not found: {:?}",
+                "[SingleAgentCtlFromFile::{}] load agent directory not found: {:?}",
+                agent_id,
                 agent_dir
             ));
         }
 
-        let session_dir = agent_dir.join("session");
-        let config_file = agent_dir.join("config.json");
-
-        // 1. Session memory
-        let memory = FileChatMemory::<Record>::new(&session_dir).await?;
+        // 1. memory
+        let memory = FileChatMemory::<Record>::new(&agent_dir).await?;
 
         // 2. Session config
         let session_config = FileSessionMetaManager::<SingleAgentSessionConfig>::new(
-            &session_dir,
+            &agent_dir,
             |meta| meta.id.clone(),
             |_| 0, // SingleAgentSessionConfig doesn't have updated_at, return 0
         )
         .await?;
 
         // 3. Agent config
-        let agent_config = AgentConfigFile::load(&config_file).await?;
+        let agent_config = AgentConfigFile::load(&agent_dir).await?;
 
         // 4. Create the agent
         let single_agent = SingleAgent::<Record>::new(
@@ -84,34 +90,19 @@ impl AgentLoader for SingleAgentLoaderFromFile {
 
     async fn create(
         &self,
-        name: &str,
-        prompt: &str,
-        cfg: &mut Box<dyn std::any::Any + Send + Sync + 'static>,
+        _agent_ctl_id: &str,
+        agent_id: &str,
+        mut cfg: Box<dyn AgentConfig + Send + 'static>,
     ) -> anyhow::Result<AgentRef> {
-        if cfg.downcast_ref::<fae_agent::AgentConfigData>().is_none() {
-            return Err(Error::NoSupport.into());
-        }
-        let no_cfg: Box<dyn std::any::Any + Send + Sync + 'static> = Box::new(());
-        let cfg = std::mem::replace(cfg, no_cfg);
 
-        let mut agent_config_data = match cfg.downcast::<fae_agent::AgentConfigData>() {
-            Ok(data) => *data,
-            Err(_) => return Err(Error::NoSupport.into()),
-        };
-
-        let agent_dir = self.workspace_dir.join(name);
+        let agent_dir = self.workspace_dir.join(agent_id);
         if !agent_dir.exists() {
             tokio::fs::create_dir_all(&agent_dir).await?;
         }
 
-        let session_dir = agent_dir.join("session");
-        if !session_dir.exists() {
-            tokio::fs::create_dir_all(&session_dir).await?;
-        }
+        cfg.init(agent_id, self.workspace_dir.display().to_string().as_str(), Value::Null).await?;
 
-        agent_config_data.init(&agent_dir, prompt.to_string()).await?;
-
-        self.load(name).await
+        self.load(agent_id).await
     }
 
     async fn exit(&self) -> anyhow::Result<()> {

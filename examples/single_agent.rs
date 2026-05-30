@@ -13,17 +13,16 @@ async fn main() -> anyhow::Result<()> {
     let ws = engine.build_workspace("test_workspace", |_x| {}).await;
 
     println!("Checking if agent exists...");
-    if ws.get_agent("main_agent").await.is_err() {
+    if ws.get_agent("main_assistant").await.is_err() {
         println!("Creating SingleAgent...");
-        let prompt = "You are a helpful assistant.";
-        let config = Box::new(AgentConfigData::default());
-        ws.create_agent("main_agent", prompt, config).await?;
+        let config = AgentConfigData::default().set_prompt_path("../../prompt/aicoding.txt");
+        ws.create_single_agent("main_assistant", config.into_agent_config()).await?;
     }
 
     println!("Creating session...");
     let mut session = ws
         .session_call_stream::<_, Record, Record>(
-            "main_agent",
+            "main_assistant",
             SingleAgentSessionConfig::default().set_id("test_session_id_123"),
         )
         .await?;

@@ -24,7 +24,7 @@ impl<T> FileSessionMetaManager<T> {
         id_extractor: fn(&T) -> String,
         updated_at_extractor: fn(&T) -> u64,
     ) -> anyhow::Result<Self> {
-        let dir_path = dir_path.into();
+        let dir_path = dir_path.into().join("memory");
         if !dir_path.exists() {
             fs::create_dir_all(&dir_path)
                 .await
@@ -37,8 +37,8 @@ impl<T> FileSessionMetaManager<T> {
         })
     }
 
-    fn get_file_path(&self, session_id: &str) -> PathBuf {
-        self.dir_path.join(format!("{}.desc", session_id))
+    fn get_file_path(&self, user_id: &str, session_id: &str) -> PathBuf {
+        self.dir_path.join(user_id).join(format!("{}.desc", session_id))
     }
 }
 
@@ -47,8 +47,12 @@ impl<T> SessionConfig<T> for FileSessionMetaManager<T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
-        let mut entries = fs::read_dir(&self.dir_path)
+    async fn session_list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
+        let user_dir = self.dir_path.join(user_id);
+        if !user_dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut entries = fs::read_dir(&user_dir)
             .await
             .context("Failed to read directory")?;
 
@@ -80,8 +84,8 @@ where
         Ok(metas[start..end].to_vec())
     }
 
-    async fn load(&self, session_id: &str) -> anyhow::Result<Option<T>> {
-        let file_path = self.get_file_path(session_id);
+    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<T>> {
+        let file_path = self.get_file_path(user_id, session_id);
         if !file_path.exists() {
             return Ok(None);
         }
@@ -93,8 +97,8 @@ where
         Ok(Some(meta))
     }
 
-    async fn update(&self, session_id: &str, meta: T) -> anyhow::Result<()> {
-        let file_path = self.get_file_path(session_id);
+    async fn update(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()> {
+        let file_path = self.get_file_path(user_id, session_id);
         if !file_path.exists() {
             anyhow::bail!("Session {} does not exist", session_id);
         }
@@ -106,9 +110,13 @@ where
         Ok(())
     }
 
-    async fn create(&self, meta: T) -> anyhow::Result<()> {
+    async fn create(&self, user_id: &str, meta: T) -> anyhow::Result<()> {
         let session_id = (self.id_extractor)(&meta);
-        let file_path = self.get_file_path(&session_id);
+        let user_dir = self.dir_path.join(user_id);
+        if !user_dir.exists() {
+            fs::create_dir_all(&user_dir).await?;
+        }
+        let file_path = self.get_file_path(user_id, &session_id);
         if file_path.exists() {
             anyhow::bail!("Session {} already exists", session_id);
         }
@@ -120,8 +128,8 @@ where
         Ok(())
     }
 
-    async fn delete(&self, session_id: &str) -> anyhow::Result<()> {
-        let file_path = self.get_file_path(session_id);
+    async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+        let file_path = self.get_file_path(user_id, session_id);
         if file_path.exists() {
             fs::remove_file(file_path)
                 .await

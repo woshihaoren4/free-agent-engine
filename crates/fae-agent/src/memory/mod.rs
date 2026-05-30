@@ -3,6 +3,7 @@ mod file_chat_memory;
 mod file_session_config;
 mod openai_api_memory_entry;
 
+use std::any::Any;
 pub use file_agent_config::*;
 pub use file_chat_memory::*;
 pub use file_session_config::*;
@@ -11,6 +12,7 @@ pub use openai_api_memory_entry::*;
 use crate::Message;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL: &str = "OpenAI-Compatible API";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
@@ -19,24 +21,29 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a assistant.";
 pub trait Memory<T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>:
     Sync
 {
-    /// 记忆信息
-    async fn info(&self, session_id: &str) -> anyhow::Result<String>{
-        Ok("".to_string())
-    }
+    ///用户记忆，对应到user prompt
+    async fn get_user_info(&self, user_id: &str) -> anyhow::Result<String>;
+
+    ///设置用户记忆,append:是否追加
+    async fn set_user_info(&self, user_id: &str, info: String,append:bool) -> anyhow::Result<()>;
+
+    /// 记忆信息，对应到system prompt
+    async fn metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>;
+
     /// 加载/获取记忆
-    async fn load(&self, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
+    async fn load(&self, user_id: &str, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
 
     /// 追加单条记忆
-    async fn push(&self, session_id: &str, item: T) -> anyhow::Result<()>;
+    async fn push(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 更新单条记忆内容
-    async fn update(&self, item: T) -> anyhow::Result<()>;
+    async fn update(&self, user_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 删除单条记忆
-    async fn delete(&self, session_id: &str, id: &str) -> anyhow::Result<()>;
+    async fn delete(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()>;
 
     /// 重置记忆
-    async fn reset(&self, session_id: &str) -> anyhow::Result<()>;
+    async fn reset(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
 
     /// 刷新记忆，将缓存的内容刷新到磁盘中
     async fn flush(&self) -> anyhow::Result<()>;
@@ -46,15 +53,15 @@ pub trait Memory<T: Message + Serialize + DeserializeOwned + Clone + Send + Sync
 #[async_trait::async_trait]
 pub trait SessionConfig<T>: Sync {
     // 加载session列表
-    async fn session_list(&self, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
+    async fn session_list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
     // 加载session详情
-    async fn load(&self, session_id: &str) -> anyhow::Result<Option<T>>;
+    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<T>>;
     // 更改session
-    async fn update(&self, session_id: &str, meta: T) -> anyhow::Result<()>;
+    async fn update(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()>;
     // 创建session
-    async fn create(&self, meta: T) -> anyhow::Result<()>;
+    async fn create(&self, user_id: &str, meta: T) -> anyhow::Result<()>;
     // 删除session
-    async fn delete(&self, session_id: &str) -> anyhow::Result<()>;
+    async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,7 +120,7 @@ impl ToolConfig {
 }
 
 #[async_trait::async_trait]
-pub trait AgentConfig: Sync {
+pub trait AgentConfig:Sync {
     /// 获取智能体名称，唯一标识
     fn name(&self) -> String;
 
@@ -154,4 +161,7 @@ pub trait AgentConfig: Sync {
     fn metadata(&self,id:&str) -> String {
         "".to_string()
     }
+
+    async fn init(&mut self, id:&str, workspace:&str, cfg:serde_json::Value) -> anyhow::Result<()>;
 }
+

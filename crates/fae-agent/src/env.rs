@@ -5,7 +5,10 @@ use std::ops::Deref;
 use std::sync::Arc;
 use serde_json::Value;
 
-pub const FAE_WORKSPACE: &str = "FAE_WORKSPACE";
+pub const FAE_WORKSPACE: &'static str = "FAE_WORKSPACE";
+pub const OPENAI_DEFAULT_MODEL: &'static str = "OPENAI_DEFAULT_MODEL";
+pub const FAE_DEFAULT_MODEL: &'static str = "FAE_DEFAULT_MODEL";
+
 
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
