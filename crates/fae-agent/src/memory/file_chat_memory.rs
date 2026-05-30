@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::Memory;
+use super::MemoryMessageExt;
 use crate::Message;
 use anyhow::Context;
 use serde::{Serialize, de::DeserializeOwned};
@@ -132,12 +132,12 @@ where
 }
 
 #[async_trait::async_trait]
-impl<T> Memory<T> for FileChatMemory<T>
+impl<T> MemoryMessageExt<T> for FileChatMemory<T>
 where
     T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     /// 用户记忆
-    async fn get_user_info(&self, user_id: &str) -> anyhow::Result<String> {
+    async fn get_user_info_ext(&self, user_id: &str) -> anyhow::Result<String> {
         let user_dir = self.memory_dir.join(user_id);
         let user_file = user_dir.join("user.txt");
         let mem = if user_file.exists() {
@@ -151,7 +151,7 @@ where
     }
 
     /// 设置用户记忆,append:是否追加
-    async fn set_user_info(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()> {
+    async fn set_user_info_ext(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()> {
         let user_dir = self.memory_dir.join(user_id);
         if !user_dir.exists() {
             tokio::fs::create_dir_all(&user_dir).await?;
@@ -173,13 +173,13 @@ where
     }
 
     /// 记忆信息
-    async fn metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>{
+    async fn metadata_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>{
         let mut info = "\n## Your memory Metadata:".to_string();
         info.push_str(&format!("\n - This dialogue identifier $SESSION_ID: `{}`", session_id));
         info.push_str(&format!("\n - session description file path: {}/{}/{}.desc", self.memory_dir.display(), user_id, session_id));
         Ok(info)
     }
-    async fn load(&self, user_id: &str, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
+    async fn load_ext(&self, user_id: &str, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;
         if let Some(user_store) = store.get(user_id) {
             if let Some((_, items)) = user_store.get(session_id) {
@@ -191,7 +191,7 @@ where
         Ok(vec![])
     }
 
-    async fn push(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()> {
+    async fn push_ext(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()> {
         let session_id_owned = session_id.to_string();
         let user_id_owned = user_id.to_string();
         let should_flush = {
@@ -218,7 +218,7 @@ where
         Ok(())
     }
 
-    async fn update(&self, user_id: &str, item: T) -> anyhow::Result<()> {
+    async fn update_ext(&self, user_id: &str, item: T) -> anyhow::Result<()> {
         let id = item.id().to_string();
         let mut target_session = None;
         let should_flush = {
@@ -256,7 +256,7 @@ where
         Ok(())
     }
 
-    async fn delete(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()> {
+    async fn delete_ext(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()> {
         let should_flush = {
             let mut store = self.store.write().await;
             if let Some(user_store) = store.get_mut(user_id) {
@@ -286,7 +286,7 @@ where
         Ok(())
     }
 
-    async fn reset(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+    async fn reset_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         {
             let mut store = self.store.write().await;
             if let Some(user_store) = store.get_mut(user_id) {
@@ -302,7 +302,7 @@ where
         Ok(())
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
+    async fn flush_ext(&self) -> anyhow::Result<()> {
         let sessions: Vec<(String, String)> = {
             let store = self.store.read().await;
             let mut res = Vec::new();

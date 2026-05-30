@@ -1,4 +1,3 @@
-use crate::define::{Message, SenderMessageStream};
 use crate::{Command, EnvEvent, Msg, SessionMetadata};
 use tokio_stream::Stream;
 use wd_tools::channel::Sender;

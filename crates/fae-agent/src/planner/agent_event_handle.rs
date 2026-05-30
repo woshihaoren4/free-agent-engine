@@ -1,8 +1,5 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{
-    Agent, Command, Env, EnvEvent, Message, Planning, Session, SessionEventLayer, SessionMD,
-    SessionMetadata, TaskResult,
-};
+use crate::{Agent, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionEventLayer, SessionMD, SessionMetadata, TaskResult};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -19,6 +16,9 @@ where
     fn desc(&self) -> String {
         String::new()
     }
+    /// 处理无事件
+    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static>;
+
     async fn on_none(&self) {}
     /// 处理会话调用事件
     async fn on_session_call(
@@ -142,6 +142,10 @@ where
 
     fn desc(&self) -> String {
         self.agent_event_ext.desc()
+    }
+
+    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static> {
+        self.agent_event_ext.on_memory().await
     }
 
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()> {

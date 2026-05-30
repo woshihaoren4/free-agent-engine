@@ -18,7 +18,7 @@ impl Message for String {
 }
 
 /// 内部 trait，用于安全地把 dyn Message 转换成 dyn Any。
-trait ErasedMessage: Message {
+pub trait ErasedMessage: Message {
     fn as_any(&self) -> &dyn Any;
 
     fn into_any(self: Box<Self>) -> Box<dyn Any>;

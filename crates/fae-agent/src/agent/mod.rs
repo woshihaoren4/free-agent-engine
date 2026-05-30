@@ -2,31 +2,11 @@ pub mod single_agent;
 pub use single_agent::*;
 
 use crate::session::Session;
-use crate::{Env, EnvEvent, SessionMetadata};
+use crate::{Command, Env, EnvEvent, Memory, MemoryMessageExt, SessionMetadata};
 use std::ops::Deref;
 use std::sync::Arc;
 
-/// 命令类型，表示系统和用户命令
-#[derive(Default, Debug)]
-pub enum Command {
-    /// 无命令
-    #[default]
-    None,
-    /// 系统退出命令, /exit
-    SystemExit,
-    /// 自定义命令
-    CustomCommand(String),
-}
-impl PartialEq for Command {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Command::None, Command::None) => true,
-            (Command::SystemExit, Command::SystemExit) => true,
-            (Command::CustomCommand(a), Command::CustomCommand(b)) => a == b,
-            _ => false,
-        }
-    }
-}
+
 
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
@@ -38,6 +18,12 @@ pub trait Agent: Sync {
     fn desc(&self) -> String {
         String::new()
     }
+    
+    /// 获取memory
+    async fn on_memory(&self) -> Box<dyn Memory+Send+'static>;
+    
+    /// 
+    
 
     /// 处理环境事件
     async fn on_env(&self, env: Env, event: EnvEvent) -> anyhow::Result<()>;

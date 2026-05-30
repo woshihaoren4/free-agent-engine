@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
-use crate::memory::Memory;
+use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionConfig, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory};
 use crate::{SessionMD};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
@@ -51,7 +51,7 @@ impl From<SingleAgentSessionConfig> for SessionMetadata {
 
 pub struct SingleAgent<M> {
     agent_id: String,
-    memory: Arc<dyn Memory<M> + Send + 'static>,
+    memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
     session_config: Arc<dyn SessionConfig<SingleAgentSessionConfig> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
 }
@@ -59,7 +59,7 @@ pub struct SingleAgent<M> {
 impl<M> SingleAgent<M> {
     pub fn new(
         agent_id: impl Into<String>,
-        memory: Arc<dyn Memory<M> + Send + 'static>,
+        memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
         session_config: Arc<dyn SessionConfig<SingleAgentSessionConfig> + Send + 'static>,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
     ) -> Self {
@@ -102,7 +102,7 @@ pub struct SingleAgentPlanSessionCallStream<M> {
     session_id: String,
     input: M,
     output: SenderMessageStream<M>,
-    memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
+    memory: Arc<dyn MemoryMessageExt<M> + Send + Sync + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
     exec_records: Vec<M>,
     // agent 信息，包括空间路径，配置路径等
@@ -121,7 +121,7 @@ where
         agent_id: String,
         env: Env,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
-        memory: Arc<dyn Memory<M> + Send + 'static>,
+        memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
         user_id: String,
         session_id: String,
         input: M,
@@ -197,7 +197,7 @@ where
                 .into(),
         );
         // 添加user_info
-        if let Ok(user_info) = self.memory.get_user_info(&self.user_id).await {
+        if let Ok(user_info) = self.memory.get_user_info_ext(&self.user_id).await {
             if !user_info.is_empty() {
                 messages.push(
                     ChatCompletionRequestUserMessageArgs::default()
@@ -209,7 +209,7 @@ where
             }
         }
         //添加历史消息
-        for item in self.memory.load(&self.user_id, self.session_id.as_str(), 0, model.max_chat_history_round as usize).await? {
+        for item in self.memory.load_ext(&self.user_id, self.session_id.as_str(), 0, model.max_chat_history_round as usize).await? {
             if let Some(msg) = item.to_openai_message() {
                 messages.push(msg);
             }
@@ -252,7 +252,7 @@ where
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
         let agent_metadata = self.agent_config.metadata(&self.agent_id);
-        let memory_metdata = self.memory.metadata(&self.user_id, &self.session_id).await?;
+        let memory_metdata = self.memory.metadata_ext(&self.user_id, &self.session_id).await?;
         self.agent_info = agent_metadata + &memory_metdata;
         Ok(())
     }
@@ -347,7 +347,7 @@ where
         // 仅为模型输出
         for msg in std::mem::take(&mut self.exec_records)  {
             if msg.is_remember() {
-                self.memory.push(&self.user_id, &self.session_id, msg).await?;
+                self.memory.push_ext(&self.user_id, &self.session_id, msg).await?;
             }
         }
         self.output.close();
@@ -369,7 +369,7 @@ where
         //添加query到memory
         if self.input.is_remember() {
             self.memory
-                .push(&self.user_id, &self.session_id, self.input.clone())
+                .push_ext(&self.user_id, &self.session_id, self.input.clone())
                 .await?;
         }
         //加载工具
@@ -408,6 +408,10 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
 
     fn desc(&self) -> String {
         self.agent_config.desc()
+    }
+
+    async fn on_memory(&self) -> Box<dyn Memory + Send + 'static> {
+        Box::new(self.memory.clone())
     }
 
     async fn on_session_call_stream(
