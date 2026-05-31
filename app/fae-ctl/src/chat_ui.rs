@@ -85,7 +85,7 @@ impl ChatUi {
                     .split(f.area());
 
                 Self::draw_status_bar(f, chunks[0], &self.agent_name, &session_id, stream_active);
-                Self::draw_history(f, chunks[1], &messages, auto_scroll, &mut scroll_offset);
+                Self::draw_history(f, chunks[1], &messages, auto_scroll, &mut scroll_offset, &self.agent_name);
                 Self::draw_input(f, chunks[2], &input);
             })?;
 
@@ -134,7 +134,7 @@ impl ChatUi {
                                     input.reset();
                                 } else if !val.is_empty() {
                                     if !stream_active {
-                                        messages.push(format!("\nYou-> {}", val));
+                                        messages.push(format!("\nYou -> {}", val));
                                         auto_scroll = true;
                                         let msg = Record::from_user_input(val);
                                         match session.call_stream(msg).await {
@@ -203,7 +203,7 @@ impl ChatUi {
                                     if current_title != t {
                                         current_title = t;
                                         if !current_title.is_empty() {
-                                            messages.push(format!("{}->{}", self.agent_name, current_title));
+                                            messages.push(format!("{} -> {}", self.agent_name, current_title));
                                             messages.push(String::new());
                                         }
                                     }
@@ -247,7 +247,7 @@ impl ChatUi {
         f.render_widget(status_bar, area);
     }
 
-    fn draw_history(f: &mut Frame, area: Rect, messages: &[String], auto_scroll: bool, scroll_offset: &mut u16) {
+    fn draw_history(f: &mut Frame, area: Rect, messages: &[String], auto_scroll: bool, scroll_offset: &mut u16, agent_name: &str) {
         let history_text = messages.join("\n");
         let history_lines = history_text.lines().count() as u16;
         let inner_height = area.height.saturating_sub(2);
@@ -259,13 +259,17 @@ impl ChatUi {
             *scroll_offset = (*scroll_offset).min(max_scroll);
         }
 
+        let agent_prefix = format!("{} ->", agent_name);
+
         let history_spans: Vec<Line> = history_text
             .lines()
             .map(|line| {
-                if line.starts_with("You->") {
+                if line.starts_with("You ->") {
                     Line::from(Span::styled(line, Style::default().fg(Color::White)))
+                } else if line.starts_with(&agent_prefix) {
+                    Line::from(Span::styled(line, Style::default().fg(Color::Yellow)))
                 } else {
-                    Line::from(line)
+                    Line::from(Span::styled(line, Style::default().fg(Color::Green)))
                 }
             })
             .collect();

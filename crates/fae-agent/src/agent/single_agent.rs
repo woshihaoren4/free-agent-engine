@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadataInterface};
-use crate::{SessionMD};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, SessionMD, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -43,14 +42,13 @@ impl Default for SingleAgentSessionConfig {
     }
 }
 
-impl From<SingleAgentSessionConfig> for SessionMetadata {
-    fn from(value: SingleAgentSessionConfig) -> Self {
-        SessionMetadata::with_session_id(value.id.as_str()).set_user_id(value.user_id.as_str()).set_data(value)
+impl SessionMetadata for SingleAgentSessionConfig {
+    fn id(&self) -> &str {
+        self.id.as_str()
     }
-}
-impl SessionMetadataInterface for SingleAgentSessionConfig {
-    fn id(&self) -> String {
-        self.id.clone()
+
+    fn user_id(&self) -> &str {
+        self.user_id.as_str()
     }
 }
 
@@ -315,6 +313,7 @@ where
     }
     // 处理模型执行结果
     pub async fn handle_model_result(&mut self,mut event: TaskResult)->anyhow::Result<PlanningResult>{
+        println!("---->1");
         let mut records = Vec::new();
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
@@ -326,6 +325,7 @@ where
         } else {
             return anyhow::anyhow!("[SingleAgent] task result unknown, {:?}", event).err();
         }
+        println!("---->3");
         // 调用工具
         let mut tool_tasks = Vec::new();
         for i in records{
@@ -430,21 +430,21 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
     async fn on_session_call_stream(
         &self,
         env: Env,
-        info: &mut SessionMD<SingleAgentSessionConfig>,
+        info: &mut SingleAgentSessionConfig,
         input: M,
         output: SenderMessageStream<M>,
     ) -> anyhow::Result<SingleAgentPlan<M>> {
         // session 没有则创建一个
         if self
             .session_config
-            .load_ext(&info.user_id, info.session_id.as_str())
+            .load_ext(&info.user_id, info.id())
             .await?
             .is_none()
         {
             self.session_config
                 .create_ext(&info.user_id, SingleAgentSessionConfig {
-                    id: info.session_id.clone(),
-                    user_id: info.user_id.clone(),
+                    id: info.id().to_string(),
+                    user_id: info.user_id().to_string(),
                     name: input.content().to_string(),
                 })
                 .await?;
@@ -457,8 +457,8 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             env,
             self.agent_config.clone(),
             memory,
-            info.user_id.clone(),
-            info.session_id.clone(),
+            info.user_id().to_string(),
+            info.id().to_string(),
             input,
             output,
         ));

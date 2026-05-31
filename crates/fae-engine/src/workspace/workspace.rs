@@ -1,5 +1,5 @@
 use crate::{AgentCtl, SingleAgentCtlFromFile};
-use fae_agent::{AgentConfig, AgentRef, Env, EnvEvent, Environment, Session, SessionMetadata};
+use fae_agent::{AgentConfig, AgentRef, Env, EnvEvent, Environment, Session, SessionMD};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 

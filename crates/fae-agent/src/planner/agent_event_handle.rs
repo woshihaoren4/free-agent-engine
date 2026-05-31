@@ -1,5 +1,5 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult};
+use crate::{Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMetadata, SessionMD, TaskResult};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -7,7 +7,7 @@ use wd_tools::PFErr;
 #[async_trait::async_trait]
 pub trait AgentEventHandle<S, In, Out, P>: Sync
 where
-    S: Send + Sync + 'static,
+    S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static,
     Out: Send + Sync + 'static,
     P: Planning + Send + 'static,
@@ -27,14 +27,14 @@ where
     async fn on_session_call(
         &self,
         _env: Env,
-        info: &mut SessionMD<S>,
+        meta: &mut S,
         input: In,
         _output: OutMsgOnce<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_call, session_id:{:?}",
             self.id(),
-            info.session_id
+            meta.id()
         )
         .err()
     }
@@ -42,14 +42,14 @@ where
     async fn on_session_call_stream(
         &self,
         _env: Env,
-        info: &mut SessionMD<S>,
+        meta: &mut S,
         input: In,
         output: SenderMessageStream<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_call_stream, session_id:{:?}",
             self.id(),
-            info.session_id
+            meta.id()
         )
         .err()
     }
@@ -57,14 +57,14 @@ where
     async fn on_session_stream_call(
         &self,
         _env: Env,
-        info: &mut SessionMD<S>,
+        meta: &mut S,
         input: ReceiverMessageStream<In>,
         output: OutMsgOnce<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_stream_call, session_id:{:?}",
             self.id(),
-            info.session_id
+            meta.id()
         )
         .err()
     }
@@ -72,14 +72,14 @@ where
     async fn on_session_stream(
         &self,
         env: Env,
-        info: &mut SessionMD<S>,
+        meta: &mut S,
         input: ReceiverMessageStream<In>,
         output: SenderMessageStream<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_stream, session_id:{:?}",
             self.id(),
-            info.session_id
+            meta.id()
         )
         .err()
     }
@@ -134,7 +134,7 @@ impl<E, S, In, Out, P> AgentEventHandleImpl<E, S, In, Out, P> {
 impl<E, S, In, Out, P> Agent for AgentEventHandleImpl<E, S, In, Out, P>
 where
     E: AgentEventHandle<S, In, Out, P> + Send + 'static,
-    S: Send + Sync + 'static,
+    S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static + Message,
     Out: Send + Sync + 'static + Message,
     P: Planning + Send + 'static,
@@ -178,7 +178,7 @@ where
     async fn on_session(
         &self,
         env: Env,
-        meta: SessionMetadata,
+        meta: SessionMD,
     ) -> anyhow::Result<Box<dyn Session + Send + 'static>> {
         Ok(Box::new(SessionEventLayer::new(
             env,

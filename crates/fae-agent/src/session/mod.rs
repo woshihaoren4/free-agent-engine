@@ -1,15 +1,13 @@
 mod session_event_layer;
 mod session_trait_ext;
 pub mod file_session_ctl;
-mod session_ext;
+mod session_ctl_ext;
 
 pub use session_event_layer::*;
 pub use session_trait_ext::*;
-pub use session_ext::*;
+pub use session_ctl_ext::*;
 use std::any::Any;
-
-
-
+use std::fmt::Debug;
 use crate::Msg;
 use crate::define::Message;
 use crate::error::Error;
@@ -58,80 +56,72 @@ pub trait Session: Sync {
 
 // ----------------------  会话管理 -----------------------------
 
+pub trait SessionMetadata:Debug{
+    fn id(&self) -> &str;
+    fn user_id(&self) -> &str;
+}
+
+pub trait ErasedSessionMetadata: SessionMetadata {
+    fn as_any(&self) -> &dyn Any;
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl<T> ErasedSessionMetadata for T
+where
+    T: SessionMetadata + 'static,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
 /// 会话元数据，用于传递会话相关信息
 #[derive(Debug)]
-pub struct SessionMetadata {
-    /// 会话ID
-    pub session_id: String,
-    /// 用户ID
-    pub user_id: String,
+pub struct SessionMD {
     /// 任意类型元数据，用于扩展
-    pub data: Box<dyn Any + Send + Sync + 'static>,
+    pub inner: Box<dyn ErasedSessionMetadata + Send + Sync + 'static>,
 }
 
-pub struct SessionMD<T> {
-    /// 会话ID
-    pub session_id: String,
-    /// 用户ID
-    pub user_id: String,
-    /// 会话数据
-    pub data: T,
-}
-
-impl Default for SessionMetadata {
-    fn default() -> Self {
+impl SessionMD {
+    pub fn new<T: SessionMetadata +Send+Sync+'static>(meta: T) -> Self {
         Self {
-            session_id: wd_tools::uuid::v4(),
-            user_id: "master".to_string(),
-            data: Box::new(()),
+            inner: Box::new(meta),
         }
     }
-}
 
-impl SessionMetadata {
-    pub fn with_session_id<S: Into<String>>(session_id: S) -> Self {
-        Self {
-            session_id: session_id.into(),
-            user_id: "master".to_string(),
-            data: Box::new(()),
-        }
-    }
-    pub fn set_session_id<S: Into<String>>(mut self, session_id: S) -> Self {
-        self.session_id = session_id.into();
-        self
-    }
     pub fn get_session_id(&self) -> &str {
-        self.session_id.as_str()
+        self.inner.id()
     }
     pub fn get_user_id(&self) -> &str {
-        self.user_id.as_str()
+        self.inner.user_id()
     }
-    pub fn set_user_id<S: Into<String>>(mut self, user_id: S) -> Self {
-        self.user_id = user_id.into();
-        self
-    }
-    pub fn set_data<T: Any + Send + Sync + 'static>(mut self, data: T) -> Self {
-        self.data = Box::new(data);
-        self
-    }
-    pub fn try_to_session_md<T: Any>(mut self) -> Result<SessionMD<T>, SessionMetadata> {
-        match self.data.downcast::<T>() {
-            Ok(t) => Ok(SessionMD {
-                session_id: self.session_id,
-                user_id: self.user_id,
-                data: *t,
-            }),
-            Err(e) => {
-                self.data = e;
-                Err(self)
-            }
+
+    pub fn into_inner<T>(self) -> Result<T, Self>
+    where
+        T: SessionMetadata + Send + 'static,
+    {
+        if self.inner.as_any().is::<T>() {
+            let any = self.inner.into_any();
+
+            let boxed = any
+                .downcast::<T>()
+                .expect("type was checked by as_any().is::<T>()");
+
+            Ok(*boxed)
+        } else {
+            Err(self)
         }
     }
 }
 
-impl<T: ToString> From<T> for SessionMetadata {
+impl<T: SessionMetadata +Send+Sync+'static> From<T> for SessionMD {
     fn from(value: T) -> Self {
-        Self::with_session_id(value.to_string())
+        Self::new(value)
     }
 }
 // ----------------------  会话管理 -----------------------------
@@ -140,40 +130,13 @@ impl<T: ToString> From<T> for SessionMetadata {
 #[async_trait::async_trait]
 pub trait SessionCtl: Sync {
     // 加载session列表
-    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMetadata>>;
+    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMD>>;
     // 加载session详情
-    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMetadata>>;
+    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMD>>;
     // 更改session
-    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMetadata) -> anyhow::Result<()>;
+    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMD) -> anyhow::Result<()>;
     // 创建session
-    async fn create(&self, user_id: &str, meta: SessionMetadata) -> anyhow::Result<()>;
+    async fn create(&self, user_id: &str, meta: SessionMD) -> anyhow::Result<()>;
     // 删除session
     async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
-}
-
-// ----------------------  解析会话元数据 -----------------------------
-
-impl<T: Any> SessionMD<T> {
-    pub fn new(session_id: SessionMetadata, data: T) -> Self {
-        Self {
-            session_id: session_id.session_id,
-            user_id: session_id.user_id,
-            data,
-        }
-    }
-    pub fn get_user_id(&self) -> &str {
-        self.user_id.as_str()
-    }
-    pub fn get_session_id(&self) -> &str {
-        self.session_id.as_str()
-    }
-    pub fn get_data(&self) -> &T {
-        &self.data
-    }
-    pub fn get_data_mut(&mut self) -> &mut T {
-        &mut self.data
-    }
-    pub fn into_data(self) -> T {
-        self.data
-    }
 }

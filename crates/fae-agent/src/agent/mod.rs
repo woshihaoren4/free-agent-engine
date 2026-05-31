@@ -7,7 +7,7 @@ pub use agent_config::*;
 
 
 use crate::session::Session;
-use crate::{Command, Env, EnvEvent, Memory, SessionCtl, SessionMetadata};
+use crate::{Command, Env, EnvEvent, Memory, SessionCtl, SessionMD};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ pub trait Agent: Sync {
     async fn on_session(
         &self,
         env: Env,
-        meta: SessionMetadata,
+        meta: SessionMD,
     ) -> anyhow::Result<Box<dyn Session + Send + 'static>>;
 
     /// 处理命令

@@ -42,3 +42,4 @@ lerna-debug.log*
 .cache
 
 examples/test_workspace
+examples/main

@@ -1,10 +1,6 @@
 use fae_engine::{AgentsEngine, SingleAgentCtlFromFile, Workspace};
 use crate::args::AgentArgs;
 use crate::init_project::InitProject;
-use fae_agent::{Record, SingleAgentSessionConfig, MemoryEntry, Agent};
-use tokio_stream::StreamExt;
-use std::pin::Pin;
-use std::io::Write;
 
 pub struct Agents{
     engine:AgentsEngine,

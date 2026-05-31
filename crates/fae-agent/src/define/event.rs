@@ -1,4 +1,4 @@
-use crate::{Command, EnvEvent, Msg, SessionMetadata};
+use crate::{Command, EnvEvent, Msg, SessionMD};
 use tokio_stream::Stream;
 use wd_tools::channel::Sender;
 
@@ -9,14 +9,14 @@ pub enum Event {
     #[default]
     None,
     /// session事件
-    SessionCall(SessionMetadata, Msg),
-    SessionCallStream(SessionMetadata, Msg, Sender<Msg>),
+    SessionCall(SessionMD, Msg),
+    SessionCallStream(SessionMD, Msg, Sender<Msg>),
     SessionStreamCall(
-        SessionMetadata,
+        SessionMD,
         Box<dyn Stream<Item = Msg> + Send + Sync + 'static>,
     ),
     SessionStream(
-        SessionMetadata,
+        SessionMD,
         Box<dyn Stream<Item = Msg> + Send + Sync + 'static>,
         Sender<Msg>,
     ),

@@ -1,9 +1,5 @@
 use std::sync::Arc;
-use crate::{SessionCtl, SessionMetadata};
-
-pub trait SessionMetadataInterface{
-    fn id(&self) -> String;
-}
+use crate::{SessionCtl, SessionMetadata, SessionMD};
 
 //session信息也可以自己管理
 #[async_trait::async_trait]
@@ -23,28 +19,28 @@ pub trait SessionCtlExt<T>: Sync {
 #[async_trait::async_trait]
 impl<T> SessionCtl for Arc<dyn SessionCtlExt<T> + Send + 'static>
 where
-    T: SessionMetadataInterface + Send + Sync + 'static,
+    T: SessionMetadata + Send + Sync + 'static,
 {
-    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMetadata>> {
+    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMD>> {
         let vec = self.list_ext(user_id, offset, limit).await?;
-        Ok(vec.into_iter().map(|item| SessionMetadata::with_session_id(item.id()).set_user_id(user_id)).collect::<Vec<_>>())
+        Ok(vec.into_iter().map(|item| SessionMD::new(item)).collect::<Vec<_>>())
     }
 
-    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMetadata>> {
+    async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMD>> {
         let meta = self.load_ext(user_id, session_id).await?;
-        Ok(meta.map(|item| SessionMetadata::with_session_id(item.id()).set_user_id(user_id)))
+        Ok(meta.map(|item| SessionMD::new(item)))
     }
 
-    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMetadata) -> anyhow::Result<()> {
-        match meta.try_to_session_md::<T>(){
-            Ok(md) => self.update_ext(user_id, session_id, md.into_data()).await,
+    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMD) -> anyhow::Result<()> {
+        match meta.into_inner::<T>(){
+            Ok(md) => self.update_ext(user_id, session_id, md).await,
             Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::update]session metadata is not of type {:?}", e)),
         }
     }
 
-    async fn create(&self, user_id: &str, meta: SessionMetadata) -> anyhow::Result<()> {
-        match meta.try_to_session_md::<T>(){
-            Ok(md) => self.create_ext(user_id, md.into_data()).await,
+    async fn create(&self, user_id: &str, meta: SessionMD) -> anyhow::Result<()> {
+        match meta.into_inner::<T>(){
+            Ok(md) => self.create_ext(user_id, md).await,
             Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::create]session metadata is not of type {:?}", e)),
         }
     }

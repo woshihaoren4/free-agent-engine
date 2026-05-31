@@ -1,10 +1,7 @@
 use crate::define::{
     ChannelReceiverImplStream, Message, OutMsgOnce, ReceiverMessageStream, SenderMessageStream,
 };
-use crate::{
-    AgentEventHandle, EndPlanTaskArgs, Env, Msg, Planning, Session, SessionMD, SessionMetadata,
-    Task, TaskType,
-};
+use crate::{AgentEventHandle, EndPlanTaskArgs, Env, Msg, Planning, Session, SessionMetadata, SessionMD, Task, TaskType};
 use std::sync::Arc;
 use tokio_stream::Stream;
 use wd_tools::{PFBox, PFErr, PFOk};
@@ -14,23 +11,23 @@ pub const SESSION_STREAM_CHANEL_COUNT: usize = 8;
 pub struct SessionEventLayer<S, In, Out, P> {
     env: Env,
     plan_id: Option<String>,
-    meta: SessionMD<S>,
+    meta: S,
     event_handle: Arc<dyn AgentEventHandle<S, In, Out, P> + Send + 'static>,
 }
 
 impl<S: 'static, In, Out, P> SessionEventLayer<S, In, Out, P>
 where
-    S: Send + Sync + 'static,
+    S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static,
     Out: Send + Sync + 'static,
     P: Planning + Send + 'static,
 {
     pub fn new(
         env: Env,
-        session_info: SessionMetadata,
+        session_info: SessionMD,
         event_handle: Arc<dyn AgentEventHandle<S, In, Out, P> + Send + 'static>,
     ) -> anyhow::Result<Self> {
-        let meta = if let Ok(s) = session_info.try_to_session_md() {
+        let meta = if let Ok(s) = session_info.into_inner() {
             s
         } else {
             return anyhow::anyhow!("[SessionEventLayer] session_info parse failed.").err();
@@ -63,7 +60,7 @@ where
 #[async_trait::async_trait]
 impl<S, In, Out, P> Session for SessionEventLayer<S, In, Out, P>
 where
-    S: Send + Sync + 'static,
+    S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static + Message,
     Out: Send + Sync + 'static + Message,
     P: Planning + Send + 'static,
