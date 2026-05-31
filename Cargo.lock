@@ -760,6 +760,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tui-input",
+ "unicode-width",
  "wd_log 0.4.0",
  "wd_tools",
 ]

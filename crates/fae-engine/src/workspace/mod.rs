@@ -3,16 +3,16 @@ mod workspace_builder;
 mod file_single_agent_ctl;
 mod workspace_session;
 mod workspace_runtime;
+mod workspace_fn;
 
 use fae_agent::{AgentConfig, AgentRef, Error};
 use std::any::Any;
 use std::sync::Arc;
-use serde_json::Value;
 use wd_tools::PFErr;
 pub use workspace::*;
 pub use workspace_builder::*;
 pub use file_single_agent_ctl::*;
-pub use workspace_session::*;
+pub use workspace_runtime::*;
 
 pub struct RecallAgentRef {
     agent: AgentRef,

@@ -9,9 +9,9 @@ pub trait SessionCtlExt<T>: Sync {
     // 加载session详情
     async fn load_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<T>>;
     // 更改session
-    async fn update_ext(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()>;
+    async fn update_ext(&self, meta: T) -> anyhow::Result<()>;
     // 创建session
-    async fn create_ext(&self, user_id: &str, meta: T) -> anyhow::Result<()>;
+    async fn create_ext(&self, meta: T) -> anyhow::Result<()>;
     // 删除session
     async fn delete_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
 }
@@ -31,16 +31,16 @@ where
         Ok(meta.map(|item| SessionMD::new(item)))
     }
 
-    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMD) -> anyhow::Result<()> {
+    async fn update(&self, meta: SessionMD) -> anyhow::Result<()> {
         match meta.into_inner::<T>(){
-            Ok(md) => self.update_ext(user_id, session_id, md).await,
+            Ok(md) => self.update_ext(md).await,
             Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::update]session metadata is not of type {:?}", e)),
         }
     }
 
-    async fn create(&self, user_id: &str, meta: SessionMD) -> anyhow::Result<()> {
+    async fn create(&self, meta: SessionMD) -> anyhow::Result<()> {
         match meta.into_inner::<T>(){
-            Ok(md) => self.create_ext(user_id, md).await,
+            Ok(md) => self.create_ext(md).await,
             Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::create]session metadata is not of type {:?}", e)),
         }
     }

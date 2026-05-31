@@ -205,7 +205,6 @@ impl MemoryEntry for Record {
     where
         Self: Sized,
     {
-        println!("[stream_append]----> {:?}", chunk);
         let mut exists = false;
         let mut new_msg = Self::default();
         for i in chunk.choices {

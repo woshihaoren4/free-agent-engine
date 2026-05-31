@@ -14,6 +14,10 @@ pub struct ModelCallConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>, // min: -2.0, max: 2.0, default: 0
 
+    #[deprecated]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
 

@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
 use crossterm::{
@@ -17,6 +17,7 @@ use tokio_stream::StreamExt;
 use std::pin::Pin;
 use fae_agent::{Record, SingleAgentSessionConfig, MemoryEntry};
 use fae_engine::Workspace;
+use unicode_width::UnicodeWidthChar;
 
 pub struct ChatUi {
     ws: Workspace,
@@ -52,6 +53,7 @@ impl ChatUi {
 
         let session_config = SingleAgentSessionConfig::default();
         let mut session_id = session_config.id.clone();
+        let mut user_id = session_config.user_id.clone();
         let mut session = match self.ws.session_call_stream::<_, Record, Record>(
             &self.agent_name,
             session_config,
@@ -121,6 +123,7 @@ impl ChatUi {
                                     auto_scroll = true;
                                     let session_config = SingleAgentSessionConfig::default();
                                     session_id = session_config.id.clone();
+                                    user_id = session_config.user_id.clone();
                                     session = match self.ws.session_call_stream::<_, Record, Record>(
                                         &self.agent_name,
                                         session_config,
@@ -131,6 +134,23 @@ impl ChatUi {
                                             return Ok(());
                                         }
                                     };
+                                    input.reset();
+                                } else if val == "/reset" {
+                                    if stream_active {
+                                        stream_active = false;
+                                        current_stream = None;
+                                    }
+                                    if let Err(e) = self.ws.session_reset(&self.agent_name, &user_id, &session_id).await {
+                                        messages.push(format!("Failed to reset session: {:?}", e));
+                                    } else {
+                                        let text = " Session reset successfully ";
+                                        let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
+                                        let inner_cols = cols.saturating_sub(4);
+                                        let dashes_len = inner_cols.saturating_sub(text.len()) / 2;
+                                        let dashes = "-".repeat(dashes_len);
+                                        messages.push(format!("\n{}{}{}", dashes, text, dashes));
+                                    }
+                                    auto_scroll = true;
                                     input.reset();
                                 } else if !val.is_empty() {
                                     if !stream_active {
@@ -249,7 +269,39 @@ impl ChatUi {
 
     fn draw_history(f: &mut Frame, area: Rect, messages: &[String], auto_scroll: bool, scroll_offset: &mut u16, agent_name: &str) {
         let history_text = messages.join("\n");
-        let history_lines = history_text.lines().count() as u16;
+        let agent_prefix = format!("{} ->", agent_name);
+        let inner_width = area.width.saturating_sub(2).max(1) as usize;
+
+        let mut history_spans: Vec<Line> = Vec::new();
+
+        for line in history_text.lines() {
+            let style = if line.starts_with("You ->") {
+                Style::default().fg(Color::White)
+            } else if line.starts_with(&agent_prefix) {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            let mut current_line = String::new();
+            let mut current_width = 0;
+
+            for c in line.chars() {
+                let w = c.width().unwrap_or(0);
+                if current_width + w > inner_width {
+                    history_spans.push(Line::from(Span::styled(current_line.clone(), style)));
+                    current_line.clear();
+                    current_width = 0;
+                }
+                current_line.push(c);
+                current_width += w;
+            }
+            if !current_line.is_empty() || line.is_empty() {
+                history_spans.push(Line::from(Span::styled(current_line, style)));
+            }
+        }
+
+        let history_lines = history_spans.len() as u16;
         let inner_height = area.height.saturating_sub(2);
         let max_scroll = history_lines.saturating_sub(inner_height);
 
@@ -259,24 +311,8 @@ impl ChatUi {
             *scroll_offset = (*scroll_offset).min(max_scroll);
         }
 
-        let agent_prefix = format!("{} ->", agent_name);
-
-        let history_spans: Vec<Line> = history_text
-            .lines()
-            .map(|line| {
-                if line.starts_with("You ->") {
-                    Line::from(Span::styled(line, Style::default().fg(Color::White)))
-                } else if line.starts_with(&agent_prefix) {
-                    Line::from(Span::styled(line, Style::default().fg(Color::Yellow)))
-                } else {
-                    Line::from(Span::styled(line, Style::default().fg(Color::Green)))
-                }
-            })
-            .collect();
-
         let history = Paragraph::new(history_spans)
             .block(Block::default().borders(Borders::ALL).title(" Chat History "))
-            .wrap(Wrap { trim: false })
             .scroll((*scroll_offset, 0));
         f.render_widget(history, area);
     }

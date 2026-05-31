@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
 use tokio::fs;
 
-use crate::SessionCtlExt;
+use crate::{SessionCtlExt, SessionMetadata};
 
 /// 基于文件系统的会话元数据管理实现
 pub struct FileSessionCtl<T> {
@@ -45,7 +45,7 @@ impl<T> FileSessionCtl<T> {
 #[async_trait::async_trait]
 impl<T> SessionCtlExt<T> for FileSessionCtl<T>
 where
-    T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    T: SessionMetadata + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn list_ext(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
         let user_dir = self.dir_path.join(user_id);
@@ -97,10 +97,10 @@ where
         Ok(Some(meta))
     }
 
-    async fn update_ext(&self, user_id: &str, session_id: &str, meta: T) -> anyhow::Result<()> {
-        let file_path = self.get_file_path(user_id, session_id);
+    async fn update_ext(&self, meta: T) -> anyhow::Result<()> {
+        let file_path = self.get_file_path(meta.user_id(), meta.id());
         if !file_path.exists() {
-            anyhow::bail!("Session {} does not exist", session_id);
+            anyhow::bail!("Session {} does not exist", meta.id());
         }
         let content =
             serde_json::to_string_pretty(&meta).context("Failed to serialize session meta")?;
@@ -110,13 +110,13 @@ where
         Ok(())
     }
 
-    async fn create_ext(&self, user_id: &str, meta: T) -> anyhow::Result<()> {
+    async fn create_ext(&self, meta: T) -> anyhow::Result<()> {
         let session_id = (self.id_extractor)(&meta);
-        let user_dir = self.dir_path.join(user_id);
+        let user_dir = self.dir_path.join(meta.user_id());
         if !user_dir.exists() {
             fs::create_dir_all(&user_dir).await?;
         }
-        let file_path = self.get_file_path(user_id, &session_id);
+        let file_path = self.get_file_path(meta.user_id(), &session_id);
         if file_path.exists() {
             anyhow::bail!("Session {} already exists", session_id);
         }

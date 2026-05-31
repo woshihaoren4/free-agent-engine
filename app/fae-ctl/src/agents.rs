@@ -1,3 +1,4 @@
+use fae_agent::SingleAgentSessionConfig;
 use fae_engine::{AgentsEngine, SingleAgentCtlFromFile, Workspace};
 use crate::args::AgentArgs;
 use crate::init_project::InitProject;
@@ -41,10 +42,27 @@ impl Agents{
             }
         }
     }
+    pub async fn chat_history(&self, agent_id: &str,user_id:&str){
+        let history = self.ws.session_history::<SingleAgentSessionConfig>(agent_id, user_id, 100).await;
+        let list = match history {
+            Ok(history) => history,
+            Err(e) => {
+                eprintln!("Failed to get chat history: {:?}", e);
+                return;
+            }
+        };
+        println!("Chat history:");
+        for session in list {
+            println!("  - {}: {}",session.get_id(), session.get_name());
+        }
+    }
     pub async fn exec(wd:String,args:AgentArgs){
         let this = Self::new(&wd).await;
-        let agent = args.name.unwrap_or("main".to_string());
-        if let Some(chat) = args.chat {
+        let agent = args.id.unwrap_or("main".to_string());
+        let user_id = args.user.unwrap_or("master".to_string());
+        if args.history {
+            this.chat_history(&agent,&user_id).await;
+        } else if let Some(chat) = args.chat {
             this.chat(&agent, Some(chat)).await;
         } else {
             this.agents_list().await;

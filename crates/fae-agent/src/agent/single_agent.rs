@@ -22,6 +22,9 @@ impl SingleAgentSessionConfig {
         self.id = id.into();
         self
     }
+    pub fn get_id(&self) -> &str {
+        self.id.as_str()
+    }
     pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
         self.user_id = user_id.into();
         self
@@ -29,6 +32,9 @@ impl SingleAgentSessionConfig {
     pub fn set_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
+    }
+    pub fn get_name(&self) -> &str {
+        self.name.as_str()
     }
 }
 
@@ -169,6 +175,9 @@ where
         }
         if let Some(max_completion_tokens) = model.max_completion_tokens {
             req.max_completion_tokens(max_completion_tokens);
+        }
+        if let Some(max_tokens) = model.max_tokens {
+            req.max_tokens(max_tokens);
         }
         if let Some(l) = model.reasoning_effort {
             match l {
@@ -313,7 +322,6 @@ where
     }
     // 处理模型执行结果
     pub async fn handle_model_result(&mut self,mut event: TaskResult)->anyhow::Result<PlanningResult>{
-        println!("---->1");
         let mut records = Vec::new();
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
@@ -325,7 +333,6 @@ where
         } else {
             return anyhow::anyhow!("[SingleAgent] task result unknown, {:?}", event).err();
         }
-        println!("---->3");
         // 调用工具
         let mut tool_tasks = Vec::new();
         for i in records{
@@ -442,7 +449,7 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             .is_none()
         {
             self.session_config
-                .create_ext(&info.user_id, SingleAgentSessionConfig {
+                .create_ext(SingleAgentSessionConfig {
                     id: info.id().to_string(),
                     user_id: info.user_id().to_string(),
                     name: input.content().to_string(),

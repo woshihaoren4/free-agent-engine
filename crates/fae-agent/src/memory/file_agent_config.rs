@@ -53,6 +53,7 @@ impl Default for AgentConfigData {
                 //    1:Minimal,2:Low, 3:Medium, 4:High,
                 reasoning_effort: Some(2),
                 frequency_penalty: None,
+                max_tokens: None,
                 max_completion_tokens: None,
                 presence_penalty: None,
                 temperature: Some(1.0),

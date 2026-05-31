@@ -134,9 +134,9 @@ pub trait SessionCtl: Sync {
     // 加载session详情
     async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMD>>;
     // 更改session
-    async fn update(&self, user_id: &str, session_id: &str, meta: SessionMD) -> anyhow::Result<()>;
+    async fn update(&self, meta: SessionMD) -> anyhow::Result<()>;
     // 创建session
-    async fn create(&self, user_id: &str, meta: SessionMD) -> anyhow::Result<()>;
+    async fn create(&self, meta: SessionMD) -> anyhow::Result<()>;
     // 删除session
     async fn delete(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
 }

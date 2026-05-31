@@ -11,10 +11,14 @@ struct InitArgs {
 
 #[derive(Args, Debug)]
 pub struct AgentArgs {
-    #[arg(short, long, help = "agent name, default is main")]
-    pub name: Option<String>,
-    #[arg(short, long, help = "agent chat")]
+    #[arg(alias = "name", short, long, help = "agent id, default is main")]
+    pub id: Option<String>,
+    #[arg(short, long, help = "user id, default master")]
+    pub user: Option<String>,
+    #[arg(short, long, help = "start chat with agent")]
     pub chat: Option<String>,
+    #[arg(alias = "hs",long, help = "show chat history")]
+    pub history: bool,
 }
 
 #[derive(Subcommand, Debug)]
