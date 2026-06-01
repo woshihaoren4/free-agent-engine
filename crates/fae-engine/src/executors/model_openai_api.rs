@@ -164,6 +164,14 @@ mod tests {
             answer.choices.remove(0).message.content.unwrap()
         );
 
+
+    }
+    #[tokio::test]
+    async fn test_openai_stream(){
+        let model = std::env::var("OPENAI_DEFAULT_MODEL").unwrap();
+        let cfg = OpenAIConfig::new().with_api_base(std::env::var("OPENAI_API_URL").unwrap());
+
+        let executor = ModelOpenAIApiExecutor::with_config(cfg);
         // ------------> 流式请求 <------------------
         let request = CreateChatCompletionRequestArgs::default()
             .model(model.as_str())

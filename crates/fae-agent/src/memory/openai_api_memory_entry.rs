@@ -298,12 +298,12 @@ impl MemoryEntry for Record {
 
     fn title(&self) -> String {
         match &self.item {
-            RecordItem::Wait => "Wait".to_string(),
+            RecordItem::Wait => "Waiting".to_string(),
             RecordItem::UserInput(_) => "User".to_string(),
-            RecordItem::ModelThought(_) => "Thought".to_string(),
-            RecordItem::ModelOutput(_) => "Output".to_string(),
-            RecordItem::ToolCall(tc) => format!("ToolCall({})", tc.tool_name),
-            RecordItem::ToolOutput(to) => format!("ToolOutput({})", to.tool_name),
+            RecordItem::ModelThought(_) => "Thinking".to_string(),
+            RecordItem::ModelOutput(_) => "Outputting".to_string(),
+            RecordItem::ToolCall(tc) => format!("CallTool({})", tc.tool_name),
+            RecordItem::ToolOutput(to) => format!("ToolOut({})", to.tool_name),
             RecordItem::Custom(title, _) => title.to_string(),
         }
     }

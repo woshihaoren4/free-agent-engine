@@ -49,10 +49,8 @@ impl WriteFile {
     fn get_allowed_dir(&self) -> std::path::PathBuf {
         if let Some(dir) = &self.allowed_dir {
             std::path::PathBuf::from(dir)
-        } else if let Ok(dir) = std::env::var("FAE_TOOL_FS_WRITE_DIR") {
-            std::path::PathBuf::from(dir)
         } else {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            std::env::home_dir().unwrap_or(std::path::PathBuf::from("~"))
         }
     }
 }
