@@ -102,6 +102,13 @@ impl Record {
     pub fn is_wait(&self) -> bool {
         matches!(self.item, RecordItem::Wait)
     }
+
+    pub fn is_tool_call(&self) -> bool {
+        match &self.item {
+            RecordItem::ToolCall(_) => true,
+            _ => false,
+        }
+    }
     pub fn reset_id_uuid_v4(mut self) -> Self {
         self.id = wd_tools::uuid::v4();
         self
@@ -355,9 +362,11 @@ impl MemoryEntry for Record {
     }
 
     fn is_remember(&self) -> bool {
-        match self.item {
+        match &self.item {
             RecordItem::UserInput(_) => true,
             RecordItem::ModelOutput(_) => true,
+            RecordItem::ToolCall(t) => t.tool_name.starts_with("todo"),
+            RecordItem::ToolOutput(_) => true,
             _ => false,
         }
     }

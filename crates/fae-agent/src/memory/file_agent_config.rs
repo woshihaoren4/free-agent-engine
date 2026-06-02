@@ -49,7 +49,7 @@ impl Default for AgentConfigData {
             model: ModelCallConfig {
                 model: model_name,
                 channel: default_channel(),
-                max_chat_history_round: 30,
+                max_chat_history_round: 20,
                 //    1:Minimal,2:Low, 3:Medium, 4:High,
                 reasoning_effort: Some(2),
                 frequency_penalty: None,
@@ -66,6 +66,7 @@ impl Default for AgentConfigData {
                 ToolConfig::new("write_file"),
                 ToolConfig::new("send_http_request"),
                 ToolConfig::new("execute_python"),
+                ToolConfig::new("todo_write"),
             ],
             skills: Vec::new(),
             mcp_servers: Vec::new(),

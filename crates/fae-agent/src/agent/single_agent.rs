@@ -398,6 +398,14 @@ where
         //调用模型
         return self.handle_model_result(event).await;
     }
+    async fn abort(&mut self) {
+        wd_log::log_error_ln!(
+            "[SingleAgentPlanAbort]::{} aborted, debug info:{}",
+            self.agent_id.as_str(),
+            self.debug().await
+        );
+        self.output.close();
+    }
 }
 
 define_planning_group!(

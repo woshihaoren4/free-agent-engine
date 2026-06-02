@@ -78,7 +78,7 @@ impl ChatUi {
 
         // Print welcome header
         clear_line()?;
-        print_text("Welcome to Free Agent Engine CLI!\nType /exit to quit, /abort to restart session.\n\n")?;
+        print_text("Welcome to Free Agent Engine CLI!\nType /exit to quit, /reset restart session.\n\n")?;
 
         loop {
 
@@ -143,7 +143,8 @@ impl ChatUi {
                                 } else if !val.is_empty() {
                                     if !stream_active {
                                         clear_line()?;
-                                        print_text(&format!("❯ You\n{}\n\n", val))?;
+                                        Self::print_user_message(val)?;
+                                        
                                         let msg = Record::from_user_input(val);
                                         match session.call_stream(msg).await {
                                             Ok(s) => {
@@ -184,11 +185,27 @@ impl ChatUi {
                                         } else {
                                             format!(" [{}]", current_title)
                                         };
-                                        print_text(&format!("\n❯ {}{}\n", self.agent_name, title_suffix))?;
+                                        print_text(&format!("\n\n❯ {}{}\n", self.agent_name, title_suffix))?;
                                     }
                                     let content = record.content();
                                     if !content.is_empty() {
-                                        print_text(content)?;
+                                        if current_title == "Thinking" {
+                                            let mut stdout = io::stdout();
+                                            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+                                            stdout.flush()?;
+                                            print_text(content)?;
+                                            queue!(stdout, ResetColor)?;
+                                            stdout.flush()?;
+                                        } else if current_title.starts_with("CallTool") || current_title.starts_with("ToolOut") {
+                                            let mut stdout = io::stdout();
+                                            queue!(stdout, SetForegroundColor(Color::Yellow))?;
+                                            stdout.flush()?;
+                                            print_text(content)?;
+                                            queue!(stdout, ResetColor)?;
+                                            stdout.flush()?;
+                                        } else {
+                                            print_text(content)?;
+                                        }
                                     }
                                 }
                                 None => {
@@ -242,6 +259,29 @@ impl ChatUi {
             let cursor_pos = input.visual_cursor() as u16 + 2;
             queue!(stdout, MoveToColumn(cursor_pos))?;
         }
+        stdout.flush()
+    }
+
+    fn print_user_message(val: &str) -> io::Result<()> {
+        let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
+        let separator = "─".repeat(cols);
+        
+        let mut stdout = io::stdout();
+        queue!(
+            stdout,
+            Clear(ClearType::FromCursorDown),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{}\r\n", separator)),
+            SetForegroundColor(Color::White),
+            SetAttribute(Attribute::Bold),
+            Print("❯ You\r\n"),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::White),
+            Print(format!("{}", val.replace('\n', "\r\n"))),
+            ResetColor,
+            Print("\n"),
+            crossterm::cursor::MoveUp(1)
+        )?;
         stdout.flush()
     }
 }

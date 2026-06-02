@@ -8,13 +8,13 @@ mod chat_ui;
 #[tokio::main]
 async fn main() {
     let cli = args::Cli::parse();
-    let wd = cli.ws;
+    let ws = cli.ws;
     match cli.command {
         args::Commands::Init => {
-            init_project::InitProject::init(wd).await;
+            init_project::InitProject::init(ws).await;
         }
         args::Commands::Agent(args) => {
-            agents::Agents::exec(wd,args).await;
+            agents::Agents::exec(ws, args).await;
         }
     }
 }

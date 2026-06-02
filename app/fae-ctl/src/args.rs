@@ -1,15 +1,6 @@
 use clap::{Parser, Subcommand, Args};
 
 #[derive(Args, Debug)]
-struct InitArgs {
-    /// 项目名称，可选
-    pub name: Option<String>,
-    /// 强制初始化
-    #[arg(short, long)]
-    pub force: bool,
-}
-
-#[derive(Args, Debug)]
 pub struct AgentArgs {
     #[arg(alias = "name", short, long, help = "agent id, default is main")]
     pub id: Option<String>,

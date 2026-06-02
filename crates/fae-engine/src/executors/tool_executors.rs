@@ -158,6 +158,7 @@ impl Default for ToolExecutor {
             Arc::new(crate::tools::WriteFile::default()),
             Arc::new(crate::tools::ListDirectory),
             Arc::new(crate::tools::ExecutePython),
+            Arc::new(crate::tools::TodoWrite::default()),
         ];
 
         for tool in tool_list {
