@@ -11,23 +11,14 @@ pub struct InitProject{
 }
 
 impl InitProject{
-    pub fn get_fae_home_dir()->PathBuf{
-        if let Ok(o) = env::var("FAE_HOME"){
-            PathBuf::from(o)
-        }else{
-            let home_dir = dirs::home_dir().expect("Failed to get home directory");
-            let fae_dir = home_dir.join(".fae");
-            fae_dir
-        }
-    }
     pub fn get_workspace_dir(ws:&str)->PathBuf{
-        let fae_dir = InitProject::get_fae_home_dir();
+        let fae_dir = fae_agent::fae_home();
         fae_dir.join(ws)
     }
     pub async fn init(ws:String){
         wd_log::log_info_ln!("start init project...");
         
-        let fae_dir = Self::get_fae_home_dir();
+        let fae_dir = fae_agent::fae_home();
         
         // 设置环境变量FAE_WORKSPACE为～/.fae
         unsafe {

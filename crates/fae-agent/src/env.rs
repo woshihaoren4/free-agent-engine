@@ -1,13 +1,26 @@
 use crate::{Task, TaskResult, TaskType};
 use std::any::Any;
+use std::env;
 use std::fmt::Display;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use serde_json::Value;
 
+pub const FAE_HOME: &'static str = "FAE_HOME";
 pub const FAE_WORKSPACE: &'static str = "FAE_WORKSPACE";
 pub const OPENAI_DEFAULT_MODEL: &'static str = "OPENAI_DEFAULT_MODEL";
 pub const FAE_DEFAULT_MODEL: &'static str = "FAE_DEFAULT_MODEL";
+
+pub fn fae_home()->PathBuf{
+    if let Ok(o) = env::var("FAE_HOME"){
+        PathBuf::from(o)
+    }else{
+        let home_dir = dirs::home_dir().expect("Failed to get home directory");
+        let fae_dir = home_dir.join(".fae");
+        fae_dir
+    }
+}
 
 
 /// 环境事件类型，用于表示环境中发生的各种事件

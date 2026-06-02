@@ -21,3 +21,4 @@ tokio-stream = { workspace = true }
 async-openai = {path = "../async-openai", version = "0.40.2",features = ["full"]}
 pin-project = "1.1.10"
 task = "0.0.1"
+dirs = "6.0.0"

@@ -772,6 +772,7 @@ dependencies = [
  "anyhow",
  "async-openai",
  "async-trait",
+ "dirs",
  "pin-project",
  "serde",
  "serde_json",
