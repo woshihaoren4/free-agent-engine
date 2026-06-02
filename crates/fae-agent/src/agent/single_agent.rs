@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, SessionMD, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ pub struct SingleAgentSessionConfig {
     pub id: String,
     pub user_id: String,
     pub name: String,
+    pub project: String,
 }
 impl SingleAgentSessionConfig {
     pub fn set_id(mut self, id: impl Into<String>) -> Self {
@@ -36,6 +37,13 @@ impl SingleAgentSessionConfig {
     pub fn get_name(&self) -> &str {
         self.name.as_str()
     }
+    pub fn set_project(mut self, project: impl Into<String>) -> Self {
+        self.project = project.into();
+        self
+    }
+    pub fn get_project(&self) -> &str {
+        self.project.as_str()
+    }
 }
 
 impl Default for SingleAgentSessionConfig {
@@ -44,6 +52,7 @@ impl Default for SingleAgentSessionConfig {
             id: "main_session_id_1".to_string(),
             user_id: "master".to_string(),
             name: String::new(),
+            project: String::new(),
         }
     }
 }
@@ -271,7 +280,7 @@ where
     pub async fn load_tools(&mut self) -> anyhow::Result<()> {
         let tools = self.agent_config.tools();
         for tool in tools {
-            let mut info = self.env.query(ThingSelect::Tool(tool.channel.clone(), tool.name.clone())).await?;
+            let mut info = self.env.query(ThingSelect::Tool(tool.channel.clone(), tool.name.clone()).into()).await?;
             if let Some(mut ting) = info.pop() {
                 if let Some(ThingItem::Tool(desc,args)) = ting.items.pop(){
                     self.tools.insert(format!("{}__{}",tool.channel,tool.name), (desc,args));
@@ -457,11 +466,7 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
             .is_none()
         {
             self.session_config
-                .create_ext(SingleAgentSessionConfig {
-                    id: info.id().to_string(),
-                    user_id: info.user_id().to_string(),
-                    name: input.content().to_string(),
-                })
+                .create_ext(info.clone())
                 .await?;
         }
         let agent_id = self.agent_id.clone();

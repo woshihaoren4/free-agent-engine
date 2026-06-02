@@ -2,10 +2,7 @@ use fae_agent::error::{
     TASK_ERROR_CODE_PLAN_ABORT, TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL,
     TASK_ERROR_CODE_PLAN_ABORT_USER,
 };
-use fae_agent::{
-    EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Task, TaskResult,
-    TaskType, Thing, ThingItem, ThingSelect,
-};
+use fae_agent::{EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -297,8 +294,8 @@ impl Environment for PlanRuntime {
         }
     }
 
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
-        return if let ThingSelect::Plan(pid, aid) = select {
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
+        return if let ThingSelect::Plan(pid, aid) = select.select {
             let id = Self::generate_plan_sub_id(pid.as_str(), aid.as_str());
             if let Some(p) = self.get_plan(&id).await {
                 let p = p.lock().await;

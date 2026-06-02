@@ -1,0 +1,23 @@
+use std::fmt::Display;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug,Default,Serialize,Deserialize)]
+pub struct SkillHeader{
+    pub name: String,
+    pub description: String,
+    pub version: Option<String>,
+    pub metadata: Option<String>,
+    pub author: Option<String>,
+    pub trigger: Option<String>,
+    pub tags: Vec<String>,
+}
+
+impl Display for SkillHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Ok(s) = serde_json::to_string(self) {
+            write!(f, "{}", s)
+        }else{
+            write!(f, "{}: {}", self.name, self.description)
+        }
+    }
+}

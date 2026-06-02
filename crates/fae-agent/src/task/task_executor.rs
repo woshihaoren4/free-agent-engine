@@ -1,4 +1,4 @@
-use crate::{Task, TaskResult, Thing, ThingSelect};
+use crate::{Select, Task, TaskResult, Thing, ThingSelect};
 use std::any::Any;
 use std::marker::PhantomData;
 use wd_tools::PFErr;
@@ -10,7 +10,7 @@ pub trait TaskExecutor: Sync {
         "default".to_string()
     }
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult>;
-    async fn query(&self, _select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+    async fn query(&self, _select: Select) -> anyhow::Result<Vec<Thing>> {
         Ok(vec![])
     }
 }
@@ -28,7 +28,7 @@ pub trait TaskExecutorExt<In, Out>: Sync {
         user_id: String,
         input: In,
     ) -> anyhow::Result<Out>;
-    async fn query(&self, _select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+    async fn query(&self, _select: Select) -> anyhow::Result<Vec<Thing>> {
         Ok(vec![])
     }
 }
@@ -84,7 +84,7 @@ where
         }
         Ok(TaskResult::success(task.id.clone(), task.agent_id.clone()).set_data(output))
     }
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
         self.executor.query(select).await
     }
 }

@@ -1,5 +1,6 @@
-use crate::{Task, TaskResult, TaskType};
+use crate::{SkillHeader, Task, TaskResult, TaskType};
 use std::any::Any;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::ops::Deref;
@@ -67,12 +68,32 @@ pub enum ThingSelect {
     Plan(String, String),
     /// tools 工具: 渠道，工具名称
     Tool(String, String),
+    /// skill: 渠道，名字, 目录
+    Skill(String, String, Option<String>),
     /// Custom
     Custom(String),
 }
 impl ThingSelect {
     pub fn is_none(&self) -> bool {
         self == &ThingSelect::None
+    }
+}
+
+/// 查询条件
+#[derive(Default, Debug, PartialEq, Eq, Clone)]
+pub struct Select{
+    pub select: ThingSelect,
+    pub workspace: Option<String>,
+    pub extend: HashMap<String, String>,
+}
+
+impl From<ThingSelect> for Select {
+    fn from(select: ThingSelect) -> Self {
+        Self {
+            select,
+            workspace: None,
+            extend: HashMap::new(),
+        }
     }
 }
 
@@ -119,8 +140,8 @@ pub enum ThingItem {
     EnvVar(String),
     /// 智能体
     Agent(String),
-    /// 技能
-    Skill(String),
+    /// 技能: Skill头信息
+    Skill(SkillHeader),
     /// 自定义事物
     Custom(String),
     /// MCP服务器
@@ -163,7 +184,7 @@ pub trait Environment: Send + Sync + 'static {
     async fn watch(&self) -> anyhow::Result<EnvEvent>;
 
     /// 查询环境中的事物
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>>;
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>>;
 
     /// 异步执行任务
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()>;

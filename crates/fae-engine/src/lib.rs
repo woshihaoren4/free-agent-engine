@@ -24,7 +24,7 @@ mod tests {
             .query(ThingSelect::Executor(
                 TaskType::Model,
                 EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
-            ))
+            ).into())
             .await
             .expect("Failed to get executor info");
         println!("{:?}", executor_info);

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fae_agent::{Error, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest};
+use fae_agent::{Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
@@ -107,8 +107,8 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
             }
         }
     }
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
-        if let ThingSelect::Tool(_,name) = select {
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
+        if let ThingSelect::Tool(_,name) = select.select {
             let tool = self.load_tool(name.as_str()).await?;
             let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string(),tool.arguments())).into_self();
             return Ok(vec![thing]);

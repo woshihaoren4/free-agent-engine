@@ -1,6 +1,6 @@
 use crate::ToolExecutor;
 use crate::executors::ModelOpenAIApiExecutor;
-use fae_agent::{Env, EnvEvent, Environment, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
+use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -126,9 +126,9 @@ impl Environment for TaskRuntime {
         }
     }
 
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
         //为空时，查询所有任务执行器
-        if select.is_none() {
+        if select.select.is_none() {
             let items = self
                 .executors
                 .iter()
@@ -140,7 +140,7 @@ impl Environment for TaskRuntime {
             return Ok(vec![thing]);
         }
         //根据任务类型和渠道查询
-        if let ThingSelect::Executor(ref task_type, ref channel) = select {
+        if let ThingSelect::Executor(ref task_type, ref channel) = select.select {
             if let Some(e) = self
                 .executors
                 .get(&self.generate_executor_key(&task_type, channel))
@@ -153,7 +153,7 @@ impl Environment for TaskRuntime {
             }
         }
         //根据工具名称查询
-        if let ThingSelect::Tool(ref channel, ref _tool_name) = select {
+        if let ThingSelect::Tool(ref channel, ref _tool_name) = select.select {
             if let Some(e) = self
                 .executors
                 .get(&self.generate_executor_key(&TaskType::Tool, channel))
@@ -175,7 +175,7 @@ impl Environment for TaskRuntime {
                 .query(ThingSelect::Executor(
                     i.get_type().clone(),
                     i.get_exec_channel().to_string(),
-                ))
+                ).into())
                 .await?;
             if list.is_empty() {
                 return anyhow::anyhow!(

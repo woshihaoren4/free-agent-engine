@@ -84,6 +84,8 @@ pub struct Task {
     pub r#type: TaskType,
     pub exec_channel: String,
     pub user_id: String,
+    pub workspace: Option<String>,
+    pub project: Option<String>,
     pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 impl Task {
@@ -97,6 +99,8 @@ impl Task {
             args: None,
             user_id: "".into(),
             exec_channel: "default".into(),
+            workspace: None,
+            project: None,
         }
     }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
@@ -140,6 +144,28 @@ impl Task {
     pub fn get_channel(&self) -> &str {
         self.exec_channel.as_str()
     }
+    pub fn set_workspace<T: Into<String>>(&mut self, workspace: T) {
+        self.workspace = Some(workspace.into());
+    }
+    pub fn set_project<T: Into<String>>(mut self, project: T) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+    pub fn get_workspace(&self) -> &str {
+        if let Some(workspace) = &self.workspace {
+            workspace.as_str()
+        } else {
+            ""
+        }
+    }
+    pub fn get_project(&self) -> &str {
+        if let Some(project) = &self.project {
+            project.as_str()
+        } else {
+            ""
+        }
+    }
+
     pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
         self.args = Some(args);
         self

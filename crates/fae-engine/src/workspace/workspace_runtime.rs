@@ -1,4 +1,4 @@
-use fae_agent::{Env, EnvEvent, Environment, Task, TaskResult, Thing, ThingItem, ThingSelect};
+use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskResult, Thing, ThingItem, ThingSelect};
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 
@@ -47,8 +47,9 @@ impl Environment for WorkspaceRuntime{
         }
     }
 
-    async fn query(&self, select: ThingSelect) -> anyhow::Result<Vec<Thing>> {
-        if let ThingSelect::Env(ref key ) = select{
+    async fn query(&self,mut select: Select) -> anyhow::Result<Vec<Thing>> {
+        select.workspace = Some(self.name.clone());
+        if let ThingSelect::Env(ref key ) = select.select{
             if let Some(env) = self.get_env_var(key) {
                 return Ok(vec![env])
             }
@@ -60,7 +61,10 @@ impl Environment for WorkspaceRuntime{
         }
     }
 
-    async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
+    async fn spawn(&self, mut tasks: Vec<Task>) -> anyhow::Result<()> {
+        for task in &mut tasks {
+            task.set_workspace(self.name.clone());
+        }
         if let Some(parent) = &self.parent {
             parent.spawn(tasks).await
         } else {
@@ -68,7 +72,8 @@ impl Environment for WorkspaceRuntime{
         }
     }
 
-    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
+    async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
+        task.set_workspace(self.name.clone());
         if let Some(parent) = &self.parent {
             parent.execute(task).await
         } else {
