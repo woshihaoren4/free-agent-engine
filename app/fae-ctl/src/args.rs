@@ -19,6 +19,8 @@ pub(crate) enum Commands {
     /// manage agent
     #[command(alias = "a")]
     Agent(AgentArgs),
+    /// uninstall agent
+    Uninstall,
 }
 
 #[derive(Parser, Debug)]

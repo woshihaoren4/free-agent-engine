@@ -4,6 +4,7 @@ mod args;
 mod init_project;
 mod agents;
 mod chat_ui;
+mod uninstall;
 
 #[tokio::main]
 async fn main() {
@@ -15,6 +16,9 @@ async fn main() {
         }
         args::Commands::Agent(args) => {
             agents::Agents::exec(ws, args).await;
+        }
+        args::Commands::Uninstall => {
+            uninstall::Uninstall{}.exec();
         }
     }
 }
