@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Checking if agent exists...");
     if ws.get_agent("main").await.is_err() {
         println!("Creating SingleAgent...");
-        let config = AgentConfigData::default().set_prompt_path("../../prompt/aicoding.txt");
+        let config = AgentConfigData::default().set_prompt_path("../../docs/prompt/aicoding.txt");
         ws.create_single_agent("main", config.into_agent_config()).await?;
     }
 

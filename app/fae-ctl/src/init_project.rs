@@ -25,16 +25,60 @@ impl InitProject{
             wd_log::log_info_ln!("set env FAE_WORKSPACE to {}", fae_dir.display());
             env::set_var("FAE_WORKSPACE", fae_dir.to_str().unwrap());
         }
-
-        //创建 ～/.fae/skills目录
-        let skills_dir = fae_dir.join("skills");
-        if !skills_dir.exists() {
-            wd_log::log_info_ln!("create directory {}", skills_dir.display());
-            fs::create_dir_all(&skills_dir).expect("Failed to create skills directory");
-        } else {
-            wd_log::log_info_ln!("directory {} already exists", skills_dir.display());
+        // 下载site.txt
+        wd_log::log_info_ln!("downloading from site.txt...");
+        let site_txt_url = "https://woshihaoren4.github.io/free-agent-engine/site.txt";
+        match reqwest::get(site_txt_url).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(site_content) = resp.text().await {
+                        for line in site_content.lines() {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let file_path = fae_dir.join(line);
+                            if !file_path.exists() {
+                                let url = format!("https://woshihaoren4.github.io/free-agent-engine/{}", line);
+                                wd_log::log_info_ln!("downloading {} ...", url);
+                                match reqwest::get(&url).await {
+                                    Ok(resp) => {
+                                        if resp.status().is_success() {
+                                            if let Ok(content) = resp.bytes().await {
+                                                if let Some(parent) = file_path.parent() {
+                                                    if !parent.exists() {
+                                                        if let Err(e) = fs::create_dir_all(parent) {
+                                                            wd_log::log_error_ln!("failed to create dir {}: {}", parent.display(), e);
+                                                        }
+                                                    }
+                                                }
+                                                if let Err(e) = fs::write(&file_path, content) {
+                                                    wd_log::log_error_ln!("failed to write file {}: {}", file_path.display(), e);
+                                                } else {
+                                                    wd_log::log_info_ln!("downloaded and saved {}", file_path.display());
+                                                }
+                                            }
+                                        } else {
+                                            wd_log::log_error_ln!("failed to download {}: status {}", url, resp.status());
+                                        }
+                                    }
+                                    Err(e) => {
+                                        wd_log::log_error_ln!("failed to download {}: {}", url, e);
+                                    }
+                                }
+                            } else {
+                                wd_log::log_info_ln!("file {} already exists, skip", file_path.display());
+                            }
+                        }
+                    }
+                } else {
+                    wd_log::log_error_ln!("failed to fetch site.txt: status {}", resp.status());
+                }
+            }
+            Err(e) => {
+                wd_log::log_error_ln!("failed to fetch site.txt: {}", e);
+            }
         }
-
         // 创建～/.fae/prompt目录
         let prompt_dir = fae_dir.join("prompt");
         if !prompt_dir.exists() {
@@ -43,7 +87,7 @@ impl InitProject{
         } else {
             wd_log::log_info_ln!("directory {} already exists", prompt_dir.display());
         }
-        
+
         // 检查并在～/.fae/prompt目录下创建aicoding.txt和claw.txt文件
         let aicoding_path = prompt_dir.join("aicoding.txt");
         if !aicoding_path.exists() {
@@ -97,6 +141,8 @@ impl InitProject{
         } else {
             wd_log::log_info_ln!("agent fae_coding already exists in {}", ws_dir.display());
         }
+
+
         
         wd_log::log_info_ln!("init project success.");
     }

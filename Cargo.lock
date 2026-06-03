@@ -738,6 +738,7 @@ dependencies = [
  "fae-agent",
  "fae-engine",
  "ratatui",
+ "reqwest 0.13.3",
  "tokio",
  "tokio-stream",
  "tui-input",
