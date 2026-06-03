@@ -71,7 +71,7 @@ pub enum AuditLogEventType {
     RateLimitUpdated,
     #[serde(rename = "rate_limit.deleted")]
     RateLimitDeleted,
-    #[serde(rename = "resource.deleted")]
+    #[serde(rename = "docs.deleted")]
     ResourceDeleted,
     #[serde(rename = "tunnel.created")]
     TunnelCreated,

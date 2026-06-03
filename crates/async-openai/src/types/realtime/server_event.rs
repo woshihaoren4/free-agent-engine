@@ -19,7 +19,7 @@ pub struct RealtimeServerEventError {
 pub struct RealtimeServerEventSessionCreated {
     /// The unique ID of the server event.
     pub event_id: String,
-    /// The session resource.
+    /// The session docs.
     pub session: Session,
 }
 
@@ -27,7 +27,7 @@ pub struct RealtimeServerEventSessionCreated {
 pub struct RealtimeServerEventSessionUpdated {
     /// The unique ID of the server event.
     pub event_id: String,
-    /// The updated session resource.
+    /// The updated session docs.
     pub session: Session,
 }
 
@@ -237,7 +237,7 @@ pub struct RealtimeServerEventConversationItemInputAudioTranscriptionSegment {
 pub struct RealtimeServerEventResponseCreated {
     /// The unique ID of the server event.
     pub event_id: String,
-    /// The response resource.
+    /// The response docs.
     pub response: RealtimeResponse,
 }
 
@@ -245,7 +245,7 @@ pub struct RealtimeServerEventResponseCreated {
 pub struct RealtimeServerEventResponseDone {
     /// The unique ID of the server event.
     pub event_id: String,
-    /// The response resource.
+    /// The response docs.
     pub response: RealtimeResponse,
 }
 

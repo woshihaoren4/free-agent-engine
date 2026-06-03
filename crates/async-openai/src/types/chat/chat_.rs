@@ -428,9 +428,9 @@ pub struct UrlCitation {
     pub end_index: u32,
     /// The index of the first character of the URL citation in the message.
     pub start_index: u32,
-    /// The title of the web resource.
+    /// The title of the web docs.
     pub title: String,
-    /// The URL of the web resource.
+    /// The URL of the web docs.
     pub url: String,
 }
 

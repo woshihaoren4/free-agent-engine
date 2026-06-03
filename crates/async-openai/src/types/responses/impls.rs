@@ -741,7 +741,7 @@ impl ItemReference {
 // `From<OutputItem> for Item` (and through it, `From<OutputItem> for
 // InputItem`). For variants where input and output already share a struct
 // the conversion is a one-liner; for the handful of variants where the
-// schemas differ (resource types carry required `id`/`status`, while their
+// schemas differ (docs types carry required `id`/`status`, while their
 // input-side `*ItemParam` counterparts have those optional), per-pair
 // `From` impls map the fields so callers don't have to write boilerplate
 // per use site.
@@ -751,7 +751,7 @@ impl ItemReference {
 //   - https://platform.openai.com/docs/guides/conversation-state
 // ──────────────────────────────────────────────────────────────────────────
 
-// Status enum mappings (resource side → param side).
+// Status enum mappings (docs side → param side).
 
 impl From<FunctionCallOutputStatusEnum> for OutputStatus {
     fn from(status: FunctionCallOutputStatusEnum) -> Self {
@@ -902,10 +902,10 @@ impl From<ApplyPatchOperation> for ApplyPatchOperationParam {
     }
 }
 
-// Per-resource-output → input-param conversions. Required `id` / `status`
-// fields on the resource side become wrapped in `Some(...)` on the input
+// Per-docs-output → input-param conversions. Required `id` / `status`
+// fields on the docs side become wrapped in `Some(...)` on the input
 // side; status enums fold through the `From` impls above. The `created_by`
-// field exists only on the resource side and is dropped on the way in —
+// field exists only on the docs side and is dropped on the way in —
 // it's a server-assigned annotation that the input schema doesn't accept.
 
 impl From<FunctionToolCallOutputResource> for FunctionCallOutputItemParam {

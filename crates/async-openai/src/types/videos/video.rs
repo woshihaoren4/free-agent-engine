@@ -192,7 +192,7 @@ pub struct VideoResource {
     pub status: VideoStatus,
 }
 
-/// Character resource returned by character creation and retrieval.
+/// Character docs returned by character creation and retrieval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoCharacterResource {
     /// Identifier for the character.

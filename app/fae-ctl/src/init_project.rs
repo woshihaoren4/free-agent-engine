@@ -3,8 +3,8 @@ use std::env;
 use std::path::PathBuf;
 use fae_agent::AgentConfigData;
 
-const PROMPT_AICODING: &str = include_str!("../../../resource/prompt/aicoding.txt");
-const PROMPT_CLAW: &str = include_str!("../../../resource/prompt/claw.txt");
+const PROMPT_AICODING: &str = include_str!("../../../docs/prompt/aicoding.txt");
+const PROMPT_CLAW: &str = include_str!("../../../docs/prompt/claw.txt");
 
 pub struct InitProject{
 

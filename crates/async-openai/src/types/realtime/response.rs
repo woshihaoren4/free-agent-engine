@@ -150,7 +150,7 @@ pub enum Conversation {
     None,
 }
 
-/// The response resource.
+/// The response docs.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RealtimeResponseCreateParams {
     /// Configuration for audio input and output.
