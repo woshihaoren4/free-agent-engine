@@ -60,6 +60,35 @@ impl ToolConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillConfig {
+    pub name: String,
+    pub channel: String,
+}
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            channel: "default".to_string(),
+        }
+    }
+}
+impl SkillConfig {
+    pub fn new<S: Into<String>>(name: S) -> Self {
+        Self {
+            name: name.into(),
+            channel: "default".to_string(),
+        }
+    }
+    pub fn with_channel(self, channel: String) -> Self {
+        Self {
+            name: self.name,
+            channel,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait AgentConfig:Sync {
     /// 获取智能体名称，唯一标识
@@ -84,7 +113,7 @@ pub trait AgentConfig:Sync {
     }
 
     /// 获取启用的技能 (skill) 列表
-    fn skills(&self) -> Vec<String> {
+    fn skills(&self) -> Vec<SkillConfig> {
         Vec::new()
     }
 

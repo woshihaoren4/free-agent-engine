@@ -25,7 +25,16 @@ impl InitProject{
             wd_log::log_info_ln!("set env FAE_WORKSPACE to {}", fae_dir.display());
             env::set_var("FAE_WORKSPACE", fae_dir.to_str().unwrap());
         }
-        
+
+        //创建 ～/.fae/skills目录
+        let skills_dir = fae_dir.join("skills");
+        if !skills_dir.exists() {
+            wd_log::log_info_ln!("create directory {}", skills_dir.display());
+            fs::create_dir_all(&skills_dir).expect("Failed to create skills directory");
+        } else {
+            wd_log::log_info_ln!("directory {} already exists", skills_dir.display());
+        }
+
         // 创建～/.fae/prompt目录
         let prompt_dir = fae_dir.join("prompt");
         if !prompt_dir.exists() {
@@ -70,7 +79,7 @@ impl InitProject{
                 .set_name("风筝小管家")
                 .set_description("风筝小管家是一个智能助手，用于回复主人的任何问题，并提供一定的执行能力，并且会记得主人的任何嘱托。")
                 .set_prompt_path(format!("{}/prompt/claw.txt", fae_dir.display()));
-            main_config.init("main", &ws_dir).await.expect("Failed to init main agent config");
+            main_config.init( "main", &ws_dir).await.expect("Failed to init main agent config");
         } else {
             wd_log::log_info_ln!("agent main already exists in {}", ws_dir.display());
         }

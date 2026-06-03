@@ -161,6 +161,15 @@ impl Environment for TaskRuntime {
                 return e.query(select).await;
             }
         }
+        //查询skill
+        if let ThingSelect::Skill(ref channel, ref _name, ref _dir) = select.select {
+            if let Some(e) = self
+                .executors
+                .get(&self.generate_executor_key(&TaskType::Skill, channel))
+            {
+                return e.query(select).await;
+            }
+        }
         //如果父环境也没有，就返回空
         if let Some(e) = self.parent.as_ref() {
             return e.query(select).await;

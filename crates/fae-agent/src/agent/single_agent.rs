@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata, fae_home, FAE_HOME};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -11,74 +11,19 @@ use serde_json::Value;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SingleAgentSessionConfig {
-    pub id: String,
-    pub user_id: String,
-    pub name: String,
-    pub project: String,
-}
-impl SingleAgentSessionConfig {
-    pub fn set_id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-    pub fn get_id(&self) -> &str {
-        self.id.as_str()
-    }
-    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = user_id.into();
-        self
-    }
-    pub fn set_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
-    }
-    pub fn get_name(&self) -> &str {
-        self.name.as_str()
-    }
-    pub fn set_project(mut self, project: impl Into<String>) -> Self {
-        self.project = project.into();
-        self
-    }
-    pub fn get_project(&self) -> &str {
-        self.project.as_str()
-    }
-}
 
-impl Default for SingleAgentSessionConfig {
-    fn default() -> Self {
-        Self {
-            id: "main_session_id_1".to_string(),
-            user_id: "master".to_string(),
-            name: String::new(),
-            project: String::new(),
-        }
-    }
-}
-
-impl SessionMetadata for SingleAgentSessionConfig {
-    fn id(&self) -> &str {
-        self.id.as_str()
-    }
-
-    fn user_id(&self) -> &str {
-        self.user_id.as_str()
-    }
-}
-
-pub struct SingleAgent<M> {
+pub struct SingleAgent<S,M> {
     agent_id: String,
     memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-    session_config: Arc<dyn SessionCtlExt<SingleAgentSessionConfig> + Send + 'static>,
+    session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
 }
 
-impl<M> SingleAgent<M> {
+impl<S,M> SingleAgent<S,M> {
     pub fn new(
         agent_id: impl Into<String>,
         memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-        session_config: Arc<dyn SessionCtlExt<SingleAgentSessionConfig> + Send + 'static>,
+        session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
     ) -> Self {
         Self {
@@ -90,34 +35,11 @@ impl<M> SingleAgent<M> {
     }
 }
 
-// pub struct SingleAgentPlanSessionCall<M> {
-//     id: String,
-//     session_info: SessionInfo,
-//     input: M,
-//     memory: Arc<dyn Memory<M> + Send + Sync + 'static>,
-// }
-//
-// #[async_trait::async_trait]
-// impl<M: Send + Sync + 'static> Planning for SingleAgentPlanSessionCall<M> {
-//     fn id(&self) -> String {
-//         todo!()
-//     }
-//
-//     async fn init(&mut self) -> anyhow::Result<PlanningResult> {
-//         Ok(PlanningResult::End(None))
-//     }
-//
-//     async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult> {
-//         todo!()
-//     }
-// }
-
-pub struct SingleAgentPlanSessionCallStream<M> {
+pub struct SingleAgentPlanSessionCallStream<S,M> {
     id: String,
     agent_id: String,
     env: Env,
-    user_id: String,
-    session_id: String,
+    session_metadata: S,
     input: M,
     output: SenderMessageStream<M>,
     memory: Arc<dyn MemoryMessageExt<M> + Send + Sync + 'static>,
@@ -131,8 +53,9 @@ pub struct SingleAgentPlanSessionCallStream<M> {
     tools: HashMap<String,(String,Value)>,
 }
 
-impl<M> SingleAgentPlanSessionCallStream<M>
+impl<S,M> SingleAgentPlanSessionCallStream<S,M>
 where
+    S: SessionMetadata + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     pub fn new(
@@ -140,8 +63,7 @@ where
         env: Env,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
         memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-        user_id: String,
-        session_id: String,
+        session_metadata: S,
         input: M,
         output: SenderMessageStream<M>,
     ) -> Self {
@@ -150,8 +72,7 @@ where
             agent_id,
             env,
             id,
-            user_id,
-            session_id,
+            session_metadata,
             input,
             output,
             memory,
@@ -217,20 +138,8 @@ where
                 .expect("build message failed!")
                 .into(),
         );
-        // 添加user_info
-        if let Ok(user_info) = self.memory.get_user_info_ext(&self.user_id).await {
-            if !user_info.is_empty() {
-                messages.push(
-                    ChatCompletionRequestUserMessageArgs::default()
-                        .content(user_info)
-                        .build()
-                        .expect("build message failed!")
-                        .into(),
-                );
-            }
-        }
         //添加历史消息
-        for item in self.memory.load_ext(&self.user_id, self.session_id.as_str(), 0, model.max_chat_history_round as usize).await? {
+        for item in self.memory.load_ext(&self.session_metadata.user_id(), self.session_metadata.id(), 0, model.max_chat_history_round as usize).await? {
             if let Some(msg) = item.to_openai_message() {
                 messages.push(msg);
             }
@@ -273,8 +182,29 @@ where
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
         let agent_metadata = self.agent_config.metadata(&self.agent_id);
-        let memory_metdata = self.memory.metadata_ext(&self.user_id, &self.session_id).await?;
+        let memory_metdata = self.memory.metadata_ext(&self.session_metadata.user_id(), &self.session_metadata.id()).await?;
+        let session_metadata = self.session_metadata.additional_tips();
+        //加载skill
         self.agent_info = agent_metadata + &memory_metdata;
+        if let Some(tips) = session_metadata {
+            self.agent_info.push_str(&tips);
+        }
+        Ok(())
+    }
+    pub async fn load_skills(&mut self)-> anyhow::Result<()>{
+        let mut info = format!("\n---\n## Skills\n  > skill at dir $SKILL_DIR: ${}/skills/{{$skill_name}}",FAE_HOME);
+        info.push_str("\n  > Use skill: read its `SKILL.md` file and execute it according to the SOP in the file. file=$SKILL_DIR/{{$skill_name}}/SKILL.md");
+        info.push_str("\n skill list:");
+        let skills = self.agent_config.skills();
+        for skill in skills {
+            let things = self.env.query(ThingSelect::Skill(skill.channel.clone(), skill.name.clone(),None).into()).await?;
+            for mut i in things{
+                while let Some(ThingItem::Skill(header)) = i.items.pop(){
+                    info.push_str(format!("\n  - {}", header.format()).as_str());
+                }
+            }
+        }
+        self.agent_info.push_str(&info);
         Ok(())
     }
     pub async fn load_tools(&mut self) -> anyhow::Result<()> {
@@ -289,6 +219,12 @@ where
             }
             return anyhow::anyhow!("[SingleAgent:{}:{}] no tools found, {:?}",self.agent_id,self.id, tool).err();
         }
+        Ok(())
+    }
+    pub async fn load_memory(&mut self) -> anyhow::Result<()> {
+        // 添加user_info
+        let info = self.memory.get_user_info_ext(&self.session_metadata.user_id()).await?;
+        self.agent_info.push_str(&info);
         Ok(())
     }
     // (渠道，函数名)
@@ -368,7 +304,7 @@ where
         // 仅为模型输出
         for msg in std::mem::take(&mut self.exec_records)  {
             if msg.is_remember() {
-                self.memory.push_ext(&self.user_id, &self.session_id, msg).await?;
+                self.memory.push_ext(&self.session_metadata.user_id(), &self.session_metadata.id(), msg).await?;
             }
         }
         self.output.close();
@@ -377,8 +313,9 @@ where
 }
 
 #[async_trait::async_trait]
-impl<M> Planning for SingleAgentPlanSessionCallStream<M>
+impl<S,M> Planning for SingleAgentPlanSessionCallStream<S,M>
 where
+    S: SessionMetadata + Clone + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     fn id(&self) -> String {
@@ -390,12 +327,18 @@ where
         //添加query到memory
         if self.input.is_remember() {
             self.memory
-                .push_ext(&self.user_id, &self.session_id, self.input.clone())
+                .push_ext(&self.session_metadata.user_id(), &self.session_metadata.id(), self.input.clone())
                 .await?;
         }
         //加载工具
         self.load_tools().await?;
+        //加载skill
+        self.load_skills().await?;
+        //加载memory
+        self.load_memory().await?;
         //发起任务
+        println!("----->\n{}",self.agent_info);
+        return anyhow::anyhow!("<----").err();
         self.make_model_task().await
     }
 
@@ -418,18 +361,23 @@ where
 }
 
 define_planning_group!(
-    pub enum SingleAgentPlan<M>
+    pub enum SingleAgentPlan<S,M>
     {
         // SessionCall(SingleAgentPlanSessionCall<M>),
         None(NonePlan),
-        SessionCallStream(SingleAgentPlanSessionCallStream<M>),
+        SessionCallStream(SingleAgentPlanSessionCallStream<S,M>),
     }
-    where M:MemoryEntry + Serialize + DeserializeOwned + Clone+Send + Sync + 'static
+    where
+    S: SessionMetadata + Clone + Send + Sync + 'static,
+    M:MemoryEntry + Serialize + DeserializeOwned + Clone+Send + Sync + 'static
 );
 
 #[async_trait::async_trait]
-impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static>
-    AgentEventHandle<SingleAgentSessionConfig, M, M, SingleAgentPlan<M>> for SingleAgent<M>
+impl<S,M>
+    AgentEventHandle<S, M, M, SingleAgentPlan<S,M>> for SingleAgent<S,M>
+where
+    S: SessionMetadata + Clone + Send + Sync + 'static,
+    M:MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     fn id(&self) -> String {
         self.agent_id.clone()
@@ -454,14 +402,14 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
     async fn on_session_call_stream(
         &self,
         env: Env,
-        info: &mut SingleAgentSessionConfig,
+        info: &mut S,
         input: M,
         output: SenderMessageStream<M>,
-    ) -> anyhow::Result<SingleAgentPlan<M>> {
+    ) -> anyhow::Result<SingleAgentPlan<S,M>> {
         // session 没有则创建一个
         if self
             .session_config
-            .load_ext(&info.user_id, info.id())
+            .load_ext(&info.user_id(), info.id())
             .await?
             .is_none()
         {
@@ -472,13 +420,12 @@ impl<M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'stat
         let agent_id = self.agent_id.clone();
 
         let memory = self.memory.clone();
-        let plan = SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::new(
+        let plan = SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::<S,M>::new(
             agent_id,
             env,
             self.agent_config.clone(),
             memory,
-            info.user_id().to_string(),
-            info.id().to_string(),
+            info.clone(),
             input,
             output,
         ));

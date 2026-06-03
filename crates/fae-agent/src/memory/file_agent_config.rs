@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use wd_tools::PFErr;
-use crate::{utils, AgentConfig, ModelCallConfig, ToolConfig, FAE_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL};
+use crate::{fae_home, utils, AgentConfig, ModelCallConfig, SkillConfig, ToolConfig, FAE_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL};
 use super::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL,
 };
 
@@ -19,7 +19,7 @@ pub struct AgentConfigData {
     #[serde(default)]
     pub tools: Vec<ToolConfig>,
     #[serde(default)]
-    pub skills: Vec<String>,
+    pub skills: Vec<SkillConfig>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
     #[serde(default)]
@@ -204,7 +204,7 @@ impl AgentConfig for AgentConfigFile {
         self.config.tools.clone()
     }
 
-    fn skills(&self) -> Vec<String> {
+    fn skills(&self) -> Vec<SkillConfig> {
         self.config.skills.clone()
     }
 
@@ -220,11 +220,14 @@ impl AgentConfig for AgentConfigFile {
         self.config.custom.get(key).cloned()
     }
     fn metadata(&self,id:&str) -> String {
-        let mut meta = "\n## Your Agent Metadata:".to_string();
+        let mut meta = "\n---\n## Your Agent Metadata:".to_string();
+        let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        meta.push_str(&format!("\n - System Now Time: `{}`", time));
+        meta.push_str(&format!("\n - $FAE_HOME: `{}`", fae_home().display()));
         meta.push_str(&format!("\n - your Agent Name: `{}`", self.name()));
         meta.push_str(&format!("\n - your Agent Id: `{}`", id));
-        meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path: {}", self.config_path));
-        format!("{}\n - your enactment prompt file path: {}", meta, self.prompt_path)
+        meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path:`{}`", self.config_path));
+        format!("{}\n - your enactment prompt file path: `{}", meta, self.prompt_path)
     }
 
     async fn init(&mut self, id:&str, workspace:&str, _cfg:serde_json::Value) -> anyhow::Result<()> {

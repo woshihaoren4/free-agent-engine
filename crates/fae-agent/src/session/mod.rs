@@ -2,6 +2,7 @@ mod session_event_layer;
 mod session_trait_ext;
 pub mod file_session_ctl;
 mod session_ctl_ext;
+mod single_session_metadata;
 
 pub use session_event_layer::*;
 pub use session_trait_ext::*;
@@ -9,10 +10,10 @@ pub use session_ctl_ext::*;
 use std::any::Any;
 use std::fmt::Debug;
 use crate::Msg;
-use crate::define::Message;
 use crate::error::Error;
 use tokio_stream::Stream;
 use wd_tools::PFErr;
+pub use single_session_metadata::*;
 
 // ----------------------  通信会话 -----------------------------
 
@@ -59,6 +60,10 @@ pub trait Session: Sync {
 pub trait SessionMetadata:Debug{
     fn id(&self) -> &str;
     fn user_id(&self) -> &str;
+    /// 会话提示词
+    fn additional_tips(&self) -> Option<&str>{
+        None
+    }
 }
 
 pub trait ErasedSessionMetadata: SessionMetadata {

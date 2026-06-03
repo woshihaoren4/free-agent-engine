@@ -8,10 +8,10 @@ use anyhow::Context;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
-const USER_INFO_TEMPLATE: &'static str = r#"About user memory:
-- You can update your memory once you have a clear understanding of some user attributes or preferences.
+const USER_INFO_TEMPLATE: &'static str = r#"\n---\n## About user memory:
+- You must update your memory once you have a clear understanding of some user attributes or preferences.
 - Storage file path: `{$path}`.
-- Content:
+- Recorded content:
 `{$content}`
 "#;
 

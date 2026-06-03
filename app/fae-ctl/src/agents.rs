@@ -1,4 +1,4 @@
-use fae_agent::SingleAgentSessionConfig;
+use fae_agent::SingleSessionMD;
 use fae_engine::{AgentsEngine, SingleAgentCtlFromFile, Workspace};
 use crate::args::AgentArgs;
 use crate::init_project::InitProject;
@@ -43,7 +43,7 @@ impl Agents{
         }
     }
     pub async fn chat_history(&self, agent_id: &str,user_id:&str){
-        let history = self.ws.session_history::<SingleAgentSessionConfig>(agent_id, user_id, 100).await;
+        let history = self.ws.session_history::<SingleSessionMD>(agent_id, user_id, 100).await;
         let list = match history {
             Ok(history) => history,
             Err(e) => {

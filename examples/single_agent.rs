@@ -1,4 +1,4 @@
-use fae_agent::{AgentConfigData, MemoryEntry, Record, SingleAgentSessionConfig};
+use fae_agent::{AgentConfigData, MemoryEntry, Record, SingleSessionMD};
 use fae_engine::AgentsEngine;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let mut session = ws
         .session_call_stream::<_, Record, Record>(
             "main",
-            SingleAgentSessionConfig::default(),
+            SingleSessionMD::default(),
         )
         .await?;
 

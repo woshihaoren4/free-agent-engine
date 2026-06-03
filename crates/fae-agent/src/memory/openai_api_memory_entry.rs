@@ -365,8 +365,8 @@ impl MemoryEntry for Record {
         match &self.item {
             RecordItem::UserInput(_) => true,
             RecordItem::ModelOutput(_) => true,
-            RecordItem::ToolCall(t) => t.tool_name.starts_with("todo"),
-            RecordItem::ToolOutput(_) => true,
+            RecordItem::ToolCall(_) => false,
+            RecordItem::ToolOutput(_) => false,
             _ => false,
         }
     }
