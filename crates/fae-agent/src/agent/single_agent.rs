@@ -337,8 +337,8 @@ where
         //加载memory
         self.load_memory().await?;
         //发起任务
-        println!("----->\n{}",self.agent_info);
-        return anyhow::anyhow!("<----").err();
+        // println!("----->\n{}",self.agent_info);
+        // return anyhow::anyhow!("<----").err();
         self.make_model_task().await
     }
 

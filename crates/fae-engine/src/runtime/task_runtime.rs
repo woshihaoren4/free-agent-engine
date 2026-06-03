@@ -1,4 +1,4 @@
-use crate::ToolExecutor;
+use crate::{SkillsExecutor, ToolExecutor};
 use crate::executors::ModelOpenAIApiExecutor;
 use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
 use std::any::{Any, TypeId};
@@ -97,6 +97,7 @@ impl Default for TaskRuntime {
     fn default() -> Self {
         Self::new().register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
             .register_executor_ext(TaskType::Tool, ToolExecutor::default())
+            .register_executor(TaskType::Skill,SkillsExecutor::default())
             .into_self()
     }
 }

@@ -4,6 +4,11 @@ use fae_agent::{Select, Task, TaskExecutor, TaskResult, Thing, ThingSelect};
 pub struct SkillsExecutor {
 }
 
+impl Default for SkillsExecutor {
+    fn default() -> Self {
+        Self {}
+    }
+}
 
 #[async_trait::async_trait]
 impl TaskExecutor for SkillsExecutor {
@@ -67,7 +72,6 @@ impl TaskExecutor for SkillsExecutor {
 
         let mut thing = Thing::new(_channel);
         thing.add_item(fae_agent::ThingItem::Skill(header));
-        thing.add_item(fae_agent::ThingItem::Info(body.trim_start().to_string()));
 
         Ok(vec![thing])
     }

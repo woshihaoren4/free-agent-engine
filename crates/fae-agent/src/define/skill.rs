@@ -1,15 +1,17 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug,Default,Serialize,Deserialize)]
 pub struct SkillHeader{
     pub name: String,
     pub description: String,
     pub version: Option<String>,
-    pub metadata: Option<String>,
+    pub metadata: Option<HashMap<String,Value>>,
     pub author: Option<String>,
     pub trigger: Option<String>,
-    pub tags: Vec<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 impl SkillHeader {

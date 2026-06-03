@@ -8,13 +8,6 @@ use anyhow::Context;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
-const USER_INFO_TEMPLATE: &'static str = r#"\n---\n## About user memory:
-- You must update your memory once you have a clear understanding of some user attributes or preferences.
-- Storage file path: `{$path}`.
-- Recorded content:
-`{$content}`
-"#;
-
 /// 基于文件系统的记忆存储实现
 pub struct FileChatMemory<T> {
     agent_dir: PathBuf,
@@ -145,9 +138,11 @@ where
         } else {
             "".to_string()
         };
-        Ok(USER_INFO_TEMPLATE
-            .replace("{$path}", &user_file.display().to_string())
-            .replace("{$content}", &mem))
+        let mut info = "\n---\n## About user memory:".to_string();
+        info.push_str("  - You must update your memory once you have a clear understanding of some user attributes or preferences.");
+        info.push_str(&format!("\nStorage file path: `{}`.", user_file.display()));
+        info.push_str(&format!("\nRecorded content: \n{}", mem));
+        Ok(info)
     }
 
     /// 设置用户记忆,append:是否追加
