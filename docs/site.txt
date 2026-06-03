@@ -1,0 +1,12 @@
+prompt/aicoding.txt
+prompt/claw.txt
+skills/multi-search-engine/CHANGELOG.md
+skills/multi-search-engine/CHANNELLOG.md
+skills/multi-search-engine/SKILL.md
+skills/multi-search-engine/_meta.json
+skills/multi-search-engine/config.json
+skills/multi-search-engine/metadata.json
+skills/multi-search-engine/skill-card.md
+skills/multi-search-engine/references/advanced-search.md
+skills/multi-search-engine/references/international-search.md
+skills/weather/SKILL.md
