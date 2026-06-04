@@ -61,7 +61,7 @@ pub trait SessionMetadata:Debug{
     fn id(&self) -> &str;
     fn user_id(&self) -> &str;
     /// 会话提示词
-    fn additional_tips(&self) -> Option<&str>{
+    fn additional_tips(&self) -> Option<String>{
         None
     }
 }

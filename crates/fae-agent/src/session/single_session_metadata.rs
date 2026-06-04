@@ -36,12 +36,13 @@ impl SingleSessionMD {
         self.additional_tips.as_str()
     }
     pub fn default_tips() -> String {
-        let mut info = "\n---\n## Project Metadata:\n - Note that all user commands operate based on this directory.".to_string();
+        let mut info = "\n---\n## The Project Metadata:".to_string();
         if let Ok(work_dir) = std::env::current_dir() {
-            info.push_str(format!("\n - Your working directory is as follows:{}", work_dir.display()).as_str());
+            info.push_str(format!("\n - The path to the project you are currently working on is: $PROJECT_DIR=`{}`", work_dir.display()).as_str());
         }else{
             info.push_str("\n - Your current working directory is not available.");
         }
+        info.push_str("\n - Note: All your commands, operations, file management, and memorization are performed within this directory: $PROJECT_DIR");
         info
     }
 }
@@ -52,7 +53,7 @@ impl Default for SingleSessionMD {
             id: "main_session_id_1".to_string(),
             user_id: "master".to_string(),
             name: String::new(),
-            additional_tips: Self::default_tips(),
+            additional_tips: "".to_string(),
         }
     }
 }
@@ -66,7 +67,11 @@ impl SessionMetadata for SingleSessionMD {
         self.user_id.as_str()
     }
 
-    fn additional_tips(&self) -> Option<&str> {
-        Some(self.additional_tips.as_str())
+    fn additional_tips(&self) -> Option<String> {
+        if self.additional_tips.is_empty() {
+            Some(Self::default_tips())
+        }else{
+            Some(self.additional_tips.to_string())
+        }
     }
 }

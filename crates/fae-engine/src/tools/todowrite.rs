@@ -107,7 +107,7 @@ impl Tool for TodoWrite {
         let completed_todos: Vec<String> = current_todos
             .iter()
             .filter(|t| t.status == "completed")
-            .map(|t| format!("- [✓]ID:{}-> {}", t.id, t.content))
+            .map(|t| format!("- [x]ID:{}-> {}", t.id, t.content))
             .collect();
 
         let uncompleted_todos: Vec<String> = current_todos
@@ -129,6 +129,7 @@ impl Tool for TodoWrite {
             "Update success.\n".to_string()
         };
         response.push_str(&completed_todos.join("\n"));
+        response.push_str("\n");
         response.push_str(&uncompleted_todos.join("\n"));
 
         if all_completed {
