@@ -6,8 +6,7 @@ def main():
     
     paths = []
     for root, dirs, files in os.walk(docs_dir):
-        # Skip the .git or other hidden directories if needed, but we'll list all here
-        for name in dirs + files:
+        for name in files:
             full_path = os.path.join(root, name)
             rel_path = os.path.relpath(full_path, docs_dir)
             # Skip the script itself and the site.txt file if we don't want them included
