@@ -2,7 +2,10 @@ use fae_agent::error::{
     TASK_ERROR_CODE_PLAN_ABORT, TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL,
     TASK_ERROR_CODE_PLAN_ABORT_USER,
 };
-use fae_agent::{EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect};
+use fae_agent::{
+    EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select, Task,
+    TaskResult, TaskType, Thing, ThingItem, ThingSelect,
+};
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;

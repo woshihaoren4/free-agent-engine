@@ -87,7 +87,7 @@ impl Tool for TodoWrite {
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let parsed_args: TodoWriteArgs = serde_json::from_str(&args)?;
-        
+
         let mut current_todos = self.todos.write().await;
 
         if parsed_args.merge {
@@ -107,42 +107,35 @@ impl Tool for TodoWrite {
         let completed_todos: Vec<String> = current_todos
             .iter()
             .filter(|t| t.status == "completed")
-            .map(|t| format!("- [{}] {}", t.id, t.content))
+            .map(|t| format!("- [✓]ID:{}-> {}", t.id, t.content))
             .collect();
 
         let uncompleted_todos: Vec<String> = current_todos
             .iter()
             .filter(|t| t.status != "completed")
-            .map(|t| format!("- [{}] {}", t.id, t.content))
+            .map(|t| format!("- [ ]ID:{}-> {}", t.id, t.content))
             .collect();
 
         // Check if all tasks are completed
-        let all_completed = !current_todos.is_empty() && current_todos.iter().all(|t| t.status == "completed");
+        let all_completed =
+            !current_todos.is_empty() && current_todos.iter().all(|t| t.status == "completed");
         if all_completed {
             current_todos.clear();
         }
 
-        let mut response = "Successfully updated the todo list.\n".to_string();
-
-        if !completed_todos.is_empty() {
-            response.push_str("\nCompleted:\n");
-            response.push_str(&completed_todos.join("\n"));
-            response.push('\n');
-        }
-
-        if !uncompleted_todos.is_empty() {
-            response.push_str("\nPending:\n");
-            response.push_str(&uncompleted_todos.join("\n"));
-            response.push('\n');
-        }
+        let mut response = if all_completed {
+            "All tasks completed.\n".to_string()
+        } else {
+            "Update success.\n".to_string()
+        };
+        response.push_str(&completed_todos.join("\n"));
+        response.push_str(&uncompleted_todos.join("\n"));
 
         if all_completed {
-            response.push_str("\nAll tasks completed. Todo list has been cleared from memory.\n");
+            if let Some(summary) = parsed_args.summary {
+                response.push_str(&format!("\nSummary: {}\n", summary));
+            }
         }
-        if let Some(summary) = parsed_args.summary {
-            response.push_str(&format!("\nSummary: {}\n", summary));
-        }
-
         Ok(response.trim_end().to_string())
     }
 }
@@ -171,7 +164,7 @@ mod tests {
                 }
             ]
         }"#;
-        
+
         let iden = IdenInfo {
             task_id: "test".to_string(),
             agent_id: "test".to_string(),

@@ -1,26 +1,32 @@
-use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskResult, Thing, ThingItem, ThingSelect};
+use fae_agent::{
+    Env, EnvEvent, Environment, Select, Task, TaskResult, Thing, ThingItem, ThingSelect,
+};
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 
-pub struct WorkspaceRuntime{
-    pub name:String,
+pub struct WorkspaceRuntime {
+    pub name: String,
     parent: Option<Env>,
 }
 
 impl WorkspaceRuntime {
-    pub fn new(name:String) -> Self {
-        Self{name,parent: None}
+    pub fn new(name: String) -> Self {
+        Self { name, parent: None }
     }
-    pub fn get_env_var(&self, name:&str)-> Option<Thing>  {
+    pub fn get_env_var(&self, name: &str) -> Option<Thing> {
         match name {
-            FAE_WORKSPACE => {
-                Some(Thing::new(self.id().to_string())
-                    .add_item(ThingItem::EnvVar(self.name.clone())).into_self())
-            }
+            FAE_WORKSPACE => Some(
+                Thing::new(self.id().to_string())
+                    .add_item(ThingItem::EnvVar(self.name.clone()))
+                    .into_self(),
+            ),
             other => {
-                if let Ok(o) = std::env::var(other){
-                    Some(Thing::new(self.id().to_string())
-                        .add_item(ThingItem::EnvVar(o)).into_self())
+                if let Ok(o) = std::env::var(other) {
+                    Some(
+                        Thing::new(self.id().to_string())
+                            .add_item(ThingItem::EnvVar(o))
+                            .into_self(),
+                    )
                 } else {
                     None
                 }
@@ -30,7 +36,7 @@ impl WorkspaceRuntime {
 }
 
 #[async_trait::async_trait]
-impl Environment for WorkspaceRuntime{
+impl Environment for WorkspaceRuntime {
     fn id(&self) -> &'static str {
         DEFAULT_WORKSPACE_RUNTIME_ID
     }
@@ -43,15 +49,17 @@ impl Environment for WorkspaceRuntime{
         if let Some(parent) = &self.parent {
             parent.watch().await
         } else {
-            Err(anyhow::anyhow!("[WorkspaceRuntime] parent env not registered"))
+            Err(anyhow::anyhow!(
+                "[WorkspaceRuntime] parent env not registered"
+            ))
         }
     }
 
-    async fn query(&self,mut select: Select) -> anyhow::Result<Vec<Thing>> {
+    async fn query(&self, mut select: Select) -> anyhow::Result<Vec<Thing>> {
         select.workspace = Some(self.name.clone());
-        if let ThingSelect::Env(ref key ) = select.select{
+        if let ThingSelect::Env(ref key) = select.select {
             if let Some(env) = self.get_env_var(key) {
-                return Ok(vec![env])
+                return Ok(vec![env]);
             }
         }
         if let Some(ref env) = self.parent {
@@ -68,7 +76,9 @@ impl Environment for WorkspaceRuntime{
         if let Some(parent) = &self.parent {
             parent.spawn(tasks).await
         } else {
-            Err(anyhow::anyhow!("[WorkspaceRuntime] parent env not registered"))
+            Err(anyhow::anyhow!(
+                "[WorkspaceRuntime] parent env not registered"
+            ))
         }
     }
 
@@ -77,8 +87,9 @@ impl Environment for WorkspaceRuntime{
         if let Some(parent) = &self.parent {
             parent.execute(task).await
         } else {
-            Err(anyhow::anyhow!("[WorkspaceRuntime] parent env not registered"))
+            Err(anyhow::anyhow!(
+                "[WorkspaceRuntime] parent env not registered"
+            ))
         }
     }
 }
-

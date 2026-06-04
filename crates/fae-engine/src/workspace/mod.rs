@@ -1,17 +1,17 @@
+mod file_single_agent_ctl;
 mod workspace;
 mod workspace_builder;
-mod file_single_agent_ctl;
-mod workspace_session;
-mod workspace_runtime;
 mod workspace_fn;
+mod workspace_runtime;
+mod workspace_session;
 
 use fae_agent::{AgentConfig, AgentRef, Error};
+pub use file_single_agent_ctl::*;
 use std::any::Any;
 use std::sync::Arc;
 use wd_tools::PFErr;
 pub use workspace::*;
 pub use workspace_builder::*;
-pub use file_single_agent_ctl::*;
 pub use workspace_runtime::*;
 
 pub struct RecallAgentRef {
@@ -21,7 +21,7 @@ pub struct RecallAgentRef {
 
 #[async_trait::async_trait]
 pub trait AgentCtl: Sync {
-    fn id(&self) -> &str{
+    fn id(&self) -> &str {
         "default"
     }
     async fn load(&self, agent_id: &str) -> anyhow::Result<AgentRef>;
@@ -146,7 +146,7 @@ where
     ) -> anyhow::Result<AgentRef> {
         if agent_ctl_id != self.n.id() {
             self.o.create(agent_ctl_id, agent_id, cfg).await
-        }else{
+        } else {
             self.n.create(agent_ctl_id, agent_id, cfg).await
         }
     }

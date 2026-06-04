@@ -1,7 +1,6 @@
 use crate::Workspace;
 use fae_agent::{
-    Message, Session, SessionCall, SessionCallStream, SessionMD, SessionStream,
-    SessionStreamCall,
+    Message, Session, SessionCall, SessionCallStream, SessionMD, SessionStream, SessionStreamCall,
 };
 
 impl Workspace {

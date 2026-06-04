@@ -163,11 +163,9 @@ mod tests {
             "--->{:?}",
             answer.choices.remove(0).message.content.unwrap()
         );
-
-
     }
     #[tokio::test]
-    async fn test_openai_stream(){
+    async fn test_openai_stream() {
         let model = std::env::var("OPENAI_DEFAULT_MODEL").unwrap();
         let cfg = OpenAIConfig::new().with_api_base(std::env::var("OPENAI_API_URL").unwrap());
 

@@ -29,7 +29,9 @@ impl AgentsEngine {
         E: FnOnce(&mut WorkspaceBuilder),
     {
         let name = name.into();
-        let mut workspace_builder = WorkspaceBuilder::new(name.clone(), self.runtime.as_env()).default_init().await;
+        let mut workspace_builder = WorkspaceBuilder::new(name.clone(), self.runtime.as_env())
+            .default_init()
+            .await;
         setting(&mut workspace_builder);
         let workspace = workspace_builder.build();
         self.set_workspaces(name.clone(), workspace.clone());

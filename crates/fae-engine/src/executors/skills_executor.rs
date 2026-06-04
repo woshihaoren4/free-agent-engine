@@ -1,8 +1,7 @@
-use wd_tools::PFErr;
 use fae_agent::{Select, Task, TaskExecutor, TaskResult, Thing, ThingSelect};
+use wd_tools::PFErr;
 
-pub struct SkillsExecutor {
-}
+pub struct SkillsExecutor {}
 
 impl Default for SkillsExecutor {
     fn default() -> Self {
@@ -32,16 +31,27 @@ impl TaskExecutor for SkillsExecutor {
         };
         let dir = if let Some(dir) = dir {
             dir.into()
-        }else{
-             fae_agent::fae_home().join("skills").join(name.as_str()).join("SKILL.md")
+        } else {
+            fae_agent::fae_home()
+                .join("skills")
+                .join(name.as_str())
+                .join("SKILL.md")
         };
         // check dir exists
         if !dir.exists() {
-            return Err(anyhow::anyhow!("[Skill:{}] not found: {}", name, dir.display()));
+            return Err(anyhow::anyhow!(
+                "[Skill:{}] not found: {}",
+                name,
+                dir.display()
+            ));
         }
         // check dir is a file
         if !dir.is_file() {
-            return Err(anyhow::anyhow!("[Skill:{}] is not a file: {}", name, dir.display()));
+            return Err(anyhow::anyhow!(
+                "[Skill:{}] is not a file: {}",
+                name,
+                dir.display()
+            ));
         }
         let content = tokio::fs::read_to_string(&dir).await?;
 

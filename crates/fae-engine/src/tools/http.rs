@@ -42,7 +42,9 @@ impl Tool for SendHttpRequest {
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let method = args_val["method"].as_str().unwrap_or("GET");
-        let url = args_val["url"].as_str().ok_or_else(|| anyhow::anyhow!("url is required"))?;
+        let url = args_val["url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("url is required"))?;
         let headers = args_val["headers"].as_object();
         let body = args_val["body"].as_str();
 

@@ -67,10 +67,10 @@ impl Default for AgentConfigData {
                 ToolConfig::new("send_http_request"),
                 ToolConfig::new("execute_python"),
                 ToolConfig::new("todo_write"),
+                ToolConfig::new("ark_web_search"),
             ],
             skills: vec![
                 SkillConfig::new("weather"),
-                SkillConfig::new("multi-search-engine"),
             ],
             mcp_servers: Vec::new(),
             sub_agents: Vec::new(),

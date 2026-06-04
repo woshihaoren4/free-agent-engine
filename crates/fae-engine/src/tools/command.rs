@@ -1,9 +1,9 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use tokio::process::Command;
-use std::sync::Mutex;
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use tokio::process::Command;
 
 pub struct ExecuteCommand {
     // 待确认的命令：key为确认码，value为截至时间戳utc时间second
@@ -38,7 +38,7 @@ impl ExecuteCommand {
         self.blacklist = blacklist;
         self
     }
-    
+
     pub fn get_blacklist(&self) -> &Vec<String> {
         &self.blacklist
     }
@@ -49,9 +49,13 @@ impl ExecuteCommand {
     }
 
     fn generate_confirm_code(&self) -> String {
-        let iden_key = format!("{}",wd_tools::uuid::v4());
+        let iden_key = format!("{}", wd_tools::uuid::v4());
         // 3分钟过期时间
-        let expire_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60 * 3;
+        let expire_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60 * 3;
         let mut pending = self.pending_confirmations.lock().unwrap();
         pending.insert(iden_key.clone(), expire_time);
         iden_key
@@ -60,7 +64,12 @@ impl ExecuteCommand {
     fn verify_and_remove_confirm_code(&self, code: &str) -> Result<bool, String> {
         let mut pending = self.pending_confirmations.lock().unwrap();
         if let Some(expire_time) = pending.remove(code) {
-            if expire_time > std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() {
+            if expire_time
+                > std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            {
                 Ok(true)
             } else {
                 Err("Invalid confirm_code. Command execution denied.".to_string())
@@ -104,7 +113,9 @@ impl Tool for ExecuteCommand {
 
     async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
-        let cmd_str = args_val["command"].as_str().ok_or_else(|| anyhow::anyhow!("command is required"))?;
+        let cmd_str = args_val["command"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("command is required"))?;
         let cwd = args_val["cwd"].as_str();
         let confirm_code = args_val["confirm_code"].as_str();
 
@@ -116,10 +127,10 @@ impl Tool for ExecuteCommand {
 
         if is_dangerous {
             let mut require_confirm = false;
-            
+
             if let Some(code) = confirm_code {
                 match self.verify_and_remove_confirm_code(code) {
-                    Ok(true) => {} // Valid, proceed
+                    Ok(true) => {}                       // Valid, proceed
                     Ok(false) => require_confirm = true, // Code not found, require new confirmation
                     Err(e) => return Err(anyhow::anyhow!(e)),
                 }
@@ -129,7 +140,10 @@ impl Tool for ExecuteCommand {
 
             if require_confirm {
                 let generated_code = self.generate_confirm_code();
-                return Ok(format!("Warning: You are trying to execute a dangerous command. Immediately terminate the session and ask the user for manual confirmation. After the user confirms a second time, set `confirm_code` is `{}`", generated_code));
+                return Ok(format!(
+                    "Warning: You are trying to execute a dangerous command. Immediately terminate the session and ask the user for manual confirmation. After the user confirms a second time, set `confirm_code` is `{}`",
+                    generated_code
+                ));
             }
         }
 
@@ -150,11 +164,16 @@ impl Tool for ExecuteCommand {
         let output = cmd.output().await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        
+
         if output.status.success() {
             Ok(stdout.to_string())
         } else {
-            Err(anyhow::anyhow!("Command failed with exit code: {:?}\nStdout: {}\nStderr: {}", output.status.code(), stdout, stderr))
+            Err(anyhow::anyhow!(
+                "Command failed with exit code: {:?}\nStdout: {}\nStderr: {}",
+                output.status.code(),
+                stdout,
+                stderr
+            ))
         }
     }
 }

@@ -16,7 +16,7 @@ pub struct SkillHeader{
 
 impl SkillHeader {
     pub fn format(&self) -> String {
-        serde_json::to_string(&self).unwrap_or(format!("{:?}",self))
+        format!("{}:{}. $SKILL_PATH=$SKILL_DIR/{}/SKILL.md", self.name, self.description, self.name)
     }
 }
 

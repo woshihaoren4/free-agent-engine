@@ -1,9 +1,9 @@
-use std::any::Any;
+use crate::workspace::workspace_runtime::WorkspaceRuntime;
 use crate::workspace::{Workspace, WorkspaceStatus};
 use crate::{AgentCtl, AgentLoaderLayer, RecallAgentRef, SingleAgentCtlFromFile};
 use fae_agent::{AgentConfig, AgentRef, Env, Environment, Error};
+use std::any::Any;
 use std::sync::Arc;
-use crate::workspace::workspace_runtime::WorkspaceRuntime;
 
 pub struct WorkspaceBuilder {
     pub(crate) name: String,
@@ -23,7 +23,7 @@ impl WorkspaceBuilder {
             env,
         }
     }
-    pub async fn default_init(mut self) ->Self{
+    pub async fn default_init(mut self) -> Self {
         let single_agent_loader = SingleAgentCtlFromFile::new(self.name.as_str());
         self.set_loader(single_agent_loader);
 

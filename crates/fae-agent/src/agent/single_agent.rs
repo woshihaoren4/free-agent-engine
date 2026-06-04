@@ -192,18 +192,22 @@ where
         Ok(())
     }
     pub async fn load_skills(&mut self)-> anyhow::Result<()>{
-        let mut info = format!("\n---\n## Skills\n  > skill at dir $SKILL_DIR: ${}/skills/{{$skill_name}}",FAE_HOME);
-        info.push_str("\n  > Use skill: read its `SKILL.md` file and execute it according to the SOP in the file. file=$SKILL_DIR/{{$skill_name}}/SKILL.md");
-        info.push_str("\n skill list:");
+        let mut info = format!("\n---\n## Skills (mandatory)\nYou can find and install your skill in its directory. $SKILL_DIR=${}/skills",FAE_HOME);
+        info.push_str("\nBefore reply: scan all entries inside <available_skills>");
+        info.push_str("\n - If exactly one skill matches: use read_file(path=$SKILL_PATH) to read the full content of SKILL.md and strictly follow its instructions");
+        info.push_str("\n - If multiple skills match: select only the most relevant one, then use read to load it");
+        info.push_str("\n - If no skills match: do not read any skill files");
+        info.push_str("\n<available_skills>");
         let skills = self.agent_config.skills();
         for skill in skills {
             let things = self.env.query(ThingSelect::Skill(skill.channel.clone(), skill.name.clone(),None).into()).await?;
             for mut i in things{
                 while let Some(ThingItem::Skill(header)) = i.items.pop(){
-                    info.push_str(format!("\n  - {}", header.format()).as_str());
+                    info.push_str(format!("\n - {}", header.format()).as_str());
                 }
             }
         }
+        info.push_str("\n</available_skills>");
         self.agent_info.push_str(&info);
         Ok(())
     }

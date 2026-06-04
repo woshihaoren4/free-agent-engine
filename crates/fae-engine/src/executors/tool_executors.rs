@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use fae_agent::{Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value;
 // pub trait Identity:Sync{
 //     fn get(&self) -> String;
 //     fn user_id(&self) -> String;
@@ -102,18 +102,21 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
             .await;
         match result {
             Ok(resp) => Ok(resp),
-            Err(e) => {
-                Ok(format!("Tool[{}] call failed. error: {}", tool.name(), e))
-            }
+            Err(e) => Ok(format!("Tool[{}] call failed. error: {}", tool.name(), e)),
         }
     }
     async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
-        if let ThingSelect::Tool(_,name) = select.select {
+        if let ThingSelect::Tool(_, name) = select.select {
             let tool = self.load_tool(name.as_str()).await?;
-            let thing = Thing::new(self.channel()).add_item(ThingItem::Tool(tool.description().to_string(),tool.arguments())).into_self();
+            let thing = Thing::new(self.channel())
+                .add_item(ThingItem::Tool(
+                    tool.description().to_string(),
+                    tool.arguments(),
+                ))
+                .into_self();
             return Ok(vec![thing]);
         }
-        return Err(Error::NoSupport.into())
+        return Err(Error::NoSupport.into());
     }
 }
 
@@ -150,7 +153,7 @@ impl ToolExecutor {
 impl Default for ToolExecutor {
     fn default() -> Self {
         let mut tools = HashMap::new();
-        
+
         let tool_list: Vec<Arc<dyn Tool + Send + 'static>> = vec![
             Arc::new(crate::tools::ExecuteCommand::default()),
             Arc::new(crate::tools::SendHttpRequest),
@@ -159,6 +162,7 @@ impl Default for ToolExecutor {
             Arc::new(crate::tools::ListDirectory),
             Arc::new(crate::tools::ExecutePython),
             Arc::new(crate::tools::TodoWrite::default()),
+            Arc::new(crate::tools::ArkWebSearch::default()),
         ];
 
         for tool in tool_list {
