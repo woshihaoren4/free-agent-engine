@@ -37,14 +37,6 @@ pub struct ToolConfig {
     pub name: String,
     pub channel: String,
 }
-impl Default for ToolConfig {
-    fn default() -> Self {
-        Self {
-            name: "".into(),
-            channel: "default".to_string(),
-        }
-    }
-}
 impl ToolConfig {
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
@@ -58,6 +50,25 @@ impl ToolConfig {
             channel,
         }
     }
+    pub fn set_name(self, name: String) -> Self {
+        Self {
+            name,
+            channel: self.channel,
+        }
+    }
+}
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            channel: "default".to_string(),
+        }
+    }
+}
+impl From<String> for ToolConfig {
+    fn from(name: String) -> Self {
+        Self::default().set_name(name)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -65,14 +76,6 @@ impl ToolConfig {
 pub struct SkillConfig {
     pub name: String,
     pub channel: String,
-}
-impl Default for SkillConfig {
-    fn default() -> Self {
-        Self {
-            name: "".into(),
-            channel: "default".to_string(),
-        }
-    }
 }
 impl SkillConfig {
     pub fn new<S: Into<String>>(name: S) -> Self {
@@ -87,7 +90,27 @@ impl SkillConfig {
             channel,
         }
     }
+    pub fn set_name(self, name: String) -> Self {
+        Self {
+            name,
+            channel: self.channel,
+        }
+    }
 }
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            channel: "default".to_string(),
+        }
+    }
+}
+impl From<String> for SkillConfig {
+    fn from(name: String) -> Self {
+        Self::default().set_name(name)
+    }
+}
+
 
 #[async_trait::async_trait]
 pub trait AgentConfig:Sync {

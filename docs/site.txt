@@ -1,4 +1,3 @@
-prompt
 prompt/aicoding.txt
 prompt/claw.txt
 skills/weather/SKILL.md

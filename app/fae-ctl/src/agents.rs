@@ -23,8 +23,8 @@ impl Agents{
     pub async fn exit(&self){
         self.engine.exit().await;
     }
-    pub async fn chat(&self, agent_name: &str, initial_chat: Option<String>) {
-        let mut ui = crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string(), initial_chat);
+    pub async fn chat(&self, agent_name: &str) {
+        let mut ui = crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string());
         if let Err(e) = ui.run().await {
             eprintln!("UI error: {:?}", e);
         }
@@ -62,8 +62,8 @@ impl Agents{
         let user_id = args.user.unwrap_or("master".to_string());
         if args.history {
             this.chat_history(&agent,&user_id).await;
-        } else if let Some(chat) = args.chat {
-            this.chat(&agent, Some(chat)).await;
+        } else if args.chat {
+            this.chat(&agent).await;
         } else {
             this.agents_list().await;
         }

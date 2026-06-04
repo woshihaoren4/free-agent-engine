@@ -15,12 +15,11 @@ use fae_engine::Workspace;
 pub struct ChatUi {
     ws: Workspace,
     agent_name: String,
-    initial_chat: Option<String>,
 }
 
 impl ChatUi {
-    pub fn new(ws: Workspace, agent_name: String, initial_chat: Option<String>) -> Self {
-        Self { ws, agent_name, initial_chat }
+    pub fn new(ws: Workspace, agent_name: String) -> Self {
+        Self { ws, agent_name }
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -66,10 +65,6 @@ impl ChatUi {
                 return Ok(());
             }
         };
-
-        if let Some(chat) = self.initial_chat.take() {
-            input = input.with_value(chat);
-        }
 
         let mut stream_active = false;
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> = None;

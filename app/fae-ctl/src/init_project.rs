@@ -56,6 +56,30 @@ impl InitProject{
                                                     wd_log::log_error_ln!("failed to write file {}: {}", file_path.display(), e);
                                                 } else {
                                                     wd_log::log_info_ln!("downloaded and saved {}", file_path.display());
+                                                    if file_path.extension().and_then(|s| s.to_str()) == Some("zip") {
+                                                        wd_log::log_info_ln!("extracting zip file {}...", file_path.display());
+                                                        match fs::File::open(&file_path) {
+                                                            Ok(file) => {
+                                                                match zip::ZipArchive::new(file) {
+                                                                    Ok(mut archive) => {
+                                                                        let target_dir = file_path.parent().unwrap();
+                                                                        if let Err(e) = archive.extract(target_dir) {
+                                                                            wd_log::log_error_ln!("failed to extract zip file {}: {}", file_path.display(), e);
+                                                                        } else {
+                                                                            wd_log::log_info_ln!("extracted zip file {}", file_path.display());
+                                                                            if let Err(e) = fs::remove_file(&file_path) {
+                                                                                wd_log::log_error_ln!("failed to remove zip file {}: {}", file_path.display(), e);
+                                                                            } else {
+                                                                                wd_log::log_info_ln!("removed zip file {}", file_path.display());
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Err(e) => wd_log::log_error_ln!("failed to read zip archive {}: {}", file_path.display(), e),
+                                                                }
+                                                            }
+                                                            Err(e) => wd_log::log_error_ln!("failed to open zip file {}: {}", file_path.display(), e),
+                                                        }
+                                                    }
                                                 }
                                             }
                                         } else {

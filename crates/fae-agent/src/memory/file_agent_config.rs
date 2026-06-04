@@ -71,6 +71,7 @@ impl Default for AgentConfigData {
             ],
             skills: vec![
                 SkillConfig::new("weather"),
+                SkillConfig::new("drawio-skill"),
             ],
             mcp_servers: Vec::new(),
             sub_agents: Vec::new(),
@@ -123,6 +124,14 @@ impl AgentConfigData {
     }
     pub fn set_description(mut self, description: &str)->Self {
         self.description = description.to_string();
+        self
+    }
+    pub fn add_tools(mut self, tools: impl Into<ToolConfig>) ->Self {
+        self.tools.push(tools.into());
+        self
+    }
+    pub fn add_skills(mut self, skills: impl Into<SkillConfig>)->Self {
+        self.skills.push(skills.into());
         self
     }
 }

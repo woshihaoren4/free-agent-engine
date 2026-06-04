@@ -6,8 +6,8 @@ pub struct AgentArgs {
     pub id: Option<String>,
     #[arg(short, long, help = "user id, default master")]
     pub user: Option<String>,
-    #[arg(short, long, help = "start chat with agent")]
-    pub chat: Option<String>,
+    #[arg(short, long, default_value_t=false, help = "start chat with agent")]
+    pub chat: bool,
     #[arg(alias = "hs",long, help = "show chat history")]
     pub history: bool,
 }
