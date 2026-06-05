@@ -13,7 +13,7 @@ impl Tool for ArkWebSearch {
     fn description(&self) -> &str {
         "A web and image search tool powered by Volcano Engine Ark. Allows searching for web pages or images."
     }
-    
+
     //因为需要服务，这里没加 web_summary
     fn arguments(&self) -> Value {
         serde_json::json!({
@@ -45,10 +45,10 @@ impl Tool for ArkWebSearch {
                         "image_height_min": { "type": "integer", "description": "最小高度" },
                         "image_width_max": { "type": "integer", "description": "最大宽度" },
                         "image_height_max": { "type": "integer", "description": "最大高度" },
-                        "image_shapes": { 
-                            "type": "array", 
+                        "image_shapes": {
+                            "type": "array",
                             "items": { "type": "string" },
-                            "description": "允许的形状，枚举值：横长方形、竖长方形、方形" 
+                            "description": "允许的形状，枚举值：横长方形、竖长方形、方形"
                         }
                     }
                 },

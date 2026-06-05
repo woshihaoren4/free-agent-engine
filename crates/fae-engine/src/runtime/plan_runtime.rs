@@ -3,8 +3,9 @@ use fae_agent::error::{
     TASK_ERROR_CODE_PLAN_ABORT_USER,
 };
 use fae_agent::{
-    EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select, Task,
-    TaskResult, TaskType, Thing, ThingItem, ThingSelect,
+    EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select,
+    TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PLAN_ID, Task, TaskResult, TaskType, Thing,
+    ThingItem, ThingSelect,
 };
 use std::collections::HashMap;
 use std::ops::DerefMut;
@@ -83,7 +84,7 @@ impl PlanRuntime {
     ) -> Option<Arc<Mutex<PlanCtl>>> {
         ptr.read().await.get(id).cloned()
     }
-    async fn run_plan(&self, plan: PlanCtl, init_result: PlanningResult) {
+    async fn run_plan(&self, mut plan: PlanCtl, init_result: PlanningResult) {
         let pid = Self::generate_plan_sub_id(&plan.task.id, &plan.task.agent_id);
         let env = self.parent.clone().unwrap();
         let channel = if init_result.is_end() {
@@ -91,6 +92,8 @@ impl PlanRuntime {
         } else {
             None
         };
+        plan.task
+            .set(TASK_EXTEND_KEY_AGENT_ID, plan.task.agent_id.clone());
         let p = Arc::new(Mutex::new(plan));
         self.push_plan(pid.clone(), p.clone()).await;
         tokio::spawn(async move {
@@ -404,7 +407,7 @@ impl Environment for PlanRuntime {
         };
         let pid = Self::generate_plan_sub_id(task.id.as_str(), task.agent_id.as_str());
 
-        let tasks = match plan.init().await? {
+        let mut tasks = match plan.init().await? {
             PlanningResult::End(opt) => {
                 // 任务完成，返回结果
                 return if let Some(result) = opt {

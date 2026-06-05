@@ -3,7 +3,7 @@ mod agent_event_handle;
 pub use agent_event_handle::*;
 
 use crate::define::Event;
-use crate::{Env, Task, TaskResult};
+use crate::{Context, Env, Task, TaskResult};
 
 /// 构建规划
 #[async_trait::async_trait]
@@ -45,6 +45,7 @@ pub trait Planning: Sync {
             self.debug().await
         );
     }
+    fn get_context(&self) -> Context;
 }
 
 // 聚合若干个实现Planning的结构同时实现planing
@@ -90,6 +91,11 @@ macro_rules! define_planning_group {
             async fn abort(&mut self) {
                 match self {
                     $( Self::$variant(inner) => inner.abort().await, )*
+                }
+            }
+            fn get_context(&self) -> $crate::Context {
+                match self {
+                    $( Self::$variant(inner) => inner.get_context(), )*
                 }
             }
         }
@@ -141,6 +147,11 @@ macro_rules! define_planning_group {
                     $( Self::$variant(inner) => inner.abort().await, )*
                 }
             }
+            fn get_context(&self) -> $crate::Context {
+                match self {
+                    $( Self::$variant(inner) => inner.get_context(), )*
+                }
+            }
         }
     };
 }
@@ -157,6 +168,9 @@ impl Planning for NonePlan {
     }
     async fn next(&mut self, _event: TaskResult) -> anyhow::Result<PlanningResult> {
         Ok(PlanningResult::End(None))
+    }
+    fn get_context(&self) -> Context {
+        Context::default()
     }
 }
 

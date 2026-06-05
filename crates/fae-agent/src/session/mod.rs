@@ -8,6 +8,7 @@ pub use session_event_layer::*;
 pub use session_trait_ext::*;
 pub use session_ctl_ext::*;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use crate::Msg;
 use crate::error::Error;
@@ -62,6 +63,10 @@ pub trait SessionMetadata:Debug{
     fn user_id(&self) -> &str;
     /// 会话提示词
     fn additional_tips(&self) -> Option<String>{
+        None
+    }
+    /// 会话扩展信息
+    fn extend(&self) -> Option<HashMap<String, String>> {
         None
     }
 }

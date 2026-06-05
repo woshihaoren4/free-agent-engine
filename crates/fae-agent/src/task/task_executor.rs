@@ -1,5 +1,6 @@
-use crate::{Select, Task, TaskResult, Thing, ThingSelect};
+use crate::{Context, Select, Task, TaskResult, Thing, ThingSelect};
 use std::any::Any;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use wd_tools::PFErr;
 
@@ -23,6 +24,7 @@ pub trait TaskExecutorExt<In, Out>: Sync {
     }
     async fn exec(
         &self,
+        ctx:Context,
         task_id: String,
         agent_id: String,
         user_id: String,
@@ -74,7 +76,7 @@ where
         };
         let output = self
             .executor
-            .exec(task.id.clone(), task.agent_id.clone(), task.user_id, input)
+            .exec(task.get_context(), task.id.clone(), task.agent_id.clone(), task.user_id, input)
             .await?;
         if (&output as &dyn Any).downcast_ref::<TaskResult>().is_some() {
             let task_result = (Box::new(output) as Box<dyn Any>)

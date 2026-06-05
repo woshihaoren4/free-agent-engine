@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use fae_agent::{Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest};
+use fae_agent::{
+    Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,20 +10,20 @@ use std::sync::Arc;
 //     fn user_id(&self) -> String;
 // }
 
+#[derive(Debug)]
 pub struct IdenInfo {
     pub task_id: String,
     pub agent_id: String,
     pub user_id: String,
-    pub extend: HashMap<String, String>,
-    // pub identity: Box<dyn Identity+Send+'static>,
+    pub ctx: Context, // pub identity: Box<dyn Identity+Send+'static>,
 }
 impl IdenInfo {
-    pub fn new(task_id: String, agent_id: String, user_id: String) -> Self {
+    pub fn new(task_id: String, agent_id: String, user_id: String, ctx: Context) -> Self {
         Self {
             task_id,
             agent_id,
             user_id,
-            extend: HashMap::new(),
+            ctx,
         }
     }
     pub fn get_task_id(&self) -> &str {
@@ -33,11 +35,12 @@ impl IdenInfo {
     pub fn get_user_id(&self) -> &str {
         &self.user_id
     }
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.extend.get(key)
+
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.ctx.get(key)
     }
     pub fn set(&mut self, key: String, value: String) {
-        self.extend.insert(key, value);
+        self.ctx.set(key, value);
     }
 }
 
@@ -91,6 +94,7 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
     }
     async fn exec(
         &self,
+        ctx: Context,
         task_id: String,
         agent_id: String,
         user_id: String,
@@ -98,7 +102,10 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
     ) -> anyhow::Result<String> {
         let tool = self.load_tool(req.get_tool_name()).await?;
         let result = tool
-            .call(IdenInfo::new(task_id, agent_id, user_id), req.arguments)
+            .call(
+                IdenInfo::new(task_id, agent_id, user_id, ctx),
+                req.arguments,
+            )
             .await;
         match result {
             Ok(resp) => Ok(resp),

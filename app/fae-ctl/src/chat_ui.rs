@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 use tui_input::{backend::crossterm::EventHandler, Input};
-use fae_agent::{Record, SingleSessionMD, MemoryEntry};
+use fae_agent::{Record, SingleSessionMD, MemoryEntry, TASK_EXTEND_KEY_WORKSPACE, TASK_EXTEND_KEY_PROJECT_DIR};
 use fae_engine::Workspace;
 
 pub struct ChatUi {
@@ -51,7 +51,7 @@ impl ChatUi {
             stdout.flush()
         };
 
-        let session_config = SingleSessionMD::default();
+        let session_config = SingleSessionMD::default().set(TASK_EXTEND_KEY_PROJECT_DIR,".");
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
         let mut session = match self.ws.session_call_stream::<_, Record, Record>(

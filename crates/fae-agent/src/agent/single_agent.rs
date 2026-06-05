@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::define::{SenderMessageStream};
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata, fae_home, FAE_HOME};
+use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata, fae_home, FAE_HOME, Context, TASK_EXTEND_KEY_WORKSPACE};
 use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,7 @@ pub struct SingleAgentPlanSessionCallStream<S,M> {
     doing: HashMap<String,ToolOut>,
     //工具描述,channel__tool_name, desc,args
     tools: HashMap<String,(String,Value)>,
+    context: Context,
 }
 
 impl<S,M> SingleAgentPlanSessionCallStream<S,M>
@@ -68,7 +69,14 @@ where
         output: SenderMessageStream<M>,
     ) -> Self {
         let id = wd_tools::uuid::v4();
+        let context = Context::default();
+        if let Some(map) = session_metadata.extend() {
+            for (k,v) in map.into_iter() {
+                context.set(k,v);
+            }
+        }
         Self {
+            context,
             agent_id,
             env,
             id,
@@ -177,7 +185,8 @@ where
             .set_type(TaskType::Model)
             .set_agent_id(self.id.clone())
             .set_args(req)
-            .set_exec_channel(exec_channel);
+            .set_exec_channel(exec_channel)
+            .set_context(self.context.clone());
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
@@ -294,7 +303,7 @@ where
                 let tool_out = ToolOut::new(tool.tool_call_id,tool.tool_name.clone());
                 let (channel,name) = Self::parse_tool_channel(tool.tool_name.as_str());
                 let tool_req = ToolRequest::new(name,tool.arguments);
-                let tool_task = Task::default().set_type(TaskType::Tool).set_agent_id(self.agent_id.clone()).set_channel(channel).set_args(tool_req);
+                let tool_task = Task::default().set_type(TaskType::Tool).set_agent_id(self.agent_id.clone()).set_context(self.context.clone()).set_channel(channel).set_args(tool_req);
                 // 记录
                 self.doing.insert(tool_task.get_id().to_string(),tool_out);
                 tool_tasks.push(tool_task);
@@ -361,6 +370,9 @@ where
             self.debug().await
         );
         self.output.close();
+    }
+    fn get_context(&self) -> Context {
+        self.context.clone()
     }
 }
 

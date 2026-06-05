@@ -1,6 +1,11 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
+use fae_agent::{
+    TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PROJECT, TASK_EXTEND_KEY_PROJECT_DIR,
+    TASK_EXTEND_KEY_WORKSPACE,
+};
 use serde_json::Value;
+use std::path::PathBuf;
 use tokio::fs;
 
 pub struct ReadFile;
@@ -39,21 +44,11 @@ impl Tool for ReadFile {
 }
 
 #[derive(Default)]
-pub struct WriteFile {
-    pub allowed_dir: Option<String>,
-}
+pub struct WriteFile;
 
 impl WriteFile {
-    pub fn new(allowed_dir: Option<String>) -> Self {
-        Self { allowed_dir }
-    }
-
-    fn get_allowed_dir(&self) -> std::path::PathBuf {
-        if let Some(dir) = &self.allowed_dir {
-            std::path::PathBuf::from(dir)
-        } else {
-            std::env::home_dir().unwrap_or(std::path::PathBuf::from("~"))
-        }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -64,7 +59,7 @@ impl Tool for WriteFile {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Can only write files in the allowed directory."
+        "Write content to a file. Can only write files in the allowed directories."
     }
 
     fn arguments(&self) -> Value {
@@ -84,7 +79,7 @@ impl Tool for WriteFile {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<String> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let path_str = args_val["path"]
             .as_str()
@@ -93,15 +88,35 @@ impl Tool for WriteFile {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("content is required"))?;
 
-        let allowed_dir = self.get_allowed_dir();
-        let allowed_dir_canonical =
-            std::fs::canonicalize(&allowed_dir).unwrap_or_else(|_| allowed_dir.clone());
+        let fae_home_dir = fae_agent::fae_home();
+
+        let mut allowed_dirs = vec![
+            fae_home_dir.join("skills"),
+            fae_home_dir.join("prompt"),
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ];
+
+        if let Some(ws) = iden.get(TASK_EXTEND_KEY_WORKSPACE) {
+            if let Some(aid) = iden.get(TASK_EXTEND_KEY_AGENT_ID) {
+                allowed_dirs.push(fae_home_dir.join(ws).join(aid));
+            }
+        }
+        if let Some(pdir) = iden.get(TASK_EXTEND_KEY_PROJECT_DIR) {
+            allowed_dirs.push(PathBuf::from(pdir));
+        }
+
+        let allowed_dirs_canonical: Vec<std::path::PathBuf> = allowed_dirs
+            .into_iter()
+            .map(|dir| std::fs::canonicalize(&dir).unwrap_or(dir))
+            .collect();
 
         let target_path = std::path::Path::new(path_str);
         let final_path = if target_path.is_absolute() {
             target_path.to_path_buf()
         } else {
-            allowed_dir.join(target_path)
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(target_path)
         };
 
         let parent = final_path
@@ -111,10 +126,18 @@ impl Tool for WriteFile {
             anyhow::anyhow!("Failed to canonicalize parent directory {:?}: {}. Does the parent directory exist?", parent, e)
         })?;
 
-        if !parent_canonical.starts_with(&allowed_dir_canonical) {
+        let mut is_allowed = false;
+        for allowed_dir_canonical in &allowed_dirs_canonical {
+            if parent_canonical.starts_with(allowed_dir_canonical) {
+                is_allowed = true;
+                break;
+            }
+        }
+
+        if !is_allowed {
             return Err(anyhow::anyhow!(
-                "Permission denied: cannot write outside of allowed directory {:?}",
-                allowed_dir
+                "Permission denied: cannot write outside of allowed directories {:?}",
+                allowed_dirs_canonical
             ));
         }
 

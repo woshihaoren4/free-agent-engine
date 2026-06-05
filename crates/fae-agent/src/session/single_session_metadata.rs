@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::SessionMetadata;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SingleSessionMD {
     pub id: String,
     pub user_id: String,
     pub name: String,
     pub additional_tips: String,
+    #[serde(skip)]
+    pub extend: HashMap<String, String>,
 }
 impl SingleSessionMD {
     pub fn set_id(mut self, id: impl Into<String>) -> Self {
@@ -45,6 +48,13 @@ impl SingleSessionMD {
         info.push_str("\n - Note: All your commands, operations, file management, and memorization are performed within this directory: $PROJECT_DIR");
         info
     }
+    pub fn set<K:Into<String>,V:Into<String>>(mut self, key:K,value:V) -> Self {
+        self.extend.insert(key.into(), value.into());
+        self
+    }
+    pub fn get<>(&self, key:&str) -> Option<&String> {
+        self.extend.get(key)
+    }
 }
 
 impl Default for SingleSessionMD {
@@ -54,6 +64,7 @@ impl Default for SingleSessionMD {
             user_id: "master".to_string(),
             name: String::new(),
             additional_tips: "".to_string(),
+            extend: HashMap::new(),
         }
     }
 }
@@ -73,5 +84,8 @@ impl SessionMetadata for SingleSessionMD {
         }else{
             Some(self.additional_tips.to_string())
         }
+    }
+    fn extend(&self) -> Option<HashMap<String, String>> {
+        Some(self.extend.clone())
     }
 }

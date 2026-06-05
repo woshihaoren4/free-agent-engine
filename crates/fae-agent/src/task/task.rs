@@ -1,7 +1,16 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::any::Any;
-use std::error::Error;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use crate::Context;
+
+pub const TASK_EXTEND_KEY_AGENT_ID: &str = "AGENT_ID";
+pub const TASK_EXTEND_KEY_PLAN_ID: &str = "PLAN_ID";
+pub const TASK_EXTEND_KEY_WORKSPACE: &str = "WORKSPACE";
+pub const TASK_EXTEND_KEY_PROJECT: &str = "PROJECT";
+pub const TASK_EXTEND_KEY_PROJECT_DIR: &str = "PROJECT_DIR";
+
+
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize)]
@@ -84,8 +93,7 @@ pub struct Task {
     pub r#type: TaskType,
     pub exec_channel: String,
     pub user_id: String,
-    pub workspace: Option<String>,
-    pub project: Option<String>,
+    pub ctx: Context,
     pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 impl Task {
@@ -99,8 +107,7 @@ impl Task {
             args: None,
             user_id: "".into(),
             exec_channel: "default".into(),
-            workspace: None,
-            project: None,
+            ctx: Context::default(),
         }
     }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
@@ -144,28 +151,19 @@ impl Task {
     pub fn get_channel(&self) -> &str {
         self.exec_channel.as_str()
     }
-    pub fn set_workspace<T: Into<String>>(&mut self, workspace: T) {
-        self.workspace = Some(workspace.into());
-    }
-    pub fn set_project<T: Into<String>>(mut self, project: T) -> Self {
-        self.project = Some(project.into());
+    pub fn set_context(mut self, context: Context) -> Self {
+        self.ctx = context;
         self
     }
-    pub fn get_workspace(&self) -> &str {
-        if let Some(workspace) = &self.workspace {
-            workspace.as_str()
-        } else {
-            ""
-        }
+    pub fn get_context(&self) -> Context {
+        self.ctx.clone()
     }
-    pub fn get_project(&self) -> &str {
-        if let Some(project) = &self.project {
-            project.as_str()
-        } else {
-            ""
-        }
+    pub fn set<K:Into<String>,V:Into<String>>(&mut self,key:K,value:V){
+        self.ctx.set(key.into(),value.into());
     }
-
+    pub fn get(&self,key:&str)->Option<String>{
+        self.ctx.get(key)
+    }
     pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
         self.args = Some(args);
         self
@@ -213,6 +211,8 @@ pub struct TaskResult {
     pub agent_id: String,
     // 任务结果数据
     pub data: Option<Box<dyn Any + Send + 'static>>,
+    // task的extend信息
+    pub extend: Option<HashMap<String, String>>,
 }
 
 impl TaskResult {
@@ -228,6 +228,7 @@ impl TaskResult {
             data: None,
             task_id: task_id.into(),
             agent_id: agent_id.into(),
+            extend: None,
         }
     }
     pub fn success<T: Into<String>, A: Into<String>>(task_id: T, agent_id: A) -> Self {
@@ -246,6 +247,10 @@ impl TaskResult {
     }
     pub fn is_success(&self) -> bool {
         self.code == 0
+    }
+    pub fn set_extend(mut self, extend: HashMap<String, String>) -> Self {
+        self.extend = Some(extend);
+        self
     }
     pub fn set_data<T: Any + Send + 'static>(mut self, data: T) -> Self {
         self.data = Some(Box::new(data));

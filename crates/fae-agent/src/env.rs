@@ -68,6 +68,8 @@ pub enum ThingSelect {
     Plan(String, String),
     /// tools 工具: 渠道，工具名称
     Tool(String, String),
+    /// MCP服务,渠道，mcp名称
+    Mcp(String, String),
     /// skill: 渠道，名字, 目录
     Skill(String, String, Option<String>),
     /// Custom

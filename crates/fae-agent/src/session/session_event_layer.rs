@@ -84,7 +84,7 @@ where
             .await?;
         let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
         self.env
-            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_args(plan))
+            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_context(plan.get_context()).set_args(plan))
             .await?;
         let msg = output.get().await?;
         Ok(Msg::new(msg))
@@ -112,7 +112,7 @@ where
             .on_session_call_stream(self.env.clone(), &mut self.meta, msg, output)
             .await?;
         let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
-        let task = Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_args(plan);
+        let task = Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_context(plan.get_context()).set_args(plan);
         self.env.spawn(vec![task]).await?;
         let stream: Box<dyn Stream<Item = Msg> + Send + Sync> =
             ChannelReceiverImplStream::new(receiver).to_box();
@@ -135,7 +135,7 @@ where
             .await?;
         let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
         self.env
-            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_args(plan))
+            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_context(plan.get_context()).set_args(plan))
             .await?;
         let msg = output.get().await?;
         Ok(Msg::new(msg))
@@ -158,7 +158,7 @@ where
             .await?;
         let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
         self.env
-            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_args(plan))
+            .execute(Task::new(plan.id(), self.event_handle.id(), TaskType::Plan).set_context(plan.get_context()).set_context(plan.get_context()).set_args(plan))
             .await?;
         let stream: Box<dyn Stream<Item = Msg> + Send + Sync> =
             ChannelReceiverImplStream::new(receiver).to_box();
