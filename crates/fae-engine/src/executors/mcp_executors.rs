@@ -1,6 +1,4 @@
-use fae_agent::{
-    Select, Task, TaskExecutor, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest,
-};
+use fae_agent::{McpServerConfig, McpToolRequest, McpTools, Select, Task, TaskExecutor, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest, McpToolResult, McpToolResponse};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,28 +14,6 @@ pub struct McpConfigFile {
     pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum McpServerConfig {
-    Local {
-        command: String,
-        args: Vec<String>,
-        #[serde(default)]
-        env: HashMap<String, String>,
-    },
-    Remote {
-        url: String,
-    },
-}
-
-#[derive(Deserialize)]
-struct McpToolInfo {
-    name: String,
-    description: Option<String>,
-    #[serde(rename = "inputSchema")]
-    input_schema: Value,
-}
-
 enum McpClient {
     Local {
         child: Child,
@@ -47,6 +23,7 @@ enum McpClient {
     },
     Remote {
         url: String,
+        headers: HashMap<String, String>,
         client: Client,
         id_counter: u64,
     },
@@ -55,7 +32,7 @@ enum McpClient {
 impl McpClient {
     async fn connect(config: McpServerConfig) -> anyhow::Result<Self> {
         match config {
-            McpServerConfig::Local { command, args, env } => {
+            McpServerConfig::Local { command, args, env, .. } => {
                 let mut cmd = Command::new(&command);
                 cmd.args(&args);
                 cmd.envs(&env);
@@ -74,8 +51,9 @@ impl McpClient {
                     id_counter: 1,
                 })
             }
-            McpServerConfig::Remote { url } => Ok(Self::Remote {
+            McpServerConfig::Remote { url, headers, .. } => Ok(Self::Remote {
                 url,
+                headers,
                 client: Client::new(),
                 id_counter: 1,
             }),
@@ -134,6 +112,7 @@ impl McpClient {
                 url,
                 client,
                 id_counter,
+                headers,
             } => {
                 let id = *id_counter;
                 *id_counter += 1;
@@ -145,7 +124,13 @@ impl McpClient {
                     "params": params,
                 });
 
-                let resp = client.post(url as &str).json(&req).send().await?;
+                let mut req_builder = client.post(url as &str).json(&req);
+                for (k, v) in headers.iter() {
+                    req_builder = req_builder.header(k, v);
+                }
+                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+
+                let resp = req_builder.send().await?;
                 let val: Value = resp.json().await?;
 
                 if let Some(err) = val.get("error") {
@@ -174,13 +159,18 @@ impl McpClient {
                 stdin.write_all(req_str.as_bytes()).await?;
                 stdin.flush().await?;
             }
-            Self::Remote { url, client, .. } => {
+            Self::Remote { url, client, headers, .. } => {
                 let req = json!({
                     "jsonrpc": "2.0",
                     "method": method,
                     "params": params,
                 });
-                client.post(url as &str).json(&req).send().await?;
+                let mut req_builder = client.post(url as &str).json(&req);
+                for (k, v) in headers.iter() {
+                    req_builder = req_builder.header(k, v);
+                }
+                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+                req_builder.send().await?;
             }
         }
         Ok(())
@@ -201,31 +191,141 @@ impl McpClient {
         Ok(())
     }
 
-    async fn list_tools(&mut self) -> anyhow::Result<Vec<McpToolInfo>> {
-        #[derive(Deserialize)]
-        struct ToolsResult {
-            tools: Vec<McpToolInfo>,
-        }
-        let res: ToolsResult = self.send_request("tools/list", json!({})).await?;
+    async fn list_tools(&mut self) -> anyhow::Result<Vec<McpToolRequest>> {
+
+        let res:McpTools = self.send_request("tools/list", json!({})).await?;
         Ok(res.tools)
     }
 
-    async fn call_tool(&mut self, name: &str, arguments: Value) -> anyhow::Result<Value> {
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> anyhow::Result<McpToolResult> {
         let params = json!({
             "name": name,
             "arguments": arguments,
         });
-        let res: Value = self.send_request("tools/call", params).await?;
-        Ok(res)
+
+        match self {
+            Self::Local {
+                stdin,
+                stdout,
+                id_counter,
+                ..
+            } => {
+                let id = *id_counter;
+                *id_counter += 1;
+
+                let req = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": params,
+                });
+
+                let mut req_str = serde_json::to_string(&req)?;
+                req_str.push('\n');
+                stdin.write_all(req_str.as_bytes()).await?;
+                stdin.flush().await?;
+
+                loop {
+                    let mut line = String::new();
+                    let n = stdout.read_line(&mut line).await?;
+                    if n == 0 {
+                        return Err(anyhow::anyhow!("MCP server closed stdout"));
+                    }
+
+                    let val: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue, // Ignore non-JSON lines
+                    };
+
+                    if val.get("id").and_then(|i| i.as_u64()) == Some(id) {
+                        if let Some(err) = val.get("error") {
+                            return Err(anyhow::anyhow!("MCP Error: {}", err));
+                        }
+                        let res = val.get("result").cloned().unwrap_or(Value::Null);
+                        return Ok(McpToolResult::with_resp(serde_json::to_string(&res)?));
+                    }
+                }
+            }
+            Self::Remote {
+                url,
+                client,
+                id_counter,
+                headers,
+            } => {
+                let id = *id_counter;
+                *id_counter += 1;
+
+                let req = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": params,
+                });
+
+                let mut req_builder = client.post(url as &str).json(&req);
+                for (k, v) in headers.iter() {
+                    req_builder = req_builder.header(k, v);
+                }
+                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+
+                let resp = req_builder.send().await?;
+
+                let content_type = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+
+                if content_type.contains("text/event-stream") {
+                    let (stream_result, chan) = McpToolResult::with_stream();
+                    let mut stream = resp.bytes_stream();
+
+                    tokio::spawn(async move {
+                        use tokio_stream::StreamExt;
+                        let mut buffer = String::new();
+                        while let Some(chunk_res) = stream.next().await {
+                            if let Ok(bytes) = chunk_res {
+                                if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
+                                    buffer.push_str(s);
+                                    while let Some(idx) = buffer.find('\n') {
+                                        let line = buffer[..idx].to_string();
+                                        buffer = buffer[idx + 1..].to_string();
+
+                                        let line = line.trim();
+                                        if line.starts_with("data: ") {
+                                            let data_str = &line[6..];
+                                            if let Ok(mcp_resp) = serde_json::from_str::<McpToolResponse>(data_str) {
+                                                let _ = chan.channel.send(mcp_resp);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    });
+
+                    Ok(stream_result)
+                } else {
+                    let val: Value = resp.json().await?;
+                    if let Some(err) = val.get("error") {
+                        return Err(anyhow::anyhow!("MCP Error: {}", err));
+                    }
+                    let res = val.get("result").cloned().unwrap_or(Value::Null);
+                    Ok(McpToolResult::with_resp(serde_json::to_string(&res)?))
+                }
+            }
+        }
     }
 }
 
-pub struct McpClientExecutor {
+pub struct McpExecutor {
     pub mcp_dir: PathBuf,
     config_cache: tokio::sync::RwLock<HashMap<String, McpServerConfig>>,
 }
 
-impl McpClientExecutor {
+impl McpExecutor {
     pub fn new(mcp_dir: impl Into<PathBuf>) -> Self {
         Self {
             mcp_dir: mcp_dir.into(),
@@ -239,6 +339,7 @@ impl McpClientExecutor {
             if let Some(config) = cache.get(mcp_name) {
                 return Ok(config.clone());
             }
+            drop(cache);
         }
 
         let mut cache = self.config_cache.write().await;
@@ -268,13 +369,13 @@ impl McpClientExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutor for McpClientExecutor {
+impl TaskExecutor for McpExecutor {
     fn desc(&self) -> String {
         "MCP Client Executor".to_string()
     }
 
     fn channel(&self) -> String {
-        "mcp".to_string()
+        "default".to_string()
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
@@ -284,26 +385,24 @@ impl TaskExecutor for McpClientExecutor {
             return Err(anyhow::anyhow!("Invalid task input type for MCP"));
         };
 
-        let mcp_name = req.tool_name;
-
-        #[derive(Deserialize)]
-        struct McpCallArgs {
-            function_name: String,
-            arguments: Value,
+        let mut ss = req.tool_name.splitn(2, "__").map(|s| s.to_string()).collect::<Vec<_>>();
+        if ss.len() != 2 {
+            return Err(anyhow::anyhow!("Invalid mcp tool name format: {}", req.tool_name));
         }
-        let args: McpCallArgs = serde_json::from_str(&req.arguments)?;
+        let mcp_name = ss.remove(0);
+        let mcp_tool_name = ss.remove(0);
+
+        let args: Value = serde_json::from_str(&req.arguments)?;
 
         let config = self.load_config_from_dir(&mcp_name).await?;
         let mut client = McpClient::connect(config).await?;
         client.initialize().await?;
 
         let result = client
-            .call_tool(&args.function_name, args.arguments)
+            .call_tool(mcp_tool_name.as_str(), args)
             .await?;
 
-        let content_str = serde_json::to_string(&result)?;
-
-        Ok(TaskResult::success(task.id, task.agent_id).set_data(content_str))
+        Ok(TaskResult::success(task.id, task.agent_id).set_data(result))
     }
 
     async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
@@ -321,40 +420,45 @@ impl TaskExecutor for McpClientExecutor {
         let mut client = McpClient::connect(config).await?;
         client.initialize().await?;
 
-        let tools = client.list_tools().await?;
+        let mut tools = client.list_tools().await?;
 
-        let mut desc = format!("MCP Server: {}\nAvailable functions:\n", mcp_name);
-        let mut function_names = vec![];
-        for t in &tools {
-            desc.push_str(&format!(
-                "- {}: {}\n  Schema: {}\n",
-                t.name,
-                t.description.as_deref().unwrap_or(""),
-                serde_json::to_string(&t.input_schema).unwrap_or_default()
-            ));
-            function_names.push(t.name.clone());
+        for i in tools.iter_mut(){
+            i.name = format!("{}__{}", mcp_name, i.name);
         }
 
-        let args_schema = json!({
-            "type": "object",
-            "properties": {
-                "function_name": {
-                    "type": "string",
-                    "enum": function_names,
-                    "description": "The name of the function to call."
-                },
-                "arguments": {
-                    "type": "object",
-                    "description": "The arguments for the function. Please refer to the specific function schema."
-                }
-            },
-            "required": ["function_name", "arguments"]
-        });
-
         let thing = Thing::new(self.channel())
-            .add_item(ThingItem::Tool(desc, args_schema))
+            .add_item(ThingItem::Mcp(tools))
             .into_self();
 
         Ok(vec![thing])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_remote_mcp_call() -> anyhow::Result<()> {
+        let config = McpServerConfig::Remote {
+            description: "".to_string(),
+            url: "https://mcp.amap.com/mcp?key=8f7be1667d04ac902b87d6ae892733d9".to_string(),
+            headers: HashMap::new(),
+        };
+
+        let mut client = McpClient::connect(config).await?;
+        client.initialize().await?;
+
+        let tools = client.list_tools().await?;
+        println!("Tools: {:#?}", tools);
+
+        let args = json!({
+            "keywords": "北京大学"
+        });
+
+        let result = client.call_tool("maps_text_search", args).await?;
+        println!("Call Result: {:#?}", result);
+
+        Ok(())
     }
 }

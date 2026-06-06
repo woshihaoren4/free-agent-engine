@@ -1,4 +1,4 @@
-use crate::{SkillHeader, Task, TaskResult, TaskType};
+use crate::{McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
@@ -147,7 +147,7 @@ pub enum ThingItem {
     /// 自定义事物
     Custom(String),
     /// MCP服务器
-    McpServer(String),
+    Mcp(Vec<McpToolRequest>),
     /// 信息
     Info(String),
     /// 任意类型事物，用于扩展
@@ -165,7 +165,7 @@ impl ThingItem {
             Self::Agent( s) => s.to_string(),
             Self::Skill( s) => s.to_string(),
             Self::Custom( s) => s.to_string(),
-            Self::McpServer( s) => s.to_string(),
+            Self::Mcp(s) => serde_json::to_string(s).unwrap_or("ThingItem::McpServer".into()),
             Self::Info( s) => s.to_string(),
             Self::Any(_) => "".to_string(),
         }
