@@ -9,6 +9,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
 /// 基于文件系统的记忆存储实现
+#[derive(Debug)]
 pub struct FileChatMemory<T> {
     agent_dir: PathBuf,
     memory_dir: PathBuf,
@@ -146,7 +147,12 @@ where
     }
 
     /// 设置用户记忆,append:是否追加
-    async fn set_user_info_ext(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()> {
+    async fn set_user_info_ext(
+        &self,
+        user_id: &str,
+        info: String,
+        append: bool,
+    ) -> anyhow::Result<()> {
         let user_dir = self.memory_dir.join(user_id);
         if !user_dir.exists() {
             tokio::fs::create_dir_all(&user_dir).await?;
@@ -168,13 +174,27 @@ where
     }
 
     /// 记忆信息
-    async fn metadata_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>{
+    async fn metadata_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<String> {
         let mut info = "\n## Your memory Metadata:".to_string();
-        info.push_str(&format!("\n - This dialogue identifier $SESSION_ID: `{}`", session_id));
-        info.push_str(&format!("\n - session description file path: {}/{}/{}.desc", self.memory_dir.display(), user_id, session_id));
+        info.push_str(&format!(
+            "\n - This dialogue identifier $SESSION_ID: `{}`",
+            session_id
+        ));
+        info.push_str(&format!(
+            "\n - session description file path: {}/{}/{}.desc",
+            self.memory_dir.display(),
+            user_id,
+            session_id
+        ));
         Ok(info)
     }
-    async fn load_ext(&self, user_id: &str, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>> {
+    async fn load_ext(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<T>> {
         let store = self.store.read().await;
         if let Some(user_store) = store.get(user_id) {
             if let Some((_, items)) = user_store.get(session_id) {
@@ -191,7 +211,9 @@ where
         let user_id_owned = user_id.to_string();
         let should_flush = {
             let mut store = self.store.write().await;
-            let user_store = store.entry(user_id_owned.clone()).or_insert_with(HashMap::new);
+            let user_store = store
+                .entry(user_id_owned.clone())
+                .or_insert_with(HashMap::new);
             let (flushed_count, items) = user_store
                 .entry(session_id_owned.clone())
                 .or_insert_with(|| (0, Vec::new()));
@@ -208,7 +230,8 @@ where
         };
 
         if should_flush {
-            self.flush_session(&user_id_owned, &session_id_owned).await?;
+            self.flush_session(&user_id_owned, &session_id_owned)
+                .await?;
         }
         Ok(())
     }
@@ -289,7 +312,10 @@ where
             }
         }
 
-        let file_path = self.memory_dir.join(user_id).join(format!("{}.jsonl", session_id));
+        let file_path = self
+            .memory_dir
+            .join(user_id)
+            .join(format!("{}.jsonl", session_id));
         if file_path.exists() {
             tokio::fs::remove_file(file_path).await?;
         }

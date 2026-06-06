@@ -1,13 +1,13 @@
 mod file_agent_config;
 mod file_chat_memory;
-mod openai_api_memory_entry;
 mod memory_message_ext;
+mod openai_api_memory_entry;
 
+pub use crate::session::file_session_ctl::*;
 pub use file_agent_config::*;
 pub use file_chat_memory::*;
-pub use crate::session::file_session_ctl::*;
-pub use openai_api_memory_entry::*;
 pub use memory_message_ext::*;
+pub use openai_api_memory_entry::*;
 
 use crate::Msg;
 
@@ -20,13 +20,19 @@ pub trait Memory: Sync {
     async fn get_user_info(&self, user_id: &str) -> anyhow::Result<String>;
 
     ///设置用户记忆,append:是否追加
-    async fn set_user_info(&self, user_id: &str, info: String,append:bool) -> anyhow::Result<()>;
+    async fn set_user_info(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()>;
 
     /// 记忆信息，对应到system prompt
     async fn metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>;
 
     /// 加载/获取记忆
-    async fn load(&self, user_id: &str, session_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<Msg>>;
+    async fn load(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Msg>>;
 
     /// 追加单条记忆
     async fn push(&self, user_id: &str, session_id: &str, item: Msg) -> anyhow::Result<()>;
@@ -43,9 +49,3 @@ pub trait Memory: Sync {
     /// 刷新记忆，将缓存的内容刷新到磁盘中
     async fn flush(&self) -> anyhow::Result<()>;
 }
-
-
-
-
-
-

@@ -2,6 +2,7 @@ use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
 use serde_json::Value;
 
+#[derive(Debug)]
 pub struct ArkWebSearch;
 
 #[async_trait]

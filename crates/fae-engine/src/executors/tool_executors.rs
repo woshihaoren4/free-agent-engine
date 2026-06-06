@@ -4,6 +4,7 @@ use fae_agent::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::Arc;
 // pub trait Identity:Sync{
 //     fn get(&self) -> String;
@@ -45,7 +46,7 @@ impl IdenInfo {
 }
 
 #[async_trait]
-pub trait Tool: Sync {
+pub trait Tool: Debug + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn arguments(&self) -> Value;
@@ -53,12 +54,12 @@ pub trait Tool: Sync {
 }
 
 #[async_trait]
-pub trait ToolSet: Sync {
+pub trait ToolSet: Debug + Sync {
     async fn load(&self, name: &str) -> anyhow::Result<Arc<dyn Tool + Send + 'static>>;
     async fn insert(&mut self, tool: Arc<dyn Tool + Send + 'static>) -> anyhow::Result<()>;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ToolSetImplMap {
     tools: HashMap<String, Arc<dyn Tool + Send + 'static>>,
 }
@@ -79,6 +80,7 @@ impl ToolSet for ToolSetImplMap {
     }
 }
 
+#[derive(Debug)]
 pub struct ToolExecutor {
     pub tools_loader: Vec<Box<dyn ToolSet + Send + 'static>>,
 }

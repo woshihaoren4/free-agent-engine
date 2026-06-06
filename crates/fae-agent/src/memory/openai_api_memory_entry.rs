@@ -65,7 +65,7 @@ pub trait MemoryEntry: Message {
     fn content(&self) -> &str;
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
     // 是否需要记住该条记录，落盘
-    fn is_remember(&self) -> bool{
+    fn is_remember(&self) -> bool {
         false
     }
     fn try_to_tool_call(&self) -> Option<ToolCall> {
@@ -164,24 +164,20 @@ impl MemoryEntry for Record {
                             for j in t {
                                 match j {
                                     ChatCompletionMessageToolCalls::Function(f) => {
-                                        msgs.push(Record::from(RecordItem::ToolCall(
-                                            ToolCall {
-                                                index: i.index,
-                                                tool_call_id: f.id,
-                                                tool_name: f.function.name,
-                                                arguments: f.function.arguments,
-                                            },
-                                        )));
+                                        msgs.push(Record::from(RecordItem::ToolCall(ToolCall {
+                                            index: i.index,
+                                            tool_call_id: f.id,
+                                            tool_name: f.function.name,
+                                            arguments: f.function.arguments,
+                                        })));
                                     }
                                     ChatCompletionMessageToolCalls::Custom(c) => {
-                                        msgs.push(Record::from(RecordItem::ToolCall(
-                                            ToolCall {
-                                                index: i.index,
-                                                tool_call_id: c.id,
-                                                tool_name: c.custom_tool.name,
-                                                arguments: c.custom_tool.input,
-                                            },
-                                        )));
+                                        msgs.push(Record::from(RecordItem::ToolCall(ToolCall {
+                                            index: i.index,
+                                            tool_call_id: c.id,
+                                            tool_name: c.custom_tool.name,
+                                            arguments: c.custom_tool.input,
+                                        })));
                                     }
                                 }
                             }
@@ -373,7 +369,7 @@ impl MemoryEntry for Record {
 
     fn try_to_tool_call(&self) -> Option<ToolCall>
     where
-        Self: Sized
+        Self: Sized,
     {
         match &self.item {
             RecordItem::ToolCall(tc) => Some(tc.clone()),

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Stdio;
 use tokio::process::Command;
-
+#[derive(Debug)]
 pub struct ExecutePython;
 
 #[async_trait]

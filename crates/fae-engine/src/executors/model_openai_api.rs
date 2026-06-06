@@ -13,6 +13,7 @@ pub struct ModelOpenAIApiExecutorTaskConfig<T> {
     pub streaming: bool,
 }
 
+#[derive(Debug)]
 pub struct ModelOpenAIApiExecutor {
     pub desc: String,
     pub channel: String,
@@ -131,7 +132,7 @@ mod tests {
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     };
-    use fae_agent::TaskType;
+    use fae_agent::{Context, Env, TaskType};
     use tokio_stream::StreamExt;
 
     #[tokio::test]
@@ -153,7 +154,8 @@ mod tests {
             .build()
             .expect("build request failed!");
 
-        let task = Task::new("1", "claw", TaskType::Model).set_args(request);
+        let task =
+            Task::new(Context::new(Env::none()), "1", "claw", TaskType::Model).set_args(request);
 
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
@@ -189,7 +191,8 @@ mod tests {
             .build()
             .expect("build request failed!");
         let request = ModelOpenAIApiExecutor::build_stream_chat_request(request);
-        let task = Task::new("1", "claw", TaskType::Model).set_args(request);
+        let task =
+            Task::new(Context::new(Env::none()), "1", "claw", TaskType::Model).set_args(request);
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
             .into_inner::<ChatCompletionResponseStream>()

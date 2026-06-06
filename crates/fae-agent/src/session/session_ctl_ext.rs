@@ -1,5 +1,5 @@
+use crate::{SessionCtl, SessionMD, SessionMetadata};
 use std::sync::Arc;
-use crate::{SessionCtl, SessionMetadata, SessionMD};
 
 //session信息也可以自己管理
 #[async_trait::async_trait]
@@ -21,9 +21,17 @@ impl<T> SessionCtl for Arc<dyn SessionCtlExt<T> + Send + 'static>
 where
     T: SessionMetadata + Send + Sync + 'static,
 {
-    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMD>> {
+    async fn list(
+        &self,
+        user_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMD>> {
         let vec = self.list_ext(user_id, offset, limit).await?;
-        Ok(vec.into_iter().map(|item| SessionMD::new(item)).collect::<Vec<_>>())
+        Ok(vec
+            .into_iter()
+            .map(|item| SessionMD::new(item))
+            .collect::<Vec<_>>())
     }
 
     async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMD>> {
@@ -32,16 +40,22 @@ where
     }
 
     async fn update(&self, meta: SessionMD) -> anyhow::Result<()> {
-        match meta.into_inner::<T>(){
+        match meta.into_inner::<T>() {
             Ok(md) => self.update_ext(md).await,
-            Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::update]session metadata is not of type {:?}", e)),
+            Err(e) => Err(anyhow::anyhow!(
+                "[SessionCtlExt<T>::update]session metadata is not of type {:?}",
+                e
+            )),
         }
     }
 
     async fn create(&self, meta: SessionMD) -> anyhow::Result<()> {
-        match meta.into_inner::<T>(){
+        match meta.into_inner::<T>() {
             Ok(md) => self.create_ext(md).await,
-            Err(e) => Err(anyhow::anyhow!("[SessionCtlExt<T>::create]session metadata is not of type {:?}", e)),
+            Err(e) => Err(anyhow::anyhow!(
+                "[SessionCtlExt<T>::create]session metadata is not of type {:?}",
+                e
+            )),
         }
     }
 

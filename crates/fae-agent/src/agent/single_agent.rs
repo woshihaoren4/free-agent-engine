@@ -1,25 +1,34 @@
-use std::collections::HashMap;
-use crate::define::{SenderMessageStream};
+use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, Env, NonePlan, ChatMsg, MemoryEntry, PlanningResult, SessionCtlExt, Task, TaskResult, TaskType, define_planning_group, ToolOut, ThingSelect, ThingItem, ToolRequest, Memory, SessionCtl, SessionMetadata, fae_home, FAE_HOME, Context, TASK_EXTEND_KEY_WORKSPACE};
-use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
+use crate::{
+    AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry,
+    NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata,
+    TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut,
+    ToolRequest, define_planning_group, fae_home,
+};
+use async_openai::types::chat::{
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    FunctionObjectArgs, ReasoningEffort,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
 
-
-pub struct SingleAgent<S,M> {
+pub struct SingleAgent<S, M> {
     agent_id: String,
     memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
     session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
 }
 
-impl<S,M> SingleAgent<S,M> {
+impl<S, M> SingleAgent<S, M> {
     pub fn new(
         agent_id: impl Into<String>,
         memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
@@ -35,7 +44,8 @@ impl<S,M> SingleAgent<S,M> {
     }
 }
 
-pub struct SingleAgentPlanSessionCallStream<S,M> {
+#[derive(Debug)]
+pub struct SingleAgentPlanSessionCallStream<S, M> {
     id: String,
     agent_id: String,
     env: Env,
@@ -48,13 +58,16 @@ pub struct SingleAgentPlanSessionCallStream<S,M> {
     // agent 信息，包括空间路径，配置路径等
     agent_info: String,
     //执行工具,task_id,tool
-    doing: HashMap<String,ToolOut>,
+    doing: HashMap<String, ToolOut>,
     //工具描述,channel__tool_name, desc,args
-    tools: HashMap<String,(String,Value)>,
+    tools: HashMap<String, (String, Value)>,
+    //mcp, 渠道：tool name, tool detail
+    mcp_tools: Vec<McpToolRequest>,
+    //执行上下文
     context: Context,
 }
 
-impl<S,M> SingleAgentPlanSessionCallStream<S,M>
+impl<S, M> SingleAgentPlanSessionCallStream<S, M>
 where
     S: SessionMetadata + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
@@ -69,10 +82,10 @@ where
         output: SenderMessageStream<M>,
     ) -> Self {
         let id = wd_tools::uuid::v4();
-        let context = Context::default();
+        let context = Context::new(env.clone());
         if let Some(map) = session_metadata.extend() {
-            for (k,v) in map.into_iter() {
-                context.set(k,v);
+            for (k, v) in map.into_iter() {
+                context.set(k, v);
             }
         }
         Self {
@@ -88,6 +101,7 @@ where
             exec_records: Vec::new(),
             doing: HashMap::new(),
             tools: HashMap::new(),
+            mcp_tools: Vec::new(),
             agent_info: String::new(),
         }
     }
@@ -147,7 +161,16 @@ where
                 .into(),
         );
         //添加历史消息
-        for item in self.memory.load_ext(&self.session_metadata.user_id(), self.session_metadata.id(), 0, model.max_chat_history_round as usize).await? {
+        for item in self
+            .memory
+            .load_ext(
+                &self.session_metadata.user_id(),
+                self.session_metadata.id(),
+                0,
+                model.max_chat_history_round as usize,
+            )
+            .await?
+        {
             if let Some(msg) = item.to_openai_message() {
                 messages.push(msg);
             }
@@ -161,13 +184,13 @@ where
         req.messages(messages);
         // 添加工具
         let mut tools = Vec::new();
-        for (chan__name,(desc,args)) in self.tools.iter() {
-            tools.push(ChatCompletionTools::Function(ChatCompletionTool{
+        for (chan__name, (desc, args)) in self.tools.iter() {
+            tools.push(ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObjectArgs::default()
                     .name(chan__name.clone())
                     .description(desc.clone())
                     .parameters(args.clone())
-                    .build()?
+                    .build()?,
             }))
         }
         req.tools(tools);
@@ -176,22 +199,27 @@ where
     }
 
     pub async fn make_model_task(&self) -> anyhow::Result<PlanningResult> {
-        let exec_channel = self
-            .agent_config
-            .model()
-            .channel;
+        let exec_channel = self.agent_config.model().channel;
         let req = self.build_openai_api_request().await?;
-        let task = Task::default()
-            .set_type(TaskType::Model)
-            .set_agent_id(self.id.clone())
-            .set_args(req)
-            .set_exec_channel(exec_channel)
-            .set_context(self.context.clone());
+        let task = Task::new(
+            self.context.clone(),
+            self.id.clone(),
+            self.id.clone(),
+            TaskType::Model,
+        )
+        .set_args(req)
+        .set_exec_channel(exec_channel);
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
         let agent_metadata = self.agent_config.metadata(&self.agent_id);
-        let memory_metdata = self.memory.metadata_ext(&self.session_metadata.user_id(), &self.session_metadata.id()).await?;
+        let memory_metdata = self
+            .memory
+            .metadata_ext(
+                &self.session_metadata.user_id(),
+                &self.session_metadata.id(),
+            )
+            .await?;
         let session_metadata = self.session_metadata.additional_tips();
         //加载skill
         self.agent_info = agent_metadata + &memory_metdata;
@@ -200,8 +228,11 @@ where
         }
         Ok(())
     }
-    pub async fn load_skills(&mut self)-> anyhow::Result<()>{
-        let mut info = format!("\n---\n## Skills (mandatory)\nYou can find and install your skill in its directory. $SKILL_DIR=${}/skills",FAE_HOME);
+    pub async fn load_skills(&mut self) -> anyhow::Result<()> {
+        let mut info = format!(
+            "\n---\n## Skills (mandatory)\nYou can find and install your skill in its directory. $SKILL_DIR=${}/skills",
+            FAE_HOME
+        );
         info.push_str("\nBefore reply: scan all entries inside <available_skills>");
         info.push_str("\n - If exactly one skill matches: use read_file(path=$SKILL_PATH) to read the full content of SKILL.md and strictly follow its instructions");
         info.push_str("\n - If multiple skills match: select only the most relevant one, then use read to load it");
@@ -209,9 +240,12 @@ where
         info.push_str("\n<available_skills>");
         let skills = self.agent_config.skills();
         for skill in skills {
-            let things = self.env.query(ThingSelect::Skill(skill.channel.clone(), skill.name.clone(),None).into()).await?;
-            for mut i in things{
-                while let Some(ThingItem::Skill(header)) = i.items.pop(){
+            let things = self
+                .env
+                .query(ThingSelect::Skill(skill.channel.clone(), skill.name.clone(), None).into())
+                .await?;
+            for mut i in things {
+                while let Some(ThingItem::Skill(header)) = i.items.pop() {
                     info.push_str(format!("\n - {}", header.format()).as_str());
                 }
             }
@@ -220,38 +254,84 @@ where
         self.agent_info.push_str(&info);
         Ok(())
     }
+    pub async fn load_mcp(&mut self) -> anyhow::Result<()> {
+        let mcp_servers = self.agent_config.mcp_servers();
+        for mcp_server in mcp_servers {
+            let things = self
+                .env
+                .query(ThingSelect::Mcp(mcp_server.channel, mcp_server.name).into())
+                .await?;
+            for thing in things {
+                for item in thing.items {
+                    if let ThingItem::Mcp(tools) = item {
+                        for i in tools {
+                            self.mcp_tools.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        // 添加到prompt
+        let mut info = "\n---\n## MCP Tools\nYou have the mcp tools, which you can call and use as needed. If you want to invoke an MCP tool, simply call it as your tool.".to_string();
+        info.push_str("\nMCP configuration path = `$FAE_HOME/mcp/mcp_list.json`.**But you can not use them.**");
+        info.push_str("\nThe MCP name you can use in path：$AGENT_CONFIG_PATH.mcp_servers.you can enable mcp name to the file。 format:[{\"name\":\"mcp_name\"}].");
+        info.push_str("\n<mcp_tools>");
+        for t in self.mcp_tools.iter() {
+            info.push_str(t.format().as_str());
+        }
+        info.push_str("\n</mcp_tools>");
+        self.agent_info.push_str(&info);
+        Ok(())
+    }
     pub async fn load_tools(&mut self) -> anyhow::Result<()> {
         let tools = self.agent_config.tools();
         for tool in tools {
-            let mut info = self.env.query(ThingSelect::Tool(tool.channel.clone(), tool.name.clone()).into()).await?;
+            let mut info = self
+                .env
+                .query(ThingSelect::Tool(tool.channel.clone(), tool.name.clone()).into())
+                .await?;
             if let Some(mut ting) = info.pop() {
-                if let Some(ThingItem::Tool(desc,args)) = ting.items.pop(){
-                    self.tools.insert(format!("{}__{}",tool.channel,tool.name), (desc,args));
-                    continue
+                if let Some(ThingItem::Tool(desc, args)) = ting.items.pop() {
+                    self.tools
+                        .insert(format!("{}__{}", tool.channel, tool.name), (desc, args));
+                    continue;
                 }
             }
-            return anyhow::anyhow!("[SingleAgent:{}:{}] no tools found, {:?}",self.agent_id,self.id, tool).err();
+            return anyhow::anyhow!(
+                "[SingleAgent:{}:{}] no tools found, {:?}",
+                self.agent_id,
+                self.id,
+                tool
+            )
+            .err();
         }
         Ok(())
     }
     pub async fn load_memory(&mut self) -> anyhow::Result<()> {
         // 添加user_info
-        let info = self.memory.get_user_info_ext(&self.session_metadata.user_id()).await?;
+        let info = self
+            .memory
+            .get_user_info_ext(&self.session_metadata.user_id())
+            .await?;
         self.agent_info.push_str(&info);
         Ok(())
     }
     // (渠道，函数名)
-    pub fn parse_tool_channel(tool_name: &str)->(String,String){
+    pub fn parse_tool_channel(tool_name: &str) -> (String, String) {
         let ss = tool_name.splitn(2, "__").collect::<Vec<&str>>();
         if ss.len() >= 2 {
             (ss[0].to_string(), ss[1].to_string())
-        }else{
+        } else {
             ("default".to_string(), tool_name.to_string())
         }
     }
 
     // 处理工具执行结果
-    pub async fn handle_tool_result(&mut self,mut tool_out:ToolOut,mut event: TaskResult)->anyhow::Result<PlanningResult>{
+    pub async fn handle_tool_result(
+        &mut self,
+        mut tool_out: ToolOut,
+        mut event: TaskResult,
+    ) -> anyhow::Result<PlanningResult> {
         if let Some(tool_resp) = event.into_inner::<String>() {
             tool_out.set_output(tool_resp);
             let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
@@ -259,27 +339,33 @@ where
                 self.output.send(i).await?;
             }
             self.exec_records.append(&mut record);
-        }else if event.is_success() {
-            let tool_resp = format!("The tool[{}] executed successfully. msg={}", tool_out.tool_name, event.msg);
+        } else if event.is_success() {
+            let tool_resp = format!(
+                "The tool[{}] executed successfully. msg={}",
+                tool_out.tool_name, event.msg
+            );
             tool_out.set_output(tool_resp);
             let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
             for i in record.clone() {
                 self.output.send(i).await?;
             }
             self.exec_records.append(&mut record);
-        }else {
+        } else {
             return anyhow::anyhow!("[SingleAgent] tool call failed, {:?}", event).err();
         }
         if self.doing.is_empty() {
             // 所有工具调用完成，发起模型调用
             return self.make_model_task().await;
-        }else{
+        } else {
             // 还有工具调用，等待
             return Ok(PlanningResult::Tasks(vec![]));
         }
     }
     // 处理模型执行结果
-    pub async fn handle_model_result(&mut self,mut event: TaskResult)->anyhow::Result<PlanningResult>{
+    pub async fn handle_model_result(
+        &mut self,
+        mut event: TaskResult,
+    ) -> anyhow::Result<PlanningResult> {
         let mut records = Vec::new();
         if let Some(mut s) = event.into_inner::<ChatCompletionResponseStream>() {
             //持续输出
@@ -293,21 +379,29 @@ where
         }
         // 调用工具
         let mut tool_tasks = Vec::new();
-        for i in records{
+        for i in records {
             if let Some(tool) = i.try_to_tool_call() {
+                wd_log::log_info_ln!("tool call: {:?}", tool);
                 // 执行记录
                 self.exec_records.push(i.clone());
                 // 通知session
                 self.output.send(i).await?;
                 // 组装任务
-                let tool_out = ToolOut::new(tool.tool_call_id,tool.tool_name.clone());
-                let (channel,name) = Self::parse_tool_channel(tool.tool_name.as_str());
-                let tool_req = ToolRequest::new(name,tool.arguments);
-                let tool_task = Task::default().set_type(TaskType::Tool).set_agent_id(self.agent_id.clone()).set_context(self.context.clone()).set_channel(channel).set_args(tool_req);
+                let tool_out = ToolOut::new(tool.tool_call_id, tool.tool_name.clone());
+                let (channel, name) = Self::parse_tool_channel(tool.tool_name.as_str());
+                let tool_req = ToolRequest::new(name, tool.arguments);
+                let tool_task = Task::new(
+                    self.context.clone(),
+                    self.agent_id.clone(),
+                    self.agent_id.clone(),
+                    TaskType::Tool,
+                )
+                .set_channel(channel)
+                .set_args(tool_req);
                 // 记录
-                self.doing.insert(tool_task.get_id().to_string(),tool_out);
+                self.doing.insert(tool_task.get_id().to_string(), tool_out);
                 tool_tasks.push(tool_task);
-            }else{
+            } else {
                 self.exec_records.push(i);
             }
         }
@@ -315,9 +409,15 @@ where
             return Ok(PlanningResult::Tasks(tool_tasks));
         }
         // 仅为模型输出
-        for msg in std::mem::take(&mut self.exec_records)  {
+        for msg in std::mem::take(&mut self.exec_records) {
             if msg.is_remember() {
-                self.memory.push_ext(&self.session_metadata.user_id(), &self.session_metadata.id(), msg).await?;
+                self.memory
+                    .push_ext(
+                        &self.session_metadata.user_id(),
+                        &self.session_metadata.id(),
+                        msg,
+                    )
+                    .await?;
             }
         }
         self.output.close();
@@ -326,7 +426,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<S,M> Planning for SingleAgentPlanSessionCallStream<S,M>
+impl<S, M> Planning for SingleAgentPlanSessionCallStream<S, M>
 where
     S: SessionMetadata + Clone + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
@@ -340,13 +440,19 @@ where
         //添加query到memory
         if self.input.is_remember() {
             self.memory
-                .push_ext(&self.session_metadata.user_id(), &self.session_metadata.id(), self.input.clone())
+                .push_ext(
+                    &self.session_metadata.user_id(),
+                    &self.session_metadata.id(),
+                    self.input.clone(),
+                )
                 .await?;
         }
         //加载工具
         self.load_tools().await?;
         //加载skill
         self.load_skills().await?;
+        //加载mcp
+        self.load_mcp().await?;
         //加载memory
         self.load_memory().await?;
         //发起任务
@@ -358,7 +464,7 @@ where
     async fn next(&mut self, event: TaskResult) -> anyhow::Result<PlanningResult> {
         // 判断是否是工具调用结果
         if let Some(tool_out) = self.doing.remove(&event.task_id) {
-            return  self.handle_tool_result(tool_out, event).await
+            return self.handle_tool_result(tool_out, event).await;
         }
         //调用模型
         return self.handle_model_result(event).await;
@@ -377,6 +483,7 @@ where
 }
 
 define_planning_group!(
+    #[derive(Debug)]
     pub enum SingleAgentPlan<S,M>
     {
         // SessionCall(SingleAgentPlanSessionCall<M>),
@@ -389,11 +496,10 @@ define_planning_group!(
 );
 
 #[async_trait::async_trait]
-impl<S,M>
-    AgentEventHandle<S, M, M, SingleAgentPlan<S,M>> for SingleAgent<S,M>
+impl<S, M> AgentEventHandle<S, M, M, SingleAgentPlan<S, M>> for SingleAgent<S, M>
 where
     S: SessionMetadata + Clone + Send + Sync + 'static,
-    M:MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     fn id(&self) -> String {
         self.agent_id.clone()
@@ -403,14 +509,14 @@ where
         self.agent_config.desc()
     }
 
-    async fn on_info(&self) -> Arc<dyn AgentConfig+Send+'static> {
+    async fn on_info(&self) -> Arc<dyn AgentConfig + Send + 'static> {
         self.agent_config.clone()
     }
 
     async fn on_memory(&self) -> Arc<dyn Memory + Send + 'static> {
         Arc::new(self.memory.clone())
     }
-    
+
     async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static> {
         Arc::new(self.session_config.clone())
     }
@@ -421,7 +527,7 @@ where
         info: &mut S,
         input: M,
         output: SenderMessageStream<M>,
-    ) -> anyhow::Result<SingleAgentPlan<S,M>> {
+    ) -> anyhow::Result<SingleAgentPlan<S, M>> {
         // session 没有则创建一个
         if self
             .session_config
@@ -429,22 +535,21 @@ where
             .await?
             .is_none()
         {
-            self.session_config
-                .create_ext(info.clone())
-                .await?;
+            self.session_config.create_ext(info.clone()).await?;
         }
         let agent_id = self.agent_id.clone();
 
         let memory = self.memory.clone();
-        let plan = SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::<S,M>::new(
-            agent_id,
-            env,
-            self.agent_config.clone(),
-            memory,
-            info.clone(),
-            input,
-            output,
-        ));
+        let plan =
+            SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::<S, M>::new(
+                agent_id,
+                env,
+                self.agent_config.clone(),
+                memory,
+                info.clone(),
+                input,
+                output,
+            ));
         Ok(plan)
     }
 

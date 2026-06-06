@@ -1,5 +1,10 @@
+use crate::DEFAULT_SYSTEM_PROMPT;
 use serde::{Deserialize, Serialize};
-use crate::{DEFAULT_SYSTEM_PROMPT};
+use std::fmt::Debug;
+
+fn default_channel() -> String {
+    "default".to_string()
+}
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelCallConfig {
@@ -35,13 +40,14 @@ pub struct ModelCallConfig {
 #[serde(default)]
 pub struct ToolConfig {
     pub name: String,
+    #[serde(default = "default_channel")]
     pub channel: String,
 }
 impl ToolConfig {
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self {
             name: name.into(),
-            channel: "default".to_string(),
+            channel: default_channel(),
         }
     }
     pub fn with_channel(self, channel: String) -> Self {
@@ -61,7 +67,7 @@ impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             name: "".into(),
-            channel: "default".to_string(),
+            channel: default_channel(),
         }
     }
 }
@@ -111,9 +117,8 @@ impl From<String> for SkillConfig {
     }
 }
 
-
 #[async_trait::async_trait]
-pub trait AgentConfig:Sync {
+pub trait AgentConfig: Debug + Sync {
     /// 获取智能体名称，唯一标识
     fn name(&self) -> String;
 
@@ -141,7 +146,7 @@ pub trait AgentConfig:Sync {
     }
 
     /// 获取配置的 mcp 服务列表
-    fn mcp_servers(&self) -> Vec<String> {
+    fn mcp_servers(&self) -> Vec<ToolConfig> {
         Vec::new()
     }
 
@@ -151,14 +156,19 @@ pub trait AgentConfig:Sync {
     }
 
     /// 获取其他自定义配置项
-    fn get(&self, key: &str) ->Option<String> {
+    fn get(&self, key: &str) -> Option<String> {
         None
     }
 
     /// agent信息, 包括workspace相关
-    fn metadata(&self,id:&str) -> String {
+    fn metadata(&self, id: &str) -> String {
         "".to_string()
     }
 
-    async fn init(&mut self, id:&str, workspace:&str, cfg:serde_json::Value) -> anyhow::Result<()>;
+    async fn init(
+        &mut self,
+        id: &str,
+        workspace: &str,
+        cfg: serde_json::Value,
+    ) -> anyhow::Result<()>;
 }

@@ -1,20 +1,20 @@
-mod session_event_layer;
-mod session_trait_ext;
 pub mod file_session_ctl;
 mod session_ctl_ext;
+mod session_event_layer;
+mod session_trait_ext;
 mod single_session_metadata;
 
+use crate::Msg;
+use crate::error::Error;
+pub use session_ctl_ext::*;
 pub use session_event_layer::*;
 pub use session_trait_ext::*;
-pub use session_ctl_ext::*;
+pub use single_session_metadata::*;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use crate::Msg;
-use crate::error::Error;
 use tokio_stream::Stream;
 use wd_tools::PFErr;
-pub use single_session_metadata::*;
 
 // ----------------------  通信会话 -----------------------------
 
@@ -58,11 +58,11 @@ pub trait Session: Sync {
 
 // ----------------------  会话管理 -----------------------------
 
-pub trait SessionMetadata:Debug{
+pub trait SessionMetadata: Debug {
     fn id(&self) -> &str;
     fn user_id(&self) -> &str;
     /// 会话提示词
-    fn additional_tips(&self) -> Option<String>{
+    fn additional_tips(&self) -> Option<String> {
         None
     }
     /// 会话扩展信息
@@ -98,7 +98,7 @@ pub struct SessionMD {
 }
 
 impl SessionMD {
-    pub fn new<T: SessionMetadata +Send+Sync+'static>(meta: T) -> Self {
+    pub fn new<T: SessionMetadata + Send + Sync + 'static>(meta: T) -> Self {
         Self {
             inner: Box::new(meta),
         }
@@ -129,7 +129,7 @@ impl SessionMD {
     }
 }
 
-impl<T: SessionMetadata +Send+Sync+'static> From<T> for SessionMD {
+impl<T: SessionMetadata + Send + Sync + 'static> From<T> for SessionMD {
     fn from(value: T) -> Self {
         Self::new(value)
     }
@@ -140,7 +140,12 @@ impl<T: SessionMetadata +Send+Sync+'static> From<T> for SessionMD {
 #[async_trait::async_trait]
 pub trait SessionCtl: Sync {
     // 加载session列表
-    async fn list(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<SessionMD>>;
+    async fn list(
+        &self,
+        user_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SessionMD>>;
     // 加载session详情
     async fn load(&self, user_id: &str, session_id: &str) -> anyhow::Result<Option<SessionMD>>;
     // 更改session

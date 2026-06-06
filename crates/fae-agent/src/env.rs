@@ -1,28 +1,28 @@
 use crate::{McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
+use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
-use serde_json::Value;
+use wd_tools::PFArc;
 
 pub const FAE_HOME: &'static str = "FAE_HOME";
 pub const FAE_WORKSPACE: &'static str = "FAE_WORKSPACE";
 pub const OPENAI_DEFAULT_MODEL: &'static str = "OPENAI_DEFAULT_MODEL";
 pub const FAE_DEFAULT_MODEL: &'static str = "FAE_DEFAULT_MODEL";
 
-pub fn fae_home()->PathBuf{
-    if let Ok(o) = env::var("FAE_HOME"){
+pub fn fae_home() -> PathBuf {
+    if let Ok(o) = env::var("FAE_HOME") {
         PathBuf::from(o)
-    }else{
+    } else {
         let home_dir = dirs::home_dir().expect("Failed to get home directory");
         let fae_dir = home_dir.join(".fae");
         fae_dir
     }
 }
-
 
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
@@ -83,7 +83,7 @@ impl ThingSelect {
 
 /// 查询条件
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
-pub struct Select{
+pub struct Select {
     pub select: ThingSelect,
     pub workspace: Option<String>,
     pub extend: HashMap<String, String>,
@@ -137,7 +137,7 @@ pub enum ThingItem {
     /// 模块
     Module(String),
     /// 工具:工具描述,工具参数
-    Tool(String,Value),
+    Tool(String, Value),
     /// 环境变量
     EnvVar(String),
     /// 智能体
@@ -154,19 +154,19 @@ pub enum ThingItem {
     Any(Box<dyn Any + Send + Sync + 'static>),
 }
 impl ThingItem {
-    pub fn string(&self)->String{
+    pub fn string(&self) -> String {
         match self {
             Self::None => "".to_string(),
             Self::Executor(s) => s.to_string(),
             Self::Plan(s) => s.to_string(),
             Self::Module(s) => s.to_string(),
-            Self::Tool( s,_) => s.to_string(),
-            Self::EnvVar( s) => s.to_string(),
-            Self::Agent( s) => s.to_string(),
-            Self::Skill( s) => s.to_string(),
-            Self::Custom( s) => s.to_string(),
+            Self::Tool(s, _) => s.to_string(),
+            Self::EnvVar(s) => s.to_string(),
+            Self::Agent(s) => s.to_string(),
+            Self::Skill(s) => s.to_string(),
+            Self::Custom(s) => s.to_string(),
             Self::Mcp(s) => serde_json::to_string(s).unwrap_or("ThingItem::McpServer".into()),
-            Self::Info( s) => s.to_string(),
+            Self::Info(s) => s.to_string(),
             Self::Any(_) => "".to_string(),
         }
     }
@@ -174,7 +174,7 @@ impl ThingItem {
 
 /// 环境 trait，定义智能体运行的环境接口
 #[async_trait::async_trait]
-pub trait Environment: Send + Sync + 'static {
+pub trait Environment: Debug + Send + Sync + 'static {
     /// 当前环境的唯一标识
     fn id(&self) -> &'static str;
 
@@ -196,7 +196,7 @@ pub trait Environment: Send + Sync + 'static {
 }
 
 /// 环境封装，提供线程安全的环境访问
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Env(Arc<dyn Environment + Send + 'static>);
 impl From<Arc<dyn Environment + Send + 'static>> for Env {
     fn from(env: Arc<dyn Environment + Send + 'static>) -> Self {
@@ -212,10 +212,62 @@ impl Env {
     pub fn inner(&self) -> Arc<dyn Environment> {
         self.0.clone()
     }
+
+    pub fn none() -> Env {
+        Self::new(NoneEnv::default())
+    }
 }
 impl Deref for Env {
     type Target = Arc<dyn Environment + Send + 'static>;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+// ----------- 默认带一个空的实现 ----------------------
+#[derive(Default, Debug)]
+pub struct NoneEnv(Option<Env>);
+
+#[async_trait::async_trait]
+impl Environment for NoneEnv {
+    fn id(&self) -> &'static str {
+        ""
+    }
+
+    async fn register_parent_env(&mut self, _env: Env) {
+        self.0 = Some(_env);
+    }
+
+    async fn watch(&self) -> anyhow::Result<EnvEvent> {
+        if let Some(env) = &self.0 {
+            return env.watch().await;
+        } else {
+            return Err(anyhow::anyhow!("NoneEnv watch failed!"));
+        }
+    }
+
+    async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
+        if let Some(env) = &self.0 {
+            return env.query(select).await;
+        } else {
+            return Err(anyhow::anyhow!("NoneEnv query failed!"));
+        }
+    }
+
+    async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
+        if let Some(env) = &self.0 {
+            return env.spawn(tasks).await;
+        } else {
+            return Err(anyhow::anyhow!("NoneEnv spawn failed!"));
+        }
+        Ok(())
+    }
+
+    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
+        if let Some(env) = &self.0 {
+            return env.execute(task).await;
+        } else {
+            return Err(anyhow::anyhow!("NoneEnv execute failed!"));
+        }
     }
 }

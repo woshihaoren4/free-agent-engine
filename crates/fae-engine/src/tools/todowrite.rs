@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+#[derive(Debug)]
 pub struct TodoWrite {
     todos: RwLock<Vec<TodoItem>>,
 }

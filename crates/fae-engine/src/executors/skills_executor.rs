@@ -1,6 +1,7 @@
 use fae_agent::{Select, Task, TaskExecutor, TaskResult, Thing, ThingSelect};
 use wd_tools::PFErr;
 
+#[derive(Debug)]
 pub struct SkillsExecutor {}
 
 impl Default for SkillsExecutor {

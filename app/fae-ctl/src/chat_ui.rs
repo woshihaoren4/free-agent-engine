@@ -3,14 +3,16 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
+use fae_agent::{
+    MemoryEntry, Record, SingleSessionMD, TASK_EXTEND_KEY_PROJECT_DIR, TASK_EXTEND_KEY_WORKSPACE,
+};
+use fae_engine::Workspace;
 use std::io::{self, Write};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
-use tui_input::{backend::crossterm::EventHandler, Input};
-use fae_agent::{Record, SingleSessionMD, MemoryEntry, TASK_EXTEND_KEY_WORKSPACE, TASK_EXTEND_KEY_PROJECT_DIR};
-use fae_engine::Workspace;
+use tui_input::{Input, backend::crossterm::EventHandler};
 
 pub struct ChatUi {
     ws: Workspace,
@@ -24,7 +26,7 @@ impl ChatUi {
 
     pub async fn run(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        
+
         let res = self.run_app().await;
 
         disable_raw_mode()?;
@@ -47,17 +49,22 @@ impl ChatUi {
             queue!(stdout, Clear(ClearType::FromCursorDown))?;
             let text = text.replace('\n', "\r\n");
             print!("{}", text);
-            queue!(stdout, crossterm::style::Print("\n"), crossterm::cursor::MoveUp(1))?;
+            queue!(
+                stdout,
+                crossterm::style::Print("\n"),
+                crossterm::cursor::MoveUp(1)
+            )?;
             stdout.flush()
         };
 
-        let session_config = SingleSessionMD::default().set(TASK_EXTEND_KEY_PROJECT_DIR,".");
+        let session_config = SingleSessionMD::default().set(TASK_EXTEND_KEY_PROJECT_DIR, ".");
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
-        let mut session = match self.ws.session_call_stream::<_, Record, Record>(
-            &self.agent_name,
-            session_config,
-        ).await {
+        let mut session = match self
+            .ws
+            .session_call_stream::<_, Record, Record>(&self.agent_name, session_config)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 clear_line()?;
@@ -67,17 +74,19 @@ impl ChatUi {
         };
 
         let mut stream_active = false;
-        let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> = None;
+        let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
+            None;
         let mut current_title = String::new();
         let mut spinner_tick: usize = 0;
 
         // Print welcome header
         clear_line()?;
-        print_text("Welcome to Free Agent Engine CLI!\nType /exit to quit, /reset restart session.\n\n")?;
+        print_text(
+            "Welcome to Free Agent Engine CLI!\nType /exit to quit, /reset restart session.\n\n",
+        )?;
 
         loop {
-
-            Self::redraw_prompt(&input, stream_active, spinner_tick,&mut current_title)?;
+            Self::redraw_prompt(&input, stream_active, spinner_tick, &mut current_title)?;
 
             let mut event_handled = false;
             let poll_timeout = if stream_active { 50 } else { 100 };
@@ -86,81 +95,92 @@ impl ChatUi {
                 let event = event::read()?;
                 event_handled = true;
                 match event {
-                    Event::Key(key) => {
-                        match key.code {
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Event::Key(key) => match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if stream_active {
+                                stream_active = false;
+                                current_stream = None;
+                                clear_line()?;
+                                print_text("\n[Session aborted. Starting a new session...]\n\n")?;
+                                let session_config = SingleSessionMD::default();
+                                session_id = session_config.id.clone();
+                                user_id = session_config.user_id.clone();
+                                session = match self
+                                    .ws
+                                    .session_call_stream::<_, Record, Record>(
+                                        &self.agent_name,
+                                        session_config,
+                                    )
+                                    .await
+                                {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        clear_line()?;
+                                        print_text(&format!(
+                                            "Failed to create new session: {:?}\n",
+                                            e
+                                        ))?;
+                                        return Ok(());
+                                    }
+                                };
+                                input.reset();
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let val = input.value().to_string();
+                            let val = val.trim();
+                            if val == "/exit" {
+                                return Ok(());
+                            } else if val == "/reset" {
                                 if stream_active {
                                     stream_active = false;
                                     current_stream = None;
-                                    clear_line()?;
-                                    print_text("\n[Session aborted. Starting a new session...]\n\n")?;
-                                    let session_config = SingleSessionMD::default();
-                                    session_id = session_config.id.clone();
-                                    user_id = session_config.user_id.clone();
-                                    session = match self.ws.session_call_stream::<_, Record, Record>(
-                                        &self.agent_name,
-                                        session_config,
-                                    ).await {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            clear_line()?;
-                                            print_text(&format!("Failed to create new session: {:?}\n", e))?;
-                                            return Ok(());
-                                        }
-                                    };
-                                    input.reset();
+                                }
+                                clear_line()?;
+                                if let Err(e) = self
+                                    .ws
+                                    .session_reset(&self.agent_name, &user_id, &session_id)
+                                    .await
+                                {
+                                    print_text(&format!("Failed to reset session: {:?}\n", e))?;
                                 } else {
-                                    return Ok(());
+                                    let text = " Session reset successfully ";
+                                    let cols =
+                                        crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80)
+                                            as usize;
+                                    let inner_cols = cols.saturating_sub(4);
+                                    let dashes_len = inner_cols.saturating_sub(text.len()) / 2;
+                                    let dashes = "-".repeat(dashes_len);
+                                    print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
                                 }
-                            }
-                            KeyCode::Enter => {
-                                let val = input.value().to_string();
-                                let val = val.trim();
-                                if val == "/exit" {
-                                    return Ok(());
-                                } else if val == "/reset" {
-                                    if stream_active {
-                                        stream_active = false;
-                                        current_stream = None;
-                                    }
+                                input.reset();
+                            } else if !val.is_empty() {
+                                if !stream_active {
                                     clear_line()?;
-                                    if let Err(e) = self.ws.session_reset(&self.agent_name, &user_id, &session_id).await {
-                                        print_text(&format!("Failed to reset session: {:?}\n", e))?;
-                                    } else {
-                                        let text = " Session reset successfully ";
-                                        let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
-                                        let inner_cols = cols.saturating_sub(4);
-                                        let dashes_len = inner_cols.saturating_sub(text.len()) / 2;
-                                        let dashes = "-".repeat(dashes_len);
-                                        print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
+                                    Self::print_user_message(val)?;
+
+                                    let msg = Record::from_user_input(val);
+                                    match session.call_stream(msg).await {
+                                        Ok(s) => {
+                                            current_stream = Some(Pin::from(s));
+                                            stream_active = true;
+                                            current_title = "Waiting".to_string();
+                                        }
+                                        Err(e) => {
+                                            print_text(&format!("Failed to send chat: {:?}\n", e))?;
+                                        }
                                     }
                                     input.reset();
-                                } else if !val.is_empty() {
-                                    if !stream_active {
-                                        clear_line()?;
-                                        Self::print_user_message(val)?;
-                                        
-                                        let msg = Record::from_user_input(val);
-                                        match session.call_stream(msg).await {
-                                            Ok(s) => {
-                                                current_stream = Some(Pin::from(s));
-                                                stream_active = true;
-                                                current_title = "Waiting".to_string();
-                                            }
-                                            Err(e) => {
-                                                print_text(&format!("Failed to send chat: {:?}\n", e))?;
-                                            }
-                                        }
-                                        input.reset();
-                                    }
                                 }
-                            }
-
-                            _ => {
-                                input.handle_event(&Event::Key(key));
                             }
                         }
-                    }
+
+                        _ => {
+                            input.handle_event(&Event::Key(key));
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -222,13 +242,18 @@ impl ChatUi {
         }
     }
 
-    fn redraw_prompt(input: &Input, stream_active: bool, spinner_tick: usize, title:&str) -> io::Result<()> {
+    fn redraw_prompt(
+        input: &Input,
+        stream_active: bool,
+        spinner_tick: usize,
+        title: &str,
+    ) -> io::Result<()> {
         let mut stdout = io::stdout();
-        
+
         if stream_active {
             let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spinner = spinners[(spinner_tick / 2) % spinners.len()];
-            let msg = format!("{} {}...", spinner,title);
+            let msg = format!("{} {}...", spinner, title);
             queue!(
                 stdout,
                 crossterm::cursor::SavePosition,
@@ -250,7 +275,7 @@ impl ChatUi {
                 SetAttribute(Attribute::Reset),
                 Print(input.value())
             )?;
-            
+
             let cursor_pos = input.visual_cursor() as u16 + 2;
             queue!(stdout, MoveToColumn(cursor_pos))?;
         }
@@ -260,7 +285,7 @@ impl ChatUi {
     fn print_user_message(val: &str) -> io::Result<()> {
         let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
         let separator = "─".repeat(cols);
-        
+
         let mut stdout = io::stdout();
         queue!(
             stdout,

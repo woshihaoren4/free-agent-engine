@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::process::Command;
 
+#[derive(Debug)]
 pub struct ExecuteCommand {
     // 待确认的命令：key为确认码，value为截至时间戳utc时间second
     pending_confirmations: Mutex<HashMap<String, u64>>,

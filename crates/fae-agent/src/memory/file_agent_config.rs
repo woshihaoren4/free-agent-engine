@@ -1,11 +1,13 @@
+use super::EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL;
+use crate::{
+    AgentConfig, FAE_DEFAULT_MODEL, ModelCallConfig, OPENAI_DEFAULT_MODEL, SkillConfig, ToolConfig,
+    fae_home, utils,
+};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use wd_tools::PFErr;
-use crate::{fae_home, utils, AgentConfig, ModelCallConfig, SkillConfig, ToolConfig, FAE_DEFAULT_MODEL, OPENAI_DEFAULT_MODEL};
-use super::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL,
-};
 
 /// AgentConfig 的序列化数据结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +23,7 @@ pub struct AgentConfigData {
     #[serde(default)]
     pub skills: Vec<SkillConfig>,
     #[serde(default)]
-    pub mcp_servers: Vec<String>,
+    pub mcp_servers: Vec<ToolConfig>,
     #[serde(default)]
     pub sub_agents: Vec<String>,
     #[serde(default)]
@@ -81,13 +83,17 @@ impl Default for AgentConfigData {
 }
 
 impl AgentConfigData {
-    pub async fn init<P: Into<PathBuf>>(&mut self,agent_id: &str, file_path: P)->anyhow::Result<()> {
+    pub async fn init<P: Into<PathBuf>>(
+        &mut self,
+        agent_id: &str,
+        file_path: P,
+    ) -> anyhow::Result<()> {
         let path = file_path.into();
         // 自检配置
         let prompt_dir = if self.prompt_dir.starts_with("/") {
             self.prompt_dir.clone()
-        }else{
-            let dir = format!("{}/{}/{}", path.display(),agent_id, self.prompt_dir);
+        } else {
+            let dir = format!("{}/{}/{}", path.display(), agent_id, self.prompt_dir);
             // self.prompt_dir = dir.clone();
             dir
         };
@@ -95,7 +101,11 @@ impl AgentConfigData {
         //创建prompt文件
         let prompt_path = PathBuf::from(prompt_dir);
         if !prompt_path.exists() {
-            return anyhow::anyhow!("[AgentConfigData] Prompt file not found: {}", prompt_path.display()).err();
+            return anyhow::anyhow!(
+                "[AgentConfigData] Prompt file not found: {}",
+                prompt_path.display()
+            )
+            .err();
         }
         //创建配置文件
         let config_path = path.join(agent_id).join("config.json");
@@ -115,28 +125,30 @@ impl AgentConfigData {
             config: self,
         }
     }
-    pub fn set_prompt_path<P: Into<String>>(mut self, prompt_path: P)->Self {
-        self.prompt_dir = prompt_path.into();self
+    pub fn set_prompt_path<P: Into<String>>(mut self, prompt_path: P) -> Self {
+        self.prompt_dir = prompt_path.into();
+        self
     }
-    pub fn set_name(mut self, name: &str) ->Self {
+    pub fn set_name(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
     }
-    pub fn set_description(mut self, description: &str)->Self {
+    pub fn set_description(mut self, description: &str) -> Self {
         self.description = description.to_string();
         self
     }
-    pub fn add_tools(mut self, tools: impl Into<ToolConfig>) ->Self {
+    pub fn add_tools(mut self, tools: impl Into<ToolConfig>) -> Self {
         self.tools.push(tools.into());
         self
     }
-    pub fn add_skills(mut self, skills: impl Into<SkillConfig>)->Self {
+    pub fn add_skills(mut self, skills: impl Into<SkillConfig>) -> Self {
         self.skills.push(skills.into());
         self
     }
 }
 
 /// 基于文件系统的 AgentConfig 实现
+#[derive(Debug)]
 pub struct AgentConfigFile {
     prompt: String,
     prompt_path: String,
@@ -145,7 +157,6 @@ pub struct AgentConfigFile {
 }
 
 impl AgentConfigFile {
-
     /// 从指定文件路径加载配置，如果文件不存在则创建默认配置
     pub async fn load<P: Into<PathBuf>>(agent_dir: P) -> anyhow::Result<Self> {
         let agent_dir = agent_dir.into();
@@ -157,12 +168,15 @@ impl AgentConfigFile {
                 .context("Failed to read agent config file")?;
             serde_json::from_str::<AgentConfigData>(&content).unwrap_or_default()
         } else {
-            return Err(anyhow::anyhow!("[AgentConfigFile] Agent config file not found: {}", config_path.display()));
+            return Err(anyhow::anyhow!(
+                "[AgentConfigFile] Agent config file not found: {}",
+                config_path.display()
+            ));
         };
 
         let prompt_path = if config_data.prompt_dir.starts_with("/") {
             PathBuf::from(config_data.prompt_dir.clone())
-        }else{
+        } else {
             let dir = format!("{}/{}", agent_dir.display(), config_data.prompt_dir);
             PathBuf::from(dir)
         };
@@ -173,7 +187,10 @@ impl AgentConfigFile {
                 .context("Failed to read prompt file")?;
             content
         } else {
-            return Err(anyhow::anyhow!("[AgentConfigFile] Prompt file not found: {}", prompt_path.display()));
+            return Err(anyhow::anyhow!(
+                "[AgentConfigFile] Prompt file not found: {}",
+                prompt_path.display()
+            ));
         };
 
         Ok(Self {
@@ -220,7 +237,7 @@ impl AgentConfig for AgentConfigFile {
         self.config.skills.clone()
     }
 
-    fn mcp_servers(&self) -> Vec<String> {
+    fn mcp_servers(&self) -> Vec<ToolConfig> {
         self.config.mcp_servers.clone()
     }
 
@@ -231,19 +248,27 @@ impl AgentConfig for AgentConfigFile {
     fn get(&self, key: &str) -> Option<String> {
         self.config.custom.get(key).cloned()
     }
-    fn metadata(&self,id:&str) -> String {
+    fn metadata(&self, id: &str) -> String {
         let mut meta = "\n---\n## Your Agent Metadata:".to_string();
         let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         meta.push_str(&format!("\n - System Now Time: `{}`", time));
         meta.push_str(&format!("\n - $FAE_HOME: `{}`", fae_home().display()));
         meta.push_str(&format!("\n - your Agent Name: `{}`", self.name()));
         meta.push_str(&format!("\n - your Agent Id: `{}`", id));
-        meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path:`{}`", self.config_path));
-        format!("{}\n - your enactment prompt file path: `{}", meta, self.prompt_path)
+        meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path:$AGENT_CONFIG_PATH:=`{}`", self.config_path));
+        format!(
+            "{}\n - your enactment prompt file path: `{}",
+            meta, self.prompt_path
+        )
     }
 
-    async fn init(&mut self, id:&str, workspace:&str, _cfg:serde_json::Value) -> anyhow::Result<()> {
-        self.config.init(id,PathBuf::from(workspace)).await?;
+    async fn init(
+        &mut self,
+        id: &str,
+        workspace: &str,
+        _cfg: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.config.init(id, PathBuf::from(workspace)).await?;
         Ok(())
     }
 }

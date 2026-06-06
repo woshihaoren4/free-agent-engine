@@ -12,10 +12,13 @@ async fn main() -> anyhow::Result<()> {
     println!("Querying executor info...");
     let executor_info = ws
         .get_env()
-        .query(ThingSelect::Executor(
-            TaskType::Model,
-            EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
-        ).into())
+        .query(
+            ThingSelect::Executor(
+                TaskType::Model,
+                EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
+            )
+            .into(),
+        )
         .await
         .expect("Failed to get executor info");
 

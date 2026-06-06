@@ -1,16 +1,14 @@
+use crate::{Context, Env};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use crate::Context;
 
 pub const TASK_EXTEND_KEY_AGENT_ID: &str = "AGENT_ID";
 pub const TASK_EXTEND_KEY_PLAN_ID: &str = "PLAN_ID";
 pub const TASK_EXTEND_KEY_WORKSPACE: &str = "WORKSPACE";
 pub const TASK_EXTEND_KEY_PROJECT: &str = "PROJECT";
 pub const TASK_EXTEND_KEY_PROJECT_DIR: &str = "PROJECT_DIR";
-
-
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize)]
@@ -29,6 +27,8 @@ pub enum TaskType {
     Agent,
     /// 执行技能
     Skill,
+    /// 执行MCP服务器
+    Mcp,
     /// 执行自定义任务
     Custom,
     /// 输出结果
@@ -58,6 +58,7 @@ impl From<&str> for TaskType {
             "tools" => TaskType::Tool,
             "agent" => TaskType::Agent,
             "skill" => TaskType::Skill,
+            "mcp" => TaskType::Mcp,
             "custom" => TaskType::Custom,
             "output" => TaskType::Output,
             "error" => TaskType::Error,
@@ -75,6 +76,7 @@ impl Display for TaskType {
             TaskType::Tool => "tools",
             TaskType::Agent => "agent",
             TaskType::Skill => "skill",
+            TaskType::Mcp => "mcp",
             TaskType::Custom => "custom",
             TaskType::Output => "output",
             TaskType::Error => "error",
@@ -97,17 +99,25 @@ pub struct Task {
     pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
 impl Task {
-    pub fn new<I: Into<String>, A: Into<String>>(id: I, agent_id: A, r#type: TaskType) -> Self {
+    pub fn none() -> Self {
+        Self::new(Context::new(Env::none()), "", "", TaskType::None)
+    }
+    pub fn new<I: Into<String>, A: Into<String>>(
+        ctx: Context,
+        id: I,
+        agent_id: A,
+        r#type: TaskType,
+    ) -> Self {
         let id = id.into();
         let agent_id = agent_id.into();
         Self {
             id,
             agent_id,
             r#type,
+            ctx,
             args: None,
             user_id: "".into(),
             exec_channel: "default".into(),
-            ctx: Context::default(),
         }
     }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
@@ -146,7 +156,8 @@ impl Task {
         self.user_id.as_str()
     }
     pub fn set_channel<T: Into<String>>(mut self, channel: T) -> Self {
-        self.exec_channel = channel.into();self
+        self.exec_channel = channel.into();
+        self
     }
     pub fn get_channel(&self) -> &str {
         self.exec_channel.as_str()
@@ -158,10 +169,10 @@ impl Task {
     pub fn get_context(&self) -> Context {
         self.ctx.clone()
     }
-    pub fn set<K:Into<String>,V:Into<String>>(&mut self,key:K,value:V){
-        self.ctx.set(key.into(),value.into());
+    pub fn set<K: Into<String>, V: Into<String>>(&mut self, key: K, value: V) {
+        self.ctx.set(key.into(), value.into());
     }
-    pub fn get(&self,key:&str)->Option<String>{
+    pub fn get(&self, key: &str) -> Option<String> {
         self.ctx.get(key)
     }
     pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
@@ -190,14 +201,6 @@ impl Task {
         } else {
             None
         }
-    }
-}
-
-impl Default for Task {
-    fn default() -> Self {
-        let id = wd_tools::uuid::v4();
-        let aid = "".to_string();
-        Self::new(id, aid, TaskType::None)
     }
 }
 
@@ -257,7 +260,8 @@ impl TaskResult {
         self
     }
     pub fn set_data_raw(mut self, data: Box<dyn Any + Send + 'static>) -> Self {
-        self.data = Some(data);self
+        self.data = Some(data);
+        self
     }
     pub fn assert<T: Any>(&self) -> bool {
         if let Some(ref data) = self.data {

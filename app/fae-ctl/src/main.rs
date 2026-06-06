@@ -1,9 +1,9 @@
 use clap::Parser;
 
-mod args;
-mod init_project;
 mod agents;
+mod args;
 mod chat_ui;
+mod init_project;
 mod uninstall;
 
 #[tokio::main]
@@ -18,7 +18,7 @@ async fn main() {
             agents::Agents::exec(ws, args).await;
         }
         args::Commands::Uninstall => {
-            uninstall::Uninstall{}.exec();
+            uninstall::Uninstall {}.exec();
         }
     }
 }

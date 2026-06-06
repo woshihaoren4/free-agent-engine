@@ -1,11 +1,12 @@
 use crate::executors::ModelOpenAIApiExecutor;
-use crate::{SkillsExecutor, ToolExecutor};
+use crate::{McpExecutor, SkillsExecutor, ToolExecutor};
 use fae_agent::{
     Env, EnvEvent, Environment, Select, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl,
     TaskResult, TaskType, Thing, ThingItem, ThingSelect,
 };
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -14,6 +15,7 @@ use wd_tools::channel::Channel;
 const DEFAULT_TASK_RUNTIME_ID: &str = "FAE_DEFAULT_TASK_EXECUTOR";
 const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
 
+#[derive(Debug)]
 pub struct TaskRuntime {
     events: Channel<EnvEvent>,
     parent: Option<Env>,
@@ -56,8 +58,8 @@ impl TaskRuntime {
     ) -> &mut Self
     where
         T: TaskExecutorExt<In, Out> + Send + 'static,
-        In: Send + Sync + 'static,
-        Out: Any + Send + Sync,
+        In: Debug + Send + Sync + 'static,
+        Out: Debug + Any + Send + Sync + 'static,
     {
         let executor = TaskExecutorExtImpl::new(task_exec_ext);
         self.register_executor(task_type, executor)
@@ -102,6 +104,7 @@ impl Default for TaskRuntime {
             .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
             .register_executor_ext(TaskType::Tool, ToolExecutor::default())
             .register_executor(TaskType::Skill, SkillsExecutor::default())
+            .register_executor(TaskType::Mcp, McpExecutor::default())
             .into_self()
     }
 }
@@ -171,6 +174,15 @@ impl Environment for TaskRuntime {
             if let Some(e) = self
                 .executors
                 .get(&self.generate_executor_key(&TaskType::Skill, channel))
+            {
+                return e.query(select).await;
+            }
+        }
+        //查询MCP服务器
+        if let ThingSelect::Mcp(ref channel, ref _name) = select.select {
+            if let Some(e) = self
+                .executors
+                .get(&self.generate_executor_key(&TaskType::Mcp, channel))
             {
                 return e.query(select).await;
             }

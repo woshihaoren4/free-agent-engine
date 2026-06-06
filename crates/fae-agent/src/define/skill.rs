@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt::Display;
 
-#[derive(Debug,Default,Serialize,Deserialize)]
-pub struct SkillHeader{
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SkillHeader {
     pub name: String,
     pub description: String,
     pub version: Option<String>,
-    pub metadata: Option<HashMap<String,Value>>,
+    pub metadata: Option<HashMap<String, Value>>,
     pub author: Option<String>,
     pub trigger: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -16,7 +16,10 @@ pub struct SkillHeader{
 
 impl SkillHeader {
     pub fn format(&self) -> String {
-        format!("{}:{}. $SKILL_PATH=$SKILL_DIR/{}/SKILL.md", self.name, self.description, self.name)
+        format!(
+            "{}:{}. $SKILL_PATH=$SKILL_DIR/{}/SKILL.md",
+            self.name, self.description, self.name
+        )
     }
 }
 
@@ -24,7 +27,7 @@ impl Display for SkillHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Ok(s) = serde_json::to_string(self) {
             write!(f, "{}", s)
-        }else{
+        } else {
             write!(f, "{}: {}", self.name, self.description)
         }
     }

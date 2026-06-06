@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tokio::fs;
 
+#[derive(Debug)]
 pub struct ReadFile;
 
 #[async_trait]
@@ -43,7 +44,7 @@ impl Tool for ReadFile {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct WriteFile;
 
 impl WriteFile {
@@ -93,6 +94,7 @@ impl Tool for WriteFile {
         let mut allowed_dirs = vec![
             fae_home_dir.join("skills"),
             fae_home_dir.join("prompt"),
+            fae_home_dir.join("mcp"),
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         ];
 
@@ -146,6 +148,7 @@ impl Tool for WriteFile {
     }
 }
 
+#[derive(Debug)]
 pub struct ListDirectory;
 
 #[async_trait]

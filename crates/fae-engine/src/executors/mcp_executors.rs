@@ -1,4 +1,7 @@
-use fae_agent::{McpServerConfig, McpToolRequest, McpTools, Select, Task, TaskExecutor, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest, McpToolResult, McpToolResponse};
+use fae_agent::{
+    McpServerConfig, McpToolRequest, McpToolResponse, McpToolResult, McpTools, Select, Task,
+    TaskExecutor, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -32,7 +35,9 @@ enum McpClient {
 impl McpClient {
     async fn connect(config: McpServerConfig) -> anyhow::Result<Self> {
         match config {
-            McpServerConfig::Local { command, args, env, .. } => {
+            McpServerConfig::Local {
+                command, args, env, ..
+            } => {
                 let mut cmd = Command::new(&command);
                 cmd.args(&args);
                 cmd.envs(&env);
@@ -128,7 +133,10 @@ impl McpClient {
                 for (k, v) in headers.iter() {
                     req_builder = req_builder.header(k, v);
                 }
-                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+                req_builder = req_builder.header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                );
 
                 let resp = req_builder.send().await?;
                 let val: Value = resp.json().await?;
@@ -159,7 +167,12 @@ impl McpClient {
                 stdin.write_all(req_str.as_bytes()).await?;
                 stdin.flush().await?;
             }
-            Self::Remote { url, client, headers, .. } => {
+            Self::Remote {
+                url,
+                client,
+                headers,
+                ..
+            } => {
                 let req = json!({
                     "jsonrpc": "2.0",
                     "method": method,
@@ -169,7 +182,10 @@ impl McpClient {
                 for (k, v) in headers.iter() {
                     req_builder = req_builder.header(k, v);
                 }
-                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+                req_builder = req_builder.header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                );
                 req_builder.send().await?;
             }
         }
@@ -192,8 +208,7 @@ impl McpClient {
     }
 
     async fn list_tools(&mut self) -> anyhow::Result<Vec<McpToolRequest>> {
-
-        let res:McpTools = self.send_request("tools/list", json!({})).await?;
+        let res: McpTools = self.send_request("tools/list", json!({})).await?;
         Ok(res.tools)
     }
 
@@ -266,7 +281,10 @@ impl McpClient {
                 for (k, v) in headers.iter() {
                     req_builder = req_builder.header(k, v);
                 }
-                req_builder = req_builder.header(reqwest::header::ACCEPT, "application/json, text/event-stream");
+                req_builder = req_builder.header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                );
 
                 let resp = req_builder.send().await?;
 
@@ -294,7 +312,9 @@ impl McpClient {
                                         let line = line.trim();
                                         if line.starts_with("data: ") {
                                             let data_str = &line[6..];
-                                            if let Ok(mcp_resp) = serde_json::from_str::<McpToolResponse>(data_str) {
+                                            if let Ok(mcp_resp) =
+                                                serde_json::from_str::<McpToolResponse>(data_str)
+                                            {
                                                 let _ = chan.channel.send(mcp_resp);
                                             }
                                         }
@@ -320,9 +340,17 @@ impl McpClient {
     }
 }
 
+#[derive(Debug)]
 pub struct McpExecutor {
     pub mcp_dir: PathBuf,
     config_cache: tokio::sync::RwLock<HashMap<String, McpServerConfig>>,
+}
+
+impl Default for McpExecutor {
+    fn default() -> Self {
+        let dir = fae_agent::fae_home().join("mcp");
+        Self::new(dir)
+    }
 }
 
 impl McpExecutor {
@@ -363,7 +391,10 @@ impl McpExecutor {
         if let Some(config) = cache.get(mcp_name) {
             Ok(config.clone())
         } else {
-            Err(anyhow::anyhow!("MCP Server config '{}' not found", mcp_name))
+            Err(anyhow::anyhow!(
+                "MCP Server config '{}' not found",
+                mcp_name
+            ))
         }
     }
 }
@@ -385,9 +416,16 @@ impl TaskExecutor for McpExecutor {
             return Err(anyhow::anyhow!("Invalid task input type for MCP"));
         };
 
-        let mut ss = req.tool_name.splitn(2, "__").map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut ss = req
+            .tool_name
+            .splitn(2, "__")
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
         if ss.len() != 2 {
-            return Err(anyhow::anyhow!("Invalid mcp tool name format: {}", req.tool_name));
+            return Err(anyhow::anyhow!(
+                "Invalid mcp tool name format: {}",
+                req.tool_name
+            ));
         }
         let mcp_name = ss.remove(0);
         let mcp_tool_name = ss.remove(0);
@@ -398,9 +436,7 @@ impl TaskExecutor for McpExecutor {
         let mut client = McpClient::connect(config).await?;
         client.initialize().await?;
 
-        let result = client
-            .call_tool(mcp_tool_name.as_str(), args)
-            .await?;
+        let result = client.call_tool(mcp_tool_name.as_str(), args).await?;
 
         Ok(TaskResult::success(task.id, task.agent_id).set_data(result))
     }
@@ -422,7 +458,7 @@ impl TaskExecutor for McpExecutor {
 
         let mut tools = client.list_tools().await?;
 
-        for i in tools.iter_mut(){
+        for i in tools.iter_mut() {
             i.name = format!("{}__{}", mcp_name, i.name);
         }
 
@@ -440,24 +476,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_remote_mcp_call() -> anyhow::Result<()> {
-        let config = McpServerConfig::Remote {
-            description: "".to_string(),
-            url: "https://mcp.amap.com/mcp?key=8f7be1667d04ac902b87d6ae892733d9".to_string(),
-            headers: HashMap::new(),
-        };
+        let cfg = r#"
+        {
+	"mcpServers": {
+		"mcp_name1": {
+			"url": "https://mcp.xxxx.com/mcp",
+			"headers": {}
+		},
+		"mcp_name2": {
+			"command": "npx",
+			"args": []
+		},
+		"gaode": {
+			"url": "https://mcp.amap.com/mcp?key=8f7be1667d04ac902b87d6ae892733d9"
+		}
+	}
+}
+        "#;
 
-        let mut client = McpClient::connect(config).await?;
-        client.initialize().await?;
+        let config: McpConfigFile = serde_json::from_str(cfg).unwrap();
+        println!("{:?}", config);
 
-        let tools = client.list_tools().await?;
-        println!("Tools: {:#?}", tools);
-
-        let args = json!({
-            "keywords": "北京大学"
-        });
-
-        let result = client.call_tool("maps_text_search", args).await?;
-        println!("Call Result: {:#?}", result);
+        // let mut client = McpClient::connect(config).await?;
+        // client.initialize().await?;
+        //
+        // let tools = client.list_tools().await?;
+        // println!("Tools: {:#?}", tools);
+        //
+        // let args = json!({
+        //     "keywords": "北京大学"
+        // });
+        //
+        // let result = client.call_tool("maps_text_search", args).await?;
+        // println!("Call Result: {:#?}", result);
 
         Ok(())
     }

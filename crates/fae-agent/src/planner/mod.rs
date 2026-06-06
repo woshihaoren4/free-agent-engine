@@ -1,6 +1,7 @@
 mod agent_event_handle;
 
 pub use agent_event_handle::*;
+use std::fmt::Debug;
 
 use crate::define::Event;
 use crate::{Context, Env, Task, TaskResult};
@@ -27,7 +28,7 @@ impl PlanningResult {
 
 /// 智能体规划 trait，定义智能体的规划逻辑
 #[async_trait::async_trait]
-pub trait Planning: Sync {
+pub trait Planning: Debug + Sync {
     fn id(&self) -> String;
     /// 执行信息，辅助debug
     async fn debug(&self) -> String {
@@ -170,7 +171,7 @@ impl Planning for NonePlan {
         Ok(PlanningResult::End(None))
     }
     fn get_context(&self) -> Context {
-        Context::default()
+        panic!("NonePlan get_context is not implemented")
     }
 }
 

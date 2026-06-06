@@ -1,11 +1,12 @@
 use crate::{Context, Select, Task, TaskResult, Thing, ThingSelect};
 use std::any::Any;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use wd_tools::PFErr;
 
 #[async_trait::async_trait]
-pub trait TaskExecutor: Sync {
+pub trait TaskExecutor: Debug + Sync {
     fn desc(&self) -> String;
     fn channel(&self) -> String {
         "default".to_string()
@@ -17,14 +18,14 @@ pub trait TaskExecutor: Sync {
 }
 
 #[async_trait::async_trait]
-pub trait TaskExecutorExt<In, Out>: Sync {
+pub trait TaskExecutorExt<In, Out>: Debug + Sync {
     fn desc(&self) -> String;
     fn channel(&self) -> String {
         "default".to_string()
     }
     async fn exec(
         &self,
-        ctx:Context,
+        ctx: Context,
         task_id: String,
         agent_id: String,
         user_id: String,
@@ -35,6 +36,7 @@ pub trait TaskExecutorExt<In, Out>: Sync {
     }
 }
 
+#[derive(Debug)]
 pub struct TaskExecutorExtImpl<T, In, Out> {
     executor: T,
     _in: PhantomData<In>,
@@ -55,8 +57,8 @@ impl<T, In, Out> TaskExecutorExtImpl<T, In, Out> {
 impl<T, In, Out> TaskExecutor for TaskExecutorExtImpl<T, In, Out>
 where
     T: TaskExecutorExt<In, Out>,
-    In: Send + Sync + 'static,
-    Out: Any + Send + Sync,
+    In: Debug + Send + Sync + 'static,
+    Out: Debug + Any + Send + Sync,
 {
     fn desc(&self) -> String {
         self.executor.desc()
@@ -76,7 +78,13 @@ where
         };
         let output = self
             .executor
-            .exec(task.get_context(), task.id.clone(), task.agent_id.clone(), task.user_id, input)
+            .exec(
+                task.get_context(),
+                task.id.clone(),
+                task.agent_id.clone(),
+                task.user_id,
+                input,
+            )
             .await?;
         if (&output as &dyn Any).downcast_ref::<TaskResult>().is_some() {
             let task_result = (Box::new(output) as Box<dyn Any>)

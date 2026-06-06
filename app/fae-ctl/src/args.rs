@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, Args};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Args, Debug)]
 pub struct AgentArgs {
@@ -6,9 +6,9 @@ pub struct AgentArgs {
     pub id: Option<String>,
     #[arg(short, long, help = "user id, default master")]
     pub user: Option<String>,
-    #[arg(short, long, default_value_t=false, help = "start chat with agent")]
+    #[arg(short, long, default_value_t = false, help = "start chat with agent")]
     pub chat: bool,
-    #[arg(alias = "hs",long, help = "show chat history")]
+    #[arg(alias = "hs", long, help = "show chat history")]
     pub history: bool,
 }
 

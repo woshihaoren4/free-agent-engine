@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use crate::SessionMetadata;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SingleSessionMD {
@@ -42,17 +42,17 @@ impl SingleSessionMD {
         let mut info = "\n---\n## The Project Metadata:".to_string();
         if let Ok(work_dir) = std::env::current_dir() {
             info.push_str(format!("\n - The path to the project you are currently working on is: $PROJECT_DIR=`{}`", work_dir.display()).as_str());
-        }else{
+        } else {
             info.push_str("\n - Your current working directory is not available.");
         }
         info.push_str("\n - Note: All your commands, operations, file management, and memorization are performed within this directory: $PROJECT_DIR");
         info
     }
-    pub fn set<K:Into<String>,V:Into<String>>(mut self, key:K,value:V) -> Self {
+    pub fn set<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
         self.extend.insert(key.into(), value.into());
         self
     }
-    pub fn get<>(&self, key:&str) -> Option<&String> {
+    pub fn get(&self, key: &str) -> Option<&String> {
         self.extend.get(key)
     }
 }
@@ -81,7 +81,7 @@ impl SessionMetadata for SingleSessionMD {
     fn additional_tips(&self) -> Option<String> {
         if self.additional_tips.is_empty() {
             Some(Self::default_tips())
-        }else{
+        } else {
             Some(self.additional_tips.to_string())
         }
     }

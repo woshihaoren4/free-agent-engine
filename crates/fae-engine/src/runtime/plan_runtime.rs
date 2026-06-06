@@ -20,6 +20,7 @@ pub const DEFAULT_PLAN_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
 pub const DEFAULT_PLAN_RUNTIME_PLAN_ID_PREFIX: &str = "__PRSUB_";
 pub const DEFAULT_PLAN_RUNTIME_PLAN_ID_SPILT: &str = "_*P#R$S@U&B_";
 
+#[derive(Debug)]
 pub struct PlanCtl {
     task: Task,
     plan: Box<dyn Planning + Send + 'static>,
@@ -28,13 +29,14 @@ pub struct PlanCtl {
 }
 impl PlanCtl {
     pub fn into_task_result(&mut self) -> (Task, Option<TaskResult>) {
+        let task = Task::none();
         (
-            std::mem::take(&mut self.task),
+            std::mem::replace(&mut self.task, task),
             std::mem::replace(&mut self.result, None),
         )
     }
 }
-
+#[derive(Debug)]
 pub struct PlanRuntime {
     events: Channel<EnvEvent>,
     parent: Option<Env>,

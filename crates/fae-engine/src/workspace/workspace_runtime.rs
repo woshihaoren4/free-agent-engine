@@ -5,6 +5,7 @@ use fae_agent::{
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 
+#[derive(Debug)]
 pub struct WorkspaceRuntime {
     pub name: String,
     parent: Option<Env>,

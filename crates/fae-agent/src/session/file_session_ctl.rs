@@ -38,7 +38,9 @@ impl<T> FileSessionCtl<T> {
     }
 
     fn get_file_path(&self, user_id: &str, session_id: &str) -> PathBuf {
-        self.dir_path.join(user_id).join(format!("{}.desc", session_id))
+        self.dir_path
+            .join(user_id)
+            .join(format!("{}.desc", session_id))
     }
 }
 

@@ -16,15 +16,13 @@ async fn main() -> anyhow::Result<()> {
     if ws.get_agent("main").await.is_err() {
         println!("Creating SingleAgent...");
         let config = AgentConfigData::default().set_prompt_path("../../docs/prompt/aicoding.txt");
-        ws.create_single_agent("main", config.into_agent_config()).await?;
+        ws.create_single_agent("main", config.into_agent_config())
+            .await?;
     }
 
     println!("Creating session...");
     let mut session = ws
-        .session_call_stream::<_, Record, Record>(
-            "main",
-            SingleSessionMD::default(),
-        )
+        .session_call_stream::<_, Record, Record>("main", SingleSessionMD::default())
         .await?;
 
     println!("Session started. Type '/exit' to quit.");
