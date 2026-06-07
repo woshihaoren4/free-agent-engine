@@ -24,6 +24,14 @@ pub fn fae_home() -> PathBuf {
     }
 }
 
+#[derive(Default, Debug, PartialEq, Eq, Clone)]
+pub struct TimedTask{
+    pub task_content: String,
+    pub agent_id: String,
+    pub user_id: String,
+    pub session_id: String,
+}
+
 /// 环境事件类型，用于表示环境中发生的各种事件
 #[derive(Default, Debug)]
 pub enum EnvEvent {
@@ -32,6 +40,8 @@ pub enum EnvEvent {
     None,
     // 事件执行结果，
     TaskResult(TaskResult),
+    // 定时事件
+    Timed(TimedTask),
     // 心跳
     Heartbeat(String),
     // /// 键值对事件，携带键和值

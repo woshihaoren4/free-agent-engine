@@ -1,8 +1,5 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{
-    Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl,
-    SessionEventLayer, SessionMD, SessionMetadata, TaskResult,
-};
+use crate::{Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -109,6 +106,11 @@ where
         wd_log::log_info_ln!("[AgentEventExt::{}] on_heartbeat", self.id());
         Ok(())
     }
+    /// 定时事件
+    async fn on_timed(&self, env: Env, task: TimedTask) -> anyhow::Result<()> {
+        wd_log::log_info_ln!("[AgentEventExt::{}] on_timed", self.id());
+        Ok(())
+    }
     /// 处理退出事件
     async fn exit(&self);
 }
@@ -175,6 +177,7 @@ where
                     .await
             }
             EnvEvent::Heartbeat(s) => self.agent_event_ext.on_heartbeat(env, s).await,
+            EnvEvent::Timed(task) => self.agent_event_ext.on_timed(env, task).await,
         }
     }
 

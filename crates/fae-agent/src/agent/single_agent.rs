@@ -1,7 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut, ToolRequest, define_planning_group, fae_home, McpToolResult, ToolResponse, ToolRespItem};
+use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, GLOBAL_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut, ToolRequest, define_planning_group, fae_home, McpToolResult, ToolResponse, ToolRespItem, GLOBAL_KEY_SESSION_ID, TimedTask};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -40,13 +40,13 @@ impl<S, M> SingleAgent<S, M> {
 }
 
 #[derive(Debug)]
-pub struct SingleAgentPlanSessionCallStream<S, M> {
+pub struct SingleAgentPlanSessionCallStream<S,M> {
     id: String,
     agent_id: String,
+    session_md:S,
     env: Env,
-    session_metadata: S,
-    input: M,
-    output: SenderMessageStream<M>,
+    output: Option<SenderMessageStream<M>>,
+    output_title:String,
     memory: Arc<dyn MemoryMessageExt<M> + Send + Sync + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
     exec_records: Vec<M>,
@@ -62,42 +62,68 @@ pub struct SingleAgentPlanSessionCallStream<S, M> {
     context: Context,
 }
 
-impl<S, M> SingleAgentPlanSessionCallStream<S, M>
+impl<S,M> SingleAgentPlanSessionCallStream<S,M>
 where
-    S: SessionMetadata + Send + Sync + 'static,
+    S: SessionMetadata + Sync + Send + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     pub fn new(
-        agent_id: String,
         env: Env,
+        agent_id: String,
+        session_md: S,
         agent_config: Arc<dyn AgentConfig + Send + 'static>,
         memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-        session_metadata: S,
         input: M,
-        output: SenderMessageStream<M>,
     ) -> Self {
         let id = wd_tools::uuid::v4();
         let context = Context::new(env.clone());
-        if let Some(map) = session_metadata.extend() {
-            for (k, v) in map.into_iter() {
-                context.set(k, v);
-            }
-        }
+        context.set(GLOBAL_KEY_SESSION_ID, session_md.id().to_string());
+        let mut exec_records = Vec::new();
+        exec_records.push(input);
         Self {
             context,
             agent_id,
+            session_md,
             env,
             id,
-            session_metadata,
-            input,
-            output,
             memory,
             agent_config,
-            exec_records: Vec::new(),
+            exec_records,
+            output: None,
+            output_title: String::new(),
             doing: HashMap::new(),
             tools: HashMap::new(),
             mcp_tools: Vec::new(),
             agent_info: String::new(),
+        }
+    }
+    fn set_output(&mut self, output: SenderMessageStream<M>) {
+        self.output = Some(output);
+    }
+    fn additional_session_tips(&mut self,mut tips:String){
+        tips.push_str(self.agent_info.as_str());
+        self.agent_info = tips;
+    }
+    fn extend_context(&self,map:HashMap<String,String>){
+        for (k,v) in map{
+            self.context.set(k,v);
+        }
+    }
+    async fn send(&mut self,msg:M)->anyhow::Result<()>{
+        if let Some(ref output) = self.output {
+            output.send(msg).await?;
+        }else{
+            let title = msg.title();
+            if title != self.output_title{
+                println!("\n{}:\n", self.output_title);
+            }
+            print!("{}", msg.content());
+        }
+        Ok(())
+    }
+    pub fn close(&self) {
+        if let Some(ref output) = self.output{
+            output.close();
         }
     }
     fn get_timestamp() -> u64 {
@@ -159,8 +185,8 @@ where
         for item in self
             .memory
             .load_ext(
-                &self.session_metadata.user_id(),
-                self.session_metadata.id(),
+                &self.session_md.user_id(),
+                self.session_md.id(),
                 0,
                 model.max_chat_history_round as usize,
             )
@@ -221,16 +247,13 @@ where
         let memory_metdata = self
             .memory
             .metadata_ext(
-                &self.session_metadata.user_id(),
-                &self.session_metadata.id(),
+                &self.session_md.user_id(),
+                self.session_md.id(),
             )
             .await?;
-        let session_metadata = self.session_metadata.additional_tips();
-        //加载skill
-        self.agent_info = agent_metadata + &memory_metdata;
-        if let Some(tips) = session_metadata {
-            self.agent_info.push_str(&tips);
-        }
+        let mut info = agent_metadata + &memory_metdata;
+        info.push_str(self.agent_info.as_str());
+        self.agent_info = info;
         Ok(())
     }
     pub async fn load_skills(&mut self) -> anyhow::Result<()> {
@@ -316,7 +339,7 @@ where
         // 添加user_info
         let info = self
             .memory
-            .get_user_info_ext(&self.session_metadata.user_id())
+            .get_user_info_ext(&self.session_md.user_id())
             .await?;
         self.agent_info.push_str(&info);
         Ok(())
@@ -369,7 +392,7 @@ where
                     tool_out.set_output(resp);
                     let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
                     for i in record.clone() {
-                        self.output.send(i).await?;
+                        self.send(i).await?;
                     }
                     self.exec_records.append(&mut record);
                 }
@@ -382,7 +405,7 @@ where
                         tool_out.set_output(resp.to_string());
                         let record = M::from_openai_msg(ChatMsg::Tool(tool_out));
                         for i in record {
-                            self.output.send(i).await?;
+                            self.send(i).await?;
                         }
                     }
                     tool_out.set_output(output);
@@ -397,7 +420,7 @@ where
                         tool_out.set_output(item);
                         let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out.clone()));
                         for i in record.clone() {
-                            self.output.send(i).await?;
+                            self.send(i).await?;
                         }
                     }
                     ToolRespItem::Completed(item) => {
@@ -405,7 +428,7 @@ where
                         let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
                         if !tool_resp.is_streaming() {
                             for i in record.clone() {
-                                self.output.send(i).await?;
+                                self.send(i).await?;
                             }
                         }
                         self.exec_records.append(&mut record);
@@ -421,7 +444,7 @@ where
             tool_out.set_output(tool_resp);
             let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
             for i in record.clone() {
-                self.output.send(i).await?;
+                self.send(i).await?;
             }
             self.exec_records.append(&mut record);
         } else {
@@ -445,7 +468,7 @@ where
             //持续输出
             while let Some(chunk) = s.next().await {
                 if let Some(msg) = M::stream_append(&mut records, chunk?) {
-                    self.output.send(msg).await?;
+                    self.send(msg).await?;
                 }
             }
         } else {
@@ -458,7 +481,7 @@ where
                 // 执行记录
                 self.exec_records.push(i.clone());
                 // 通知session
-                self.output.send(i).await?;
+                self.send(i).await?;
                 // 组装任务
                 let tool_out = ToolOut::new(tool.tool_call_id, tool.tool_name.clone());
                 let tool_task = self.tool_call_to_task(tool.tool_name,tool.arguments)?;
@@ -476,20 +499,20 @@ where
             if msg.is_remember() {
                 self.memory
                     .push_ext(
-                        &self.session_metadata.user_id(),
-                        &self.session_metadata.id(),
+                        &self.session_md.user_id(),
+                        self.session_md.id(),
                         msg,
                     )
                     .await?;
             }
         }
-        self.output.close();
+        self.close();
         return Ok(PlanningResult::End(None));
     }
 }
 
 #[async_trait::async_trait]
-impl<S, M> Planning for SingleAgentPlanSessionCallStream<S, M>
+impl<S, M> Planning for SingleAgentPlanSessionCallStream<S,M>
 where
     S: SessionMetadata + Clone + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
@@ -500,16 +523,6 @@ where
     async fn init(&mut self) -> anyhow::Result<PlanningResult> {
         // 初始化agent信息
         self.init_agent_info().await?;
-        //添加query到memory
-        if self.input.is_remember() {
-            self.memory
-                .push_ext(
-                    &self.session_metadata.user_id(),
-                    &self.session_metadata.id(),
-                    self.input.clone(),
-                )
-                .await?;
-        }
         //加载工具
         self.load_tools().await?;
         //加载skill
@@ -538,7 +551,7 @@ where
             self.agent_id.as_str(),
             self.debug().await
         );
-        self.output.close();
+        self.close();
     }
     fn get_context(&self) -> Context {
         self.context.clone()
@@ -547,7 +560,7 @@ where
 
 define_planning_group!(
     #[derive(Debug)]
-    pub enum SingleAgentPlan<S,M>
+    pub enum SingleAgentPlan<S, M>
     {
         // SessionCall(SingleAgentPlanSessionCall<M>),
         None(NonePlan),
@@ -603,17 +616,55 @@ where
         let agent_id = self.agent_id.clone();
 
         let memory = self.memory.clone();
-        let plan =
-            SingleAgentPlan::SessionCallStream(SingleAgentPlanSessionCallStream::<S, M>::new(
-                agent_id,
-                env,
-                self.agent_config.clone(),
-                memory,
-                info.clone(),
-                input,
-                output,
-            ));
-        Ok(plan)
+        let mut plan = SingleAgentPlanSessionCallStream::<S,M>::new(
+            env,
+            agent_id,
+            info.clone(),
+            self.agent_config.clone(),
+            memory,
+            input,
+        );
+        plan.set_output(output);
+        if let Some(map) = info.extend(){
+            plan.extend_context(map);
+        }
+        if let Some(tips) = info.additional_tips(){
+            plan.additional_session_tips(tips);
+        }
+        Ok(SingleAgentPlan::SessionCallStream(plan))
+    }
+
+    async fn on_timed(&self, env: Env, task: TimedTask) -> anyhow::Result<()> {
+        let user_input = format!("When a user's scheduled task expires, you must execute it.\nImportant: Users will not receive your output; you must send it to them via notification.\nTask Details：\n{}",task.task_content);
+        let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
+        let input = if let Some(msg) = msgs.pop() {
+            msg
+        } else {
+            return anyhow::anyhow!("[SingleAgent:on_timed] Failed to create input message").err();
+        };
+        // session必须存在，如果删了，则任务没有意义
+        let info = if let Some(s) = self.session_config.load_ext(&task.user_id, &task.session_id).await? {
+            s
+        } else {
+            return anyhow::anyhow!("[SingleAgent:on_timed] Session not found").err();
+        };
+        let memory = self.memory.clone();
+        let mut plan = SingleAgentPlanSessionCallStream::<S,M>::new(
+            env.clone(),
+            task.agent_id.clone(),
+            info.clone(),
+            self.agent_config.clone(),
+            memory,
+            input,
+        );
+        if let Some(map) = info.extend(){
+            plan.extend_context(map);
+        }
+        if let Some(tips) = info.additional_tips(){
+            plan.additional_session_tips(tips);
+        }
+        let task = Task::new(plan.get_context(),plan.id(),task.agent_id,TaskType::Plan).set_args(plan);
+        env.spawn(vec![task]).await
     }
 
     async fn exit(&self) {

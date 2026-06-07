@@ -1,6 +1,6 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use fae_agent::{ToolResponse, TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PROJECT, TASK_EXTEND_KEY_PROJECT_DIR, TASK_EXTEND_KEY_WORKSPACE};
+use fae_agent::{ToolResponse, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_PROJECT, GLOBAL_KEY_PROJECT_DIR, GLOBAL_KEY_WORKSPACE};
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::fs;
@@ -95,12 +95,12 @@ impl Tool for WriteFile {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         ];
 
-        if let Some(ws) = iden.get(TASK_EXTEND_KEY_WORKSPACE) {
-            if let Some(aid) = iden.get(TASK_EXTEND_KEY_AGENT_ID) {
+        if let Some(ws) = iden.get(GLOBAL_KEY_WORKSPACE) {
+            if let Some(aid) = iden.get(GLOBAL_KEY_AGENT_ID) {
                 allowed_dirs.push(fae_home_dir.join(ws).join(aid));
             }
         }
-        if let Some(pdir) = iden.get(TASK_EXTEND_KEY_PROJECT_DIR) {
+        if let Some(pdir) = iden.get(GLOBAL_KEY_PROJECT_DIR) {
             allowed_dirs.push(PathBuf::from(pdir));
         }
 

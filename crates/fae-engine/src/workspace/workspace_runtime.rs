@@ -1,5 +1,5 @@
 use fae_agent::{
-    Env, EnvEvent, Environment, Select, TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, Thing,
+    Env, EnvEvent, Environment, Select, GLOBAL_KEY_WORKSPACE, Task, TaskResult, Thing,
     ThingItem, ThingSelect,
 };
 
@@ -73,7 +73,7 @@ impl Environment for WorkspaceRuntime {
 
     async fn spawn(&self, mut tasks: Vec<Task>) -> anyhow::Result<()> {
         for task in &mut tasks {
-            task.set(TASK_EXTEND_KEY_WORKSPACE, self.name.clone());
+            task.set(GLOBAL_KEY_WORKSPACE, self.name.clone());
         }
         if let Some(parent) = &self.parent {
             parent.spawn(tasks).await
@@ -85,7 +85,7 @@ impl Environment for WorkspaceRuntime {
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
-        task.set(TASK_EXTEND_KEY_WORKSPACE, self.name.clone());
+        task.set(GLOBAL_KEY_WORKSPACE, self.name.clone());
         if let Some(parent) = &self.parent {
             parent.execute(task).await
         } else {

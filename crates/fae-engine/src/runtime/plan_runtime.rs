@@ -4,7 +4,7 @@ use fae_agent::error::{
 };
 use fae_agent::{
     EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select,
-    TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PLAN_ID, Task, TaskResult, TaskType, Thing,
+    GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_PLAN_ID, Task, TaskResult, TaskType, Thing,
     ThingItem, ThingSelect,
 };
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ impl PlanRuntime {
             None
         };
         plan.task
-            .set(TASK_EXTEND_KEY_AGENT_ID, plan.task.agent_id.clone());
+            .set(GLOBAL_KEY_AGENT_ID, plan.task.agent_id.clone());
         let p = Arc::new(Mutex::new(plan));
         self.push_plan(pid.clone(), p.clone()).await;
         tokio::spawn(async move {

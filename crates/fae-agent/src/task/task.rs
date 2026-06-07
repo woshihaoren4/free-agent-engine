@@ -4,11 +4,12 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
-pub const TASK_EXTEND_KEY_AGENT_ID: &str = "AGENT_ID";
-pub const TASK_EXTEND_KEY_PLAN_ID: &str = "PLAN_ID";
-pub const TASK_EXTEND_KEY_WORKSPACE: &str = "WORKSPACE";
-pub const TASK_EXTEND_KEY_PROJECT: &str = "PROJECT";
-pub const TASK_EXTEND_KEY_PROJECT_DIR: &str = "PROJECT_DIR";
+pub const GLOBAL_KEY_AGENT_ID: &str = "AGENT_ID";
+pub const GLOBAL_KEY_PLAN_ID: &str = "PLAN_ID";
+pub const GLOBAL_KEY_SESSION_ID: &str = "SESSION_ID";
+pub const GLOBAL_KEY_WORKSPACE: &str = "WORKSPACE";
+pub const GLOBAL_KEY_PROJECT: &str = "PROJECT";
+pub const GLOBAL_KEY_PROJECT_DIR: &str = "PROJECT_DIR";
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize)]

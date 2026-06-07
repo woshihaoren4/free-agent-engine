@@ -40,6 +40,18 @@ pub enum ChatMsg {
     Tool(ToolOut),
     Custom(String, String),
 }
+impl ChatMsg {
+    pub fn with_user<T: Into<String>>(
+        query: T,
+    ) -> Self {
+        Self::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(query.into())
+                .build()
+                .unwrap(),
+        )
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ToolCall {

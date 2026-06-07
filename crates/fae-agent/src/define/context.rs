@@ -1,4 +1,4 @@
-use crate::Env;
+use crate::{Env, SessionMD};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

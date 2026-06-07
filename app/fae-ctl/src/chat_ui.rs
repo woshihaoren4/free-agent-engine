@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use fae_agent::{
-    MemoryEntry, Record, SingleSessionMD, TASK_EXTEND_KEY_PROJECT_DIR, TASK_EXTEND_KEY_WORKSPACE,
+    MemoryEntry, Record, SingleSessionMD, GLOBAL_KEY_PROJECT_DIR, GLOBAL_KEY_WORKSPACE,
 };
 use fae_engine::Workspace;
 use std::io::{self, Write};
@@ -57,7 +57,7 @@ impl ChatUi {
             stdout.flush()
         };
 
-        let session_config = SingleSessionMD::default().set(TASK_EXTEND_KEY_PROJECT_DIR, ".");
+        let session_config = SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".");
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
         let mut session = match self
