@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
+use fae_agent::ToolResponse;
 
 #[derive(Debug)]
 pub struct TodoWrite {
@@ -86,7 +87,7 @@ impl Tool for TodoWrite {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let parsed_args: TodoWriteArgs = serde_json::from_str(&args)?;
 
         let mut current_todos = self.todos.write().await;
@@ -138,6 +139,6 @@ impl Tool for TodoWrite {
                 response.push_str(&format!("\nSummary: {}\n", summary));
             }
         }
-        Ok(response.trim_end().to_string())
+        Ok(ToolResponse::with_result(response.trim_end().to_string()))
     }
 }

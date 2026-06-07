@@ -1,9 +1,6 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use fae_agent::{
-    TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PROJECT, TASK_EXTEND_KEY_PROJECT_DIR,
-    TASK_EXTEND_KEY_WORKSPACE,
-};
+use fae_agent::{ToolResponse, TASK_EXTEND_KEY_AGENT_ID, TASK_EXTEND_KEY_PROJECT, TASK_EXTEND_KEY_PROJECT_DIR, TASK_EXTEND_KEY_WORKSPACE};
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::fs;
@@ -34,13 +31,13 @@ impl Tool for ReadFile {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let path = args_val["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("path is required"))?;
         let content = fs::read_to_string(path).await?;
-        Ok(content)
+        Ok(ToolResponse::with_result(content))
     }
 }
 
@@ -80,7 +77,7 @@ impl Tool for WriteFile {
         })
     }
 
-    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let path_str = args_val["path"]
             .as_str()
@@ -144,7 +141,7 @@ impl Tool for WriteFile {
         }
 
         fs::write(&final_path, content).await?;
-        Ok(format!("Successfully wrote to {}", final_path.display()))
+        Ok(ToolResponse::with_result(format!("Successfully wrote to {}", final_path.display())))
     }
 }
 
@@ -174,7 +171,7 @@ impl Tool for ListDirectory {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let path = args_val["path"]
             .as_str()
@@ -186,6 +183,6 @@ impl Tool for ListDirectory {
             result.push(entry.file_name().to_string_lossy().to_string());
         }
 
-        Ok(serde_json::to_string(&result)?)
+        Ok(ToolResponse::with_result(serde_json::to_string(&result)?))
     }
 }

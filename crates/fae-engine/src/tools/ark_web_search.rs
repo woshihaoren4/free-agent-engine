@@ -1,6 +1,7 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
 use serde_json::Value;
+use fae_agent::ToolResponse;
 
 #[derive(Debug)]
 pub struct ArkWebSearch;
@@ -80,7 +81,7 @@ impl Tool for ArkWebSearch {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let query = args_val["query"]
             .as_str()
@@ -180,7 +181,7 @@ impl Tool for ArkWebSearch {
         }
 
         let text = resp.text().await?;
-        Ok(text)
+        Ok(ToolResponse::with_result(text))
     }
 }
 

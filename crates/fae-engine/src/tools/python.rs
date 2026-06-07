@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Stdio;
 use tokio::process::Command;
+use fae_agent::ToolResponse;
+
 #[derive(Debug)]
 pub struct ExecutePython;
 
@@ -29,7 +31,7 @@ impl Tool for ExecutePython {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let script = args_val["script"]
             .as_str()
@@ -52,7 +54,7 @@ impl Tool for ExecutePython {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if output.status.success() {
-            Ok(stdout.to_string())
+            Ok(ToolResponse::with_result(stdout.to_string()))
         } else {
             Err(anyhow::anyhow!(
                 "Python script failed with exit code: {:?}\nStdout: {}\nStderr: {}",

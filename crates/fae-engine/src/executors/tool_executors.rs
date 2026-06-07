@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use fae_agent::{
-    Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest,
-};
+use fae_agent::{Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -50,7 +48,7 @@ pub trait Tool: Debug + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn arguments(&self) -> Value;
-    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<String>;
+    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse>;
 }
 
 #[async_trait]
@@ -86,7 +84,7 @@ pub struct ToolExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
+impl TaskExecutorExt<ToolRequest, ToolResponse> for ToolExecutor {
     fn desc(&self) -> String {
         "default tools executor".to_string()
     }
@@ -101,7 +99,7 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
         agent_id: String,
         user_id: String,
         req: ToolRequest,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ToolResponse> {
         let tool = self.load_tool(req.get_tool_name()).await?;
         let result = tool
             .call(
@@ -111,7 +109,10 @@ impl TaskExecutorExt<ToolRequest, String> for ToolExecutor {
             .await;
         match result {
             Ok(resp) => Ok(resp),
-            Err(e) => Ok(format!("Tool[{}] call failed. error: {}", tool.name(), e)),
+            Err(e) => {
+                let info = format!("Tool[{}] call failed. error: {}", tool.name(), e);
+                Ok(ToolResponse::with_result(info))
+            }
         }
     }
     async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {

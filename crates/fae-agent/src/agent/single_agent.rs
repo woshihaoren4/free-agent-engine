@@ -1,7 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut, ToolRequest, define_planning_group, fae_home, McpToolResult};
+use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut, ToolRequest, define_planning_group, fae_home, McpToolResult, ToolResponse, ToolRespItem};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -390,13 +390,29 @@ where
                     self.exec_records.append(&mut record);
                 }
             }
-        }else if let Some(tool_resp) = event.into_inner::<String>() {
-            tool_out.set_output(tool_resp);
-            let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
-            for i in record.clone() {
-                self.output.send(i).await?;
+        }else if let Some(mut tool_resp) = event.into_inner::<ToolResponse>() {
+            while let result = tool_resp.next().await? {
+                match result {
+                    ToolRespItem::Streaming(item) => {
+                        tool_out.set_output(item);
+                        let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out.clone()));
+                        for i in record.clone() {
+                            self.output.send(i).await?;
+                        }
+                    }
+                    ToolRespItem::Completed(item) => {
+                        tool_out.set_output(item);
+                        let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
+                        if !tool_resp.is_streaming() {
+                            for i in record.clone() {
+                                self.output.send(i).await?;
+                            }
+                        }
+                        self.exec_records.append(&mut record);
+                        break;
+                    }
+                }
             }
-            self.exec_records.append(&mut record);
         } else if event.is_success() {
             let tool_resp = format!(
                 "The tool[{}] executed successfully. msg={}",

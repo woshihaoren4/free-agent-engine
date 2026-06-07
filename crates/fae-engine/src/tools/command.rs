@@ -2,8 +2,11 @@ use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use fae_agent::ToolResponse;
 
 #[derive(Debug)]
 pub struct ExecuteCommand {
@@ -112,7 +115,7 @@ impl Tool for ExecuteCommand {
         })
     }
 
-    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<String> {
+    async fn call(&self, _iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let args_val: serde_json::Value = serde_json::from_str(&args)?;
         let cmd_str = args_val["command"]
             .as_str()
@@ -141,12 +144,14 @@ impl Tool for ExecuteCommand {
 
             if require_confirm {
                 let generated_code = self.generate_confirm_code();
-                return Ok(format!(
+                return Ok(ToolResponse::with_result(format!(
                     "Warning: You are trying to execute a dangerous command. Immediately terminate the session and ask the user for manual confirmation. After the user confirms a second time, set `confirm_code` is `{}`",
                     generated_code
-                ));
+                )));
             }
         }
+
+        let resp = ToolResponse::with_stream_chan();
 
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
@@ -162,19 +167,75 @@ impl Tool for ExecuteCommand {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
-        if output.status.success() {
-            Ok(stdout.to_string())
-        } else {
-            Err(anyhow::anyhow!(
-                "Command failed with exit code: {:?}\nStdout: {}\nStderr: {}",
-                output.status.code(),
-                stdout,
-                stderr
-            ))
-        }
+        let mut child = cmd.spawn()?;
+
+        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+        let chan = resp.clone();
+        tokio::spawn(async move {
+            let sub_chan = chan.clone();
+            let stdout_task = tokio::spawn(async move {
+                let mut stdout_output = String::new();
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(mut line)) = reader.next_line().await {
+                    line.push_str("\n");
+                    stdout_output.push_str(&line);
+                    if let Err(e) = sub_chan.streaming_push(line).await {
+                        wd_log::log_error_ln!("Failed to send stdout line: {:?}", e);
+                    }
+                }
+                stdout_output
+            });
+
+            let sub_chan = chan.clone();
+            let stderr_task = tokio::spawn(async move {
+                let mut stderr_output = String::new();
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(mut line)) = reader.next_line().await {
+                    line.push_str("\n");
+                    stderr_output.push_str(&line);
+                    if let Err(e) = sub_chan.streaming_push(line).await {
+                        wd_log::log_error_ln!("Failed to send stderr line: {:?}", e);
+                    }
+                }
+                stderr_output
+            });
+
+            let stdout_output = stdout_task.await.unwrap_or_default();
+            let stderr_output = stderr_task.await.unwrap_or_default();
+
+            let status = match child.wait().await{
+                Ok(status) => status,
+                Err(e)=>{
+                    let err = format!("Command Over error : {:?}\nStdout: {}\nStderr: {}",
+                                      e.to_string(),
+                                      stdout_output,
+                                      stderr_output);
+                    if let Err(e) = chan.error_completed_push(err).await {
+                        wd_log::log_error_ln!("Failed to send stderr output: {:?}", e);
+                    }
+                    return ;
+                }
+            };
+
+            if status.success() {
+                if let Err(e) = chan.success_completed_push(stdout_output).await {
+                    wd_log::log_error_ln!("Failed to send stdout output: {:?}", e);
+                }
+            } else {
+                let err = format!("Command failed with exit code: {:?}\nStdout: {}\nStderr: {}",
+                status.code(),
+                stdout_output,
+                stderr_output);
+                if let Err(e) = chan.error_completed_push(err).await {
+                    wd_log::log_error_ln!("Failed to send stderr output: {:?}", e);
+                }
+            }
+        });
+        Ok(resp)
     }
 }
