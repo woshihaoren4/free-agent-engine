@@ -1,7 +1,7 @@
 mod mcp_executors;
 mod model_openai_api;
 mod skills_executor;
-mod tool_executors;
+pub mod tool_executors;
 
 pub use mcp_executors::*;
 pub use model_openai_api::*;

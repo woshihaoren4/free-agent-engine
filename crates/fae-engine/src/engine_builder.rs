@@ -1,4 +1,4 @@
-use crate::WorkspaceBuilder;
+use crate::{CronRuntime, WorkspaceBuilder};
 use crate::engine::AgentsEngine;
 use crate::runtime::plan_runtime::PlanRuntime;
 use crate::runtime::task_runtime::{TaskRuntime, TaskRuntimeRef};
@@ -8,8 +8,8 @@ use fae_agent::{Env, Environment};
 impl AgentsEngine {
     pub async fn default() -> Self {
         AgentsEngine::new(TaskRuntime::default())
-            .assemble_runtime(PlanRuntime::new())
-            .await
+            .assemble_runtime(CronRuntime::new()).await
+            .assemble_runtime(PlanRuntime::new()).await
     }
     pub async fn assemble_runtime(mut self, mut layer: impl Environment + Send + 'static) -> Self {
         let env = self.runtime.as_env();

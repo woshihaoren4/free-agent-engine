@@ -1,10 +1,7 @@
 use crate::tools::{ScheduledExecution, ScheduledTask};
 use async_trait::async_trait;
 use cron::Schedule;
-use fae_agent::{
-    Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect,
-    Context
-};
+use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect, Context, ToolRequest, ToolResponse};
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;
 use std::str::FromStr;
@@ -12,6 +9,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use chrono::{DateTime, Utc};
 use wd_tools::channel::Channel;
+use wd_tools::PFErr;
+use crate::{IdenInfo, Tool};
 
 pub const CRON_RUNTIME_ID: &str = "FAE_CRON_RUNTIME";
 
@@ -61,6 +60,23 @@ impl CronRuntime {
 
     pub fn get_tool(&self) -> ScheduledExecution {
         ScheduledExecution::new(self.channel.clone())
+    }
+    pub async fn exec_tool(&self, mut task:Task) ->anyhow::Result<TaskResult>{
+        if let Some(req) = task.into_inner::<ToolRequest>() {
+            let tool = self.get_tool();
+            let iden = IdenInfo::new(task.id.clone(), task.agent_id.clone(),task.user_id.clone(),task.ctx.clone());
+            return match tool.call(iden, req.arguments).await {
+                Ok(resp) => {
+                    Ok(TaskResult::success(task.id, task.agent_id).set_data(resp))
+                }
+                Err(e) => {
+                    let info = format!("Tool[{}] call failed. error: {}", req.tool_name, e);
+                    Ok(TaskResult::success(task.id, task.agent_id).set_data(ToolResponse::with_result(info)))
+                }
+            }
+        }else{
+            return anyhow::anyhow!("[ScheduledExecution] task is not a tool request").err()
+        }
     }
 }
 
@@ -178,15 +194,26 @@ impl Environment for CronRuntime {
     }
 
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
-
-        if let Some(ref p) = self.parent {
-            p.spawn(tasks).await
-        } else {
-            Err(anyhow::anyhow!("[CronRuntime] spawn failed, no parent"))
+        let (ts, ptasks):(Vec<_>,Vec<_>) = tasks.into_iter().partition(|t|{
+            t.get_type() == &TaskType::Tool && t.exec_channel == "default"
+        });
+        if !ptasks.is_empty() {
+            if let Some(ref p) = self.parent {
+                p.spawn(ptasks).await?;
+            } else {
+                return Err(anyhow::anyhow!("[CronRuntime] spawn failed, no parent"))
+            }
         }
+        for i in ts {
+            self.exec_tool(i).await?;
+        }
+        Ok(())
     }
 
-    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
+    async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
+        if task.get_type() == &TaskType::Tool && task.exec_channel == "default"  {
+            return self.exec_tool(task).await;
+        }
         if let Some(ref p) = self.parent {
             p.execute(task).await
         } else {
