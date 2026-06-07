@@ -29,6 +29,12 @@ pub struct McpToolRequest {
     pub input_schema: Value,
 }
 impl McpToolRequest {
+    pub fn get_description(&self) -> String {
+        self.description.as_deref().unwrap_or("").to_string()
+    }
+    pub fn arguments(&self) -> &Value {
+        &self.input_schema
+    }
     pub fn format(&self) -> String {
         let desc = self.description.as_deref().unwrap_or("");
         format!(
@@ -99,6 +105,12 @@ pub enum McpToolRespContent {
 pub struct McpToolResponse {
     pub content: McpToolRespContent,
     pub isError: bool,
+}
+
+impl McpToolResponse {
+    pub fn to_string(&self) -> String {
+        serde_json::to_string(&self.content).unwrap_or(format!("{:?}",self))
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,12 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{
-    AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry,
-    NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata,
-    TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut,
-    ToolRequest, define_planning_group, fae_home,
-};
+use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, McpToolRequest, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, TASK_EXTEND_KEY_WORKSPACE, Task, TaskResult, TaskType, ThingItem, ThingSelect, ToolOut, ToolRequest, define_planning_group, fae_home, McpToolResult};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -62,7 +57,7 @@ pub struct SingleAgentPlanSessionCallStream<S, M> {
     //工具描述,channel__tool_name, desc,args
     tools: HashMap<String, (String, Value)>,
     //mcp, 渠道：tool name, tool detail
-    mcp_tools: Vec<McpToolRequest>,
+    mcp_tools: Vec<(String, McpToolRequest)>,
     //执行上下文
     context: Context,
 }
@@ -193,6 +188,16 @@ where
                     .build()?,
             }))
         }
+        // 添加mcp工具
+        for (_c, tool) in self.mcp_tools.iter() {
+            tools.push(ChatCompletionTools::Function(ChatCompletionTool {
+                function: FunctionObjectArgs::default()
+                    .name(tool.name.clone())
+                    .description(tool.get_description())
+                    .parameters(tool.arguments().clone())
+                    .build()?,
+            }))
+        }
         req.tools(tools);
 
         Ok(req.build()?)
@@ -259,27 +264,27 @@ where
         for mcp_server in mcp_servers {
             let things = self
                 .env
-                .query(ThingSelect::Mcp(mcp_server.channel, mcp_server.name).into())
+                .query(ThingSelect::Mcp(mcp_server.channel.clone(), mcp_server.name.clone()).into())
                 .await?;
             for thing in things {
                 for item in thing.items {
                     if let ThingItem::Mcp(tools) = item {
                         for i in tools {
-                            self.mcp_tools.push(i);
+                            self.mcp_tools.push((mcp_server.channel.clone(), i));
                         }
                     }
                 }
             }
         }
         // 添加到prompt
-        let mut info = "\n---\n## MCP Tools\nYou have the mcp tools, which you can call and use as needed. If you want to invoke an MCP tool, simply call it as your tool.".to_string();
+        let mut info = "\n---\n## MCP Metadata".to_string();
         info.push_str("\nMCP configuration path = `$FAE_HOME/mcp/mcp_list.json`.**But you can not use them.**");
         info.push_str("\nThe MCP name you can use in path：$AGENT_CONFIG_PATH.mcp_servers.you can enable mcp name to the file。 format:[{\"name\":\"mcp_name\"}].");
-        info.push_str("\n<mcp_tools>");
-        for t in self.mcp_tools.iter() {
-            info.push_str(t.format().as_str());
-        }
-        info.push_str("\n</mcp_tools>");
+        // info.push_str("\n<mcp_tools>");
+        // for t in self.mcp_tools.iter() {
+        //     info.push_str(t.1.format().as_str());
+        // }
+        // info.push_str("\n</mcp_tools>");
         self.agent_info.push_str(&info);
         Ok(())
     }
@@ -325,6 +330,32 @@ where
             ("default".to_string(), tool_name.to_string())
         }
     }
+    pub fn parse_mcp_info(&self,tool_name:String)->anyhow::Result<(String,String)>{
+        for i in self.mcp_tools.iter(){
+            if i.1.name == tool_name{
+                return Ok((i.0.clone(), tool_name));
+            }
+        }
+        anyhow::anyhow!("[SingleAgent:{}] unknown tool: {:?}", self.agent_id, tool_name).err()
+    }
+    pub fn tool_call_to_task(&self,tool_name:String,arguments:String) -> anyhow::Result<Task>{
+        let is_tool = self.tools.get(tool_name.as_str()).is_some();
+        let (channel, name) = if is_tool {
+            Self::parse_tool_channel(tool_name.as_str())
+        }else{
+            self.parse_mcp_info(tool_name)?
+        };
+        let tool_req = ToolRequest::new(name, arguments);
+        let mut task = Task::with_content(self.context.clone())
+            .set_agent_id(self.agent_id.clone())
+            .set_type(TaskType::Tool)
+            .set_channel(channel)
+            .set_args(tool_req);
+        if !is_tool {
+            task = task.set_type(TaskType::Mcp);
+        }
+        Ok(task)
+    }
 
     // 处理工具执行结果
     pub async fn handle_tool_result(
@@ -332,7 +363,34 @@ where
         mut tool_out: ToolOut,
         mut event: TaskResult,
     ) -> anyhow::Result<PlanningResult> {
-        if let Some(tool_resp) = event.into_inner::<String>() {
+        if let Some(resp) = event.into_inner::<McpToolResult>(){
+            match resp {
+                McpToolResult::Resp(resp) => {
+                    tool_out.set_output(resp);
+                    let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
+                    for i in record.clone() {
+                        self.output.send(i).await?;
+                    }
+                    self.exec_records.append(&mut record);
+                }
+                McpToolResult::Stream(stream) => {
+                    let mut output = String::new();
+                    while let Ok(resp) = stream.channel.recv().await {
+                        output.push_str(&resp.to_string());
+                        output.push_str("\n");
+                        let mut tool_out = tool_out.clone();
+                        tool_out.set_output(resp.to_string());
+                        let record = M::from_openai_msg(ChatMsg::Tool(tool_out));
+                        for i in record {
+                            self.output.send(i).await?;
+                        }
+                    }
+                    tool_out.set_output(output);
+                    let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
+                    self.exec_records.append(&mut record);
+                }
+            }
+        }else if let Some(tool_resp) = event.into_inner::<String>() {
             tool_out.set_output(tool_resp);
             let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out));
             for i in record.clone() {
@@ -381,24 +439,13 @@ where
         let mut tool_tasks = Vec::new();
         for i in records {
             if let Some(tool) = i.try_to_tool_call() {
-                wd_log::log_info_ln!("tool call: {:?}", tool);
                 // 执行记录
                 self.exec_records.push(i.clone());
                 // 通知session
                 self.output.send(i).await?;
                 // 组装任务
                 let tool_out = ToolOut::new(tool.tool_call_id, tool.tool_name.clone());
-                let (channel, name) = Self::parse_tool_channel(tool.tool_name.as_str());
-                let tool_req = ToolRequest::new(name, tool.arguments);
-                let tool_task = Task::new(
-                    self.context.clone(),
-                    self.agent_id.clone(),
-                    self.agent_id.clone(),
-                    TaskType::Tool,
-                )
-                .set_channel(channel)
-                .set_args(tool_req);
-                // 记录
+                let tool_task = self.tool_call_to_task(tool.tool_name,tool.arguments)?;
                 self.doing.insert(tool_task.get_id().to_string(), tool_out);
                 tool_tasks.push(tool_task);
             } else {

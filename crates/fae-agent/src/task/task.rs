@@ -120,6 +120,9 @@ impl Task {
             exec_channel: "default".into(),
         }
     }
+    pub fn with_content(ctx:Context)->Self{
+        Self::new(ctx, wd_tools::uuid::v4(), "", TaskType::None)
+    }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
         self.id = id.into();
         self
