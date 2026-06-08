@@ -47,6 +47,7 @@ pub struct SingleAgentPlanSessionCallStream<S,M> {
     env: Env,
     output: Option<SenderMessageStream<M>>,
     output_title:String,
+    output_content:String,
     memory: Arc<dyn MemoryMessageExt<M> + Send + Sync + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
     exec_records: Vec<M>,
@@ -91,6 +92,7 @@ where
             exec_records,
             output: None,
             output_title: String::new(),
+            output_content: String::new(),
             doing: HashMap::new(),
             tools: HashMap::new(),
             mcp_tools: Vec::new(),
@@ -115,15 +117,25 @@ where
         }else{
             let title = msg.title();
             if title != self.output_title{
-                println!("\n{}:\n", self.output_title);
+                if !self.output_title.is_empty() {
+                    let content = self.output_content.replace("\n","\r\n");
+                    println!("\r\n---[{}:{}]-> {}:\r\n{}\r\n",self.agent_id,self.session_md.id(), self.output_title,content);
+                }
+                self.output_title = title;
+                self.output_content = String::new();
             }
-            print!("{}", msg.content());
+            self.output_content.push_str(msg.content());
         }
         Ok(())
     }
     pub fn close(&self) {
         if let Some(ref output) = self.output{
             output.close();
+        }else{
+            if !self.output_content.is_empty() {
+                let content = self.output_content.replace("\n","\r\n");
+                println!("\r\n---[{}:{}]-> {}:\r\n{}\r\n",self.agent_id,self.session_md.id(), self.output_title,content);
+            }
         }
     }
     fn get_timestamp() -> u64 {
@@ -371,6 +383,7 @@ where
         let tool_req = ToolRequest::new(name, arguments);
         let mut task = Task::with_content(self.context.clone())
             .set_agent_id(self.agent_id.clone())
+            .set_user_id(self.session_md.user_id().to_string())
             .set_type(TaskType::Tool)
             .set_channel(channel)
             .set_args(tool_req);
@@ -663,6 +676,7 @@ where
         if let Some(tips) = info.additional_tips(){
             plan.additional_session_tips(tips);
         }
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
         let task = Task::new(plan.get_context(),plan.id(),task.agent_id,TaskType::Plan).set_args(plan);
         env.spawn(vec![task]).await
     }

@@ -1,8 +1,13 @@
+use std::str::FromStr;
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use fae_agent::{ToolResponse, GLOBAL_KEY_SESSION_ID};
+use cron::Schedule;
+use fae_agent::{ToolResponse, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID};
 use serde_json::Value;
 use wd_tools::channel::Channel;
+use wd_tools::PFErr;
+
+pub const SCHEDULED_EXECUTION_TOOL_NAME: &str = "scheduled_execution";
 
 #[derive(Debug, Clone)]
 pub struct ScheduledTask {
@@ -29,7 +34,7 @@ impl ScheduledExecution {
 #[async_trait]
 impl Tool for ScheduledExecution {
     fn name(&self) -> &str {
-        "scheduled_execution"
+        SCHEDULED_EXECUTION_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -63,6 +68,10 @@ impl Tool for ScheduledExecution {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("cron_expression is required"))?
             .to_string();
+        //校验表达式是否合法
+        if let Err(e) = Schedule::from_str(&cron_expression){
+            return anyhow::anyhow!("Invalid cron expression: {}", e).err()
+        }
         let execute_once = args_val["execute_once"]
             .as_bool()
             .unwrap_or(true);
@@ -71,17 +80,18 @@ impl Tool for ScheduledExecution {
             .ok_or_else(|| anyhow::anyhow!("task_content is required"))?
             .to_string();
         let session_id = iden.get(GLOBAL_KEY_SESSION_ID).ok_or_else(|| anyhow::anyhow!("session_id is required"))?.to_string();
+        let agent_id = iden.get(GLOBAL_KEY_AGENT_ID).unwrap_or(iden.get_agent_id().to_string());
+
 
         let task = ScheduledTask {
             cron_expression,
             execute_once,
             task_content,
-            agent_id: iden.get_agent_id().to_string(),
+            agent_id,
             plan_id: iden.get_task_id().to_string(),
             session_id,
             user_id: iden.get_user_id().to_string(),
         };
-
         self.channel.send(task).await.map_err(|e| anyhow::anyhow!("Failed to submit scheduled task: {}", e))?;
 
         Ok(ToolResponse::with_result("Scheduled task submitted successfully.".to_string()))

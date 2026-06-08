@@ -206,6 +206,22 @@ impl Task {
             None
         }
     }
+    pub fn deref_mut_args<T:Any,Out>(&mut self,handle:impl FnOnce(Option<&mut T>)->Out) -> Out {
+        if let Some(ref mut args) = self.args{
+            let opt = (**args).downcast_mut::<T>();
+            handle(opt)
+        } else {
+            handle(None)
+        }
+    }
+    pub fn deref_args<T:Any,Out>(&self,handle:impl FnOnce(Option<&T>)->Out) -> Out {
+        if let Some(ref args) = self.args{
+            let opt = (**args).downcast_ref::<T>();
+            handle(opt)
+        } else {
+            handle(None)
+        }
+    }
 }
 
 #[derive(Debug)]

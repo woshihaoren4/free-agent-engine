@@ -31,6 +31,27 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    pub(crate) async fn push_event(&self,agent_id:String,event:EnvEvent) {
+        let agent = match self.get_agent(agent_id.as_str()).await {
+            Ok(agent) => agent,
+            Err(e) => {
+                wd_log::log_error_ln!(
+                                    "[Workspace::{}] load agent: {} failed: {:?}",
+                                    self.name,
+                                    agent_id,
+                                    e
+                                );
+                return;
+            }
+        };
+        if let Err(e) = agent.on_env(self.env.clone(), event).await {
+            wd_log::log_error_ln!(
+                                "[Workspace::{}] on_env failed: {:?}",
+                                self.name,
+                                e
+                            );
+        }
+    }
     //启动工作空间，监听环境变化
     pub(crate) fn start_watch_env(&self) {
         let this = self.clone();
@@ -59,25 +80,11 @@ impl Workspace {
                     EnvEvent::TaskResult(ref result) => {
                         // 分发任务执行结果给智能体
                         let aid = result.agent_id.clone();
-                        let agent = match this.get_agent(aid.as_str()).await {
-                            Ok(agent) => agent,
-                            Err(e) => {
-                                wd_log::log_error_ln!(
-                                    "[Workspace::{}] load agent: {} failed: {:?}",
-                                    this.name,
-                                    aid,
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-                        if let Err(e) = agent.on_env(this.env.clone(), event).await {
-                            wd_log::log_error_ln!(
-                                "[Workspace::{}] on_env failed: {:?}",
-                                this.name,
-                                e
-                            );
-                        }
+                        this.push_event(aid,event).await;
+                    }
+                    EnvEvent::Timed(ref task) => {
+                        let aid = task.agent_id.clone();
+                        this.push_event(aid,event).await;
                     }
                     _ => {
                         // 其他事件，不处理

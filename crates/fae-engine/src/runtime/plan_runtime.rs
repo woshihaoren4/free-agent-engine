@@ -236,6 +236,7 @@ impl PlanRuntime {
                             //下一步执行成功，不移除计划
                             remove_id = String::new();
                         }
+
                     } else {
                         Self::abort_plan_by_error(
                             TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL,
