@@ -11,6 +11,7 @@ use fae_agent::{
 use fae_engine::Workspace;
 use std::io::{self, Write};
 use std::pin::Pin;
+use crossterm::style::Stylize;
 use tokio_stream::StreamExt;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
@@ -78,6 +79,7 @@ impl ChatUi {
             None;
         let mut current_title = String::new();
         let mut spinner_tick: usize = 0;
+        let mut user_input = String::new();
 
         // Print welcome header
         clear_line()?;
@@ -131,9 +133,9 @@ impl ChatUi {
                         KeyCode::Enter => {
                             let val = input.value().to_string();
                             let val = val.trim();
-                            if val == "/exit" {
+                            if val.starts_with("/exit") {
                                 return Ok(());
-                            } else if val == "/reset" {
+                            } else if val.starts_with("/reset") {
                                 if stream_active {
                                     stream_active = false;
                                     current_stream = None;
@@ -156,27 +158,32 @@ impl ChatUi {
                                     print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
                                 }
                                 input.reset();
-                            } else if !val.is_empty() {
-                                if !stream_active {
-                                    clear_line()?;
-                                    Self::print_user_message(val)?;
-
-                                    let msg = Record::from_user_input(val);
-                                    match session.call_stream(msg).await {
-                                        Ok(s) => {
-                                            current_stream = Some(Pin::from(s));
-                                            stream_active = true;
-                                            current_title = "Waiting".to_string();
+                            }else if !val.is_empty(){
+                                println!("--->{:?}\r\n",key);
+                                let is_header = user_input.is_empty();
+                                Self::print_user_message(val,is_header)?;
+                                user_input.push_str(val);
+                                input.reset();
+                                clear_line()?;
+                                if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER) {
+                                    if !stream_active {
+                                        // Self::print_user_message(val)?;
+                                        let msg = Record::from_user_input(user_input.as_str());
+                                        match session.call_stream(msg).await {
+                                            Ok(s) => {
+                                                current_stream = Some(Pin::from(s));
+                                                stream_active = true;
+                                                current_title = "Waiting".to_string();
+                                            }
+                                            Err(e) => {
+                                                print_text(&format!("Failed to send chat: {:?}\n", e))?;
+                                            }
                                         }
-                                        Err(e) => {
-                                            print_text(&format!("Failed to send chat: {:?}\n", e))?;
-                                        }
+                                        input.reset();
                                     }
-                                    input.reset();
                                 }
                             }
                         }
-
                         _ => {
                             input.handle_event(&Event::Key(key));
                         }
@@ -282,14 +289,14 @@ impl ChatUi {
         stdout.flush()
     }
 
-    fn print_user_message(val: &str) -> io::Result<()> {
-        let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
-        let separator = "─".repeat(cols);
-
+    fn print_user_message(val: &str, is_header:bool) -> io::Result<()> {
         let mut stdout = io::stdout();
-        queue!(
+        if is_header {
+            let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
+            let separator = "─".repeat(cols);
+            queue!(
             stdout,
-            Clear(ClearType::FromCursorDown),
+            MoveToColumn(0),
             SetForegroundColor(Color::DarkGrey),
             Print(format!("{}\r\n", separator)),
             SetForegroundColor(Color::White),
@@ -299,9 +306,23 @@ impl ChatUi {
             SetForegroundColor(Color::White),
             Print(format!("{}", val.replace('\n', "\r\n"))),
             ResetColor,
-            Print("\n"),
-            crossterm::cursor::MoveUp(1)
+            Print("\r\n"),
+            // crossterm::cursor::MoveUp(1)
         )?;
+        }else{
+            queue!(
+            stdout,
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            SetAttribute(Attribute::Bold),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::White),
+            Print(format!("{}", val.replace('\n', "\r\n"))),
+            ResetColor,
+            Print("\r\n"),
+            // crossterm::cursor::MoveUp(1)
+        )?;
+        }
         stdout.flush()
     }
 }
