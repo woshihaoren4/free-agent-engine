@@ -1,5 +1,8 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
+use crate::{
+    Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl,
+    SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
+};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;

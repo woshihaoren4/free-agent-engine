@@ -109,7 +109,7 @@ pub struct McpToolResponse {
 
 impl McpToolResponse {
     pub fn to_string(&self) -> String {
-        serde_json::to_string(&self.content).unwrap_or(format!("{:?}",self))
+        serde_json::to_string(&self.content).unwrap_or(format!("{:?}", self))
     }
 }
 

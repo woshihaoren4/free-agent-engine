@@ -5,7 +5,7 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
-use fae_agent::{MemoryEntry, ModelCallConfig, Record, SingleSessionMD, GLOBAL_KEY_PROJECT_DIR};
+use fae_agent::{GLOBAL_KEY_PROJECT_DIR, MemoryEntry, ModelCallConfig, Record, SingleSessionMD};
 use fae_engine::Workspace;
 use std::io::{self, Write};
 use std::pin::Pin;
@@ -21,7 +21,11 @@ pub struct ChatUi {
 impl ChatUi {
     pub fn new(ws: Workspace, agent_name: String) -> Self {
         let model_name = ModelCallConfig::default();
-        Self { ws, agent_name, model_name }
+        Self {
+            ws,
+            agent_name,
+            model_name,
+        }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
@@ -36,7 +40,8 @@ impl ChatUi {
         disable_raw_mode()?;
         println!("\r");
 
-        res?;Ok(())
+        res?;
+        Ok(())
     }
 
     async fn run_app(&mut self) -> io::Result<()> {
@@ -87,7 +92,9 @@ impl ChatUi {
         // Print welcome header
         clear_line()?;
         self.print_welcome_banner()?;
-        print_text("Instructions for Use:\n - '/exit' to quit.\n - '/reset' to restart session.\n - 'ctrl+j' line break.\n\n")?;
+        print_text(
+            "Instructions for Use:\n - '/exit' to quit.\n - '/reset' to restart session.\n - 'ctrl+j' line break.\n - 'ctrl+c' to abort session or quit cli.\n\n",
+        )?;
 
         loop {
             Self::redraw_prompt(&input, stream_active, spinner_tick, &current_title)?;
@@ -281,7 +288,10 @@ impl ChatUi {
 
         // Banner content lines (without borders).
         let title = format!(">_ Free Agent Engine CLI (v{})", version);
-        let model_line = format!("agent: {}    model: {}", &self.agent_name, &self.model_name.model);
+        let model_line = format!(
+            "agent: {}    model: {}",
+            &self.agent_name, &self.model_name.model
+        );
         let dir_line = format!("directory: {}", directory);
 
         let lines = [title.as_str(), "", model_line.as_str(), dir_line.as_str()];

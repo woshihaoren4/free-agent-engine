@@ -1,12 +1,12 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
+use fae_agent::ToolResponse;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use fae_agent::ToolResponse;
 
 #[derive(Debug)]
 pub struct ExecuteCommand {
@@ -208,17 +208,19 @@ impl Tool for ExecuteCommand {
             let stdout_output = stdout_task.await.unwrap_or_default();
             let stderr_output = stderr_task.await.unwrap_or_default();
 
-            let status = match child.wait().await{
+            let status = match child.wait().await {
                 Ok(status) => status,
-                Err(e)=>{
-                    let err = format!("Command Over error : {:?}\nStdout: {}\nStderr: {}",
-                                      e.to_string(),
-                                      stdout_output,
-                                      stderr_output);
+                Err(e) => {
+                    let err = format!(
+                        "Command Over error : {:?}\nStdout: {}\nStderr: {}",
+                        e.to_string(),
+                        stdout_output,
+                        stderr_output
+                    );
                     if let Err(e) = chan.error_completed_push(err).await {
                         wd_log::log_error_ln!("Failed to send stderr output: {:?}", e);
                     }
-                    return ;
+                    return;
                 }
             };
 
@@ -227,10 +229,12 @@ impl Tool for ExecuteCommand {
                     wd_log::log_error_ln!("Failed to send stdout output: {:?}", e);
                 }
             } else {
-                let err = format!("Command failed with exit code: {:?}\nStdout: {}\nStderr: {}",
-                status.code(),
-                stdout_output,
-                stderr_output);
+                let err = format!(
+                    "Command failed with exit code: {:?}\nStdout: {}\nStderr: {}",
+                    status.code(),
+                    stdout_output,
+                    stderr_output
+                );
                 if let Err(e) = chan.error_completed_push(err).await {
                     wd_log::log_error_ln!("Failed to send stderr output: {:?}", e);
                 }

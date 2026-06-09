@@ -1,4 +1,4 @@
-use fae_agent::{Select, Task, TaskExecutor, TaskResult, Thing, ThingSelect};
+use fae_agent::{Executor, Select, Task, TaskResult, Thing, ThingSelect};
 use wd_tools::PFErr;
 
 #[derive(Debug)]
@@ -11,7 +11,7 @@ impl Default for SkillsExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutor for SkillsExecutor {
+impl Executor for SkillsExecutor {
     fn desc(&self) -> String {
         "skill loader".to_string()
     }

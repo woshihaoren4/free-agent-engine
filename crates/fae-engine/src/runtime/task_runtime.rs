@@ -1,118 +1,205 @@
-use crate::executors::ModelOpenAIApiExecutor;
-use crate::{McpExecutor, SkillsExecutor, ToolExecutor};
+use crate::{IdenInfo, Tool};
+use async_trait::async_trait;
 use fae_agent::{
-    Env, EnvEvent, Environment, Select, Task, TaskExecutor, TaskExecutorExt, TaskExecutorExtImpl,
-    TaskResult, TaskType, Thing, ThingItem, ThingSelect,
+    Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect,
+    ToolRequest, ToolResponse,
 };
-use std::any::{Any, TypeId};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
-use std::fmt::Debug;
-use std::ops::Deref;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use wd_tools::PFErr;
-use wd_tools::channel::Channel;
 
-const DEFAULT_TASK_RUNTIME_ID: &str = "FAE_DEFAULT_TASK_EXECUTOR";
-const DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT: usize = 1024;
+pub const TASK_RUNTIME_ID: &str = "FAE_TASK_RUNTIME";
+pub const TASK_TOOL_NAME: &str = "task";
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub struct TaskCreate {
+    pub from_agent: AgentInfo,
+    pub to_agent: AgentInfo,
+    pub content: String,
+}
+#[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub struct TaskExecuting {
+    pub timestamp: u64,
+}
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Create(TaskCreate),
+    //执行中
+    Executing(TaskExecuting),
+    //执行完成
+    Completed(String),
+    //执行完成
+    Failed(String),
+}
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub struct Task {
+    pub task_id: String,
+    pub content: TaskStatus,
+}
+
+#[derive(Debug)]
+pub struct TaskTool {
+    pub tasks: Arc<RwLock<HashMap<String, Task>>>,
+}
+
+impl TaskTool {
+    pub fn new(tasks: Arc<RwLock<HashMap<String, Task>>>) -> Self {
+        Self { tasks }
+    }
+}
+
+#[async_trait]
+impl Tool for TaskTool {
+    fn name(&self) -> &str {
+        TASK_TOOL_NAME
+    }
+
+    fn description(&self) -> &str {
+        // 支持发布任务，执行任务，执行完成，执行失败，四种更新方式。
+        "Manage task lifecycle. Supports publishing a task, marking it as executing, completed, or failed."
+    }
+
+    fn arguments(&self) -> Value {
+        //对应TaskStatus
+        serde_json::json!({
+            "type": "object",
+            "description": "Update a task status. Exactly one of the following fields must be provided, corresponding to the task lifecycle.",
+            "properties": {
+                "create": {
+                    "type": "object",
+                    "description": "Publish a new task.",
+                    "properties": {
+                        "from_agent": {
+                            "type": "object",
+                            "description": "The agent that creates the task.",
+                            "properties": {
+                                "agent_id": {"type": "string"},
+                                "session_id": {"type": "string"},
+                                "user_id": {"type": "string"}
+                            },
+                            "required": ["agent_id", "session_id", "user_id"]
+                        },
+                        "to_agent": {
+                            "type": "object",
+                            "description": "The agent that will execute the task.",
+                            "properties": {
+                                "agent_id": {"type": "string"},
+                                "session_id": {"type": "string"},
+                                "user_id": {"type": "string"}
+                            },
+                            "required": ["agent_id", "session_id", "user_id"]
+                        },
+                        "content": {"type": "string", "description": "The task content."}
+                    },
+                    "required": ["from_agent", "to_agent", "content"]
+                },
+                "executing": {
+                    "type": "object",
+                    "description": "Mark the task as executing.",
+                    "properties": {
+                        "timestamp": {"type": "integer", "description": "The timestamp when the task starts executing."}
+                    },
+                    "required": ["timestamp"]
+                },
+                "completed": {
+                    "type": "string",
+                    "description": "Mark the task as completed with the result."
+                },
+                "failed": {
+                    "type": "string",
+                    "description": "Mark the task as failed with the reason."
+                }
+            }
+        })
+    }
+
+    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
+        let task_id = iden.task_id;
+        let content: TaskStatus = serde_json::from_str(&args)
+            .map_err(|e| anyhow::anyhow!("[TaskTool] invalid arguments: {}", e))?;
+        let task = Task {
+            task_id: task_id.clone(),
+            content,
+        };
+        // 插入 tasks 中
+        let mut tasks = self.tasks.write().await;
+        tasks.insert(task_id.clone(), task);
+        Ok(ToolResponse::with_result(format!(
+            "Task[{}] updated successfully.",
+            task_id
+        )))
+    }
+}
 
 #[derive(Debug)]
 pub struct TaskRuntime {
-    events: Channel<EnvEvent>,
+    pub tasks: Arc<RwLock<HashMap<String, Task>>>,
     parent: Option<Env>,
-    executors: HashMap<String, Arc<dyn TaskExecutor + Send + 'static>>,
 }
 
 impl TaskRuntime {
     pub fn new() -> Self {
-        let events = Channel::with_cap(DEFAULT_TASK_RUNTIME_EVENT_CHANNEL_COUNT);
         Self {
-            events,
+            tasks: Arc::new(RwLock::new(HashMap::new())),
             parent: None,
-            executors: HashMap::new(),
         }
     }
-    pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
-        format!("{}-{}", task_type, channel)
+    pub fn get_tool(&self) -> TaskTool {
+        TaskTool::new(self.tasks.clone())
     }
-    pub fn raw_register_executor(
-        &mut self,
-        task_type: TaskType,
-        executor: Arc<dyn TaskExecutor + Send + 'static>,
-    ) {
-        let channel = executor.channel();
-        self.executors
-            .insert(self.generate_executor_key(&task_type, &channel), executor);
-    }
-    pub fn register_executor<T: TaskExecutor + Send + 'static>(
-        &mut self,
-        task_type: TaskType,
-        executor: T,
-    ) -> &mut Self {
-        self.raw_register_executor(task_type, Arc::new(executor));
-        self
-    }
-    pub fn register_executor_ext<T, In, Out>(
-        &mut self,
-        task_type: TaskType,
-        task_exec_ext: T,
-    ) -> &mut Self
-    where
-        T: TaskExecutorExt<In, Out> + Send + 'static,
-        In: Debug + Send + Sync + 'static,
-        Out: Debug + Any + Send + Sync + 'static,
-    {
-        let executor = TaskExecutorExtImpl::new(task_exec_ext);
-        self.register_executor(task_type, executor)
-    }
-    pub fn get_executor(
-        &self,
-        task_type: &TaskType,
-        channel: &str,
-    ) -> Option<Arc<dyn TaskExecutor + Send>> {
-        self.executors
-            .get(&self.generate_executor_key(task_type, channel))
-            .cloned()
-    }
-    pub async fn exec(executor: Arc<dyn TaskExecutor + Send>, task: Task) -> TaskResult {
-        let task_id = task.id.clone();
-        let agent_id = task.agent_id.clone();
-        match executor.execute(task).await {
-            Ok(result) => result,
-            Err(err) => TaskResult::new(
-                fae_agent::error::TASK_ERROR_CODE_UNKNOWN,
-                format!("{:?}", err),
-                task_id,
-                agent_id,
-            ),
+    pub async fn exec_tool(&self, mut task: fae_agent::Task) -> anyhow::Result<TaskResult> {
+        if let Some(req) = task.into_inner::<ToolRequest>() {
+            let tool = self.get_tool();
+            let iden = IdenInfo::new(
+                task.id.clone(),
+                task.agent_id.clone(),
+                task.user_id.clone(),
+                task.ctx.clone(),
+            );
+            match tool.call(iden, req.arguments).await {
+                Ok(resp) => Ok(TaskResult::success(task.id, task.agent_id).set_data(resp)),
+                Err(e) => {
+                    let info = format!("Tool[{}] call failed. error: {}", req.tool_name, e);
+                    Ok(TaskResult::success(task.id, task.agent_id)
+                        .set_data(ToolResponse::with_result(info)))
+                }
+            }
+        } else {
+            anyhow::anyhow!("[TaskRuntime] task is not a tool request").err()
         }
     }
-    pub fn into_self(&mut self) -> Self {
-        let events = std::mem::replace(&mut self.events, Channel::with_cap(1));
-        let parent = std::mem::replace(&mut self.parent, None);
-        let executors = std::mem::take(&mut self.executors);
-        Self {
-            events,
-            parent,
-            executors,
-        }
-    }
-}
-
-impl Default for TaskRuntime {
-    fn default() -> Self {
-        Self::new()
-            .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
-            .register_executor_ext(TaskType::Tool, ToolExecutor::default())
-            .register_executor(TaskType::Skill, SkillsExecutor::default())
-            .register_executor(TaskType::Mcp, McpExecutor::default())
-            .into_self()
+    pub fn is_task_tool_task(task: &fae_agent::Task) -> bool {
+        task.get_type() == &TaskType::Tool
+            && task.get_exec_channel() == "default"
+            && task.deref_args::<ToolRequest, bool>(|x| {
+                if let Some(r) = x {
+                    r.tool_name.as_str() == TASK_TOOL_NAME
+                } else {
+                    false
+                }
+            })
     }
 }
 
 #[async_trait::async_trait]
 impl Environment for TaskRuntime {
     fn id(&self) -> &'static str {
-        DEFAULT_TASK_RUNTIME_ID
+        TASK_RUNTIME_ID
     }
 
     async fn register_parent_env(&mut self, env: Env) {
@@ -120,169 +207,58 @@ impl Environment for TaskRuntime {
     }
 
     async fn watch(&self) -> anyhow::Result<EnvEvent> {
-        let self_fut = self.events.recv();
         if let Some(ref p) = self.parent {
-            let parent_fut = p.watch();
-            let event = tokio::select! {
-                e = self_fut => e?,
-                e = parent_fut => e?,
-            };
-            Ok(event)
+            p.watch().await
         } else {
-            let e = self_fut.await?;
-            Ok(e)
+            std::future::pending().await
         }
     }
 
     async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
-        //为空时，查询所有任务执行器
-        if select.select.is_none() {
-            let items = self
-                .executors
-                .iter()
-                .map(|(_, e)| ThingItem::Executor(e.desc()))
-                .collect();
-            let thing = Thing::new(self.id().to_string())
-                .set_items(items)
-                .into_self();
-            return Ok(vec![thing]);
-        }
-        //根据任务类型和渠道查询
-        if let ThingSelect::Executor(ref task_type, ref channel) = select.select {
-            if let Some(e) = self
-                .executors
-                .get(&self.generate_executor_key(&task_type, channel))
-            {
+        if let ThingSelect::Tool(chan, name) = &select.select {
+            if name == TASK_TOOL_NAME && chan == "default" {
+                let tool = self.get_tool();
                 return Ok(vec![
                     Thing::new(self.id().to_string())
-                        .add_item(ThingItem::Executor(e.desc()))
+                        .add_item(ThingItem::Tool(
+                            tool.description().to_string(),
+                            tool.arguments(),
+                        ))
                         .into_self(),
                 ]);
             }
         }
-        //根据工具名称查询
-        if let ThingSelect::Tool(ref channel, ref _tool_name) = select.select {
-            if let Some(e) = self
-                .executors
-                .get(&self.generate_executor_key(&TaskType::Tool, channel))
-            {
-                return e.query(select).await;
-            }
+        if let Some(ref p) = self.parent {
+            p.query(select).await
+        } else {
+            Ok(Vec::new())
         }
-        //查询skill
-        if let ThingSelect::Skill(ref channel, ref _name, ref _dir) = select.select {
-            if let Some(e) = self
-                .executors
-                .get(&self.generate_executor_key(&TaskType::Skill, channel))
-            {
-                return e.query(select).await;
-            }
-        }
-        //查询MCP服务器
-        if let ThingSelect::Mcp(ref channel, ref _name) = select.select {
-            if let Some(e) = self
-                .executors
-                .get(&self.generate_executor_key(&TaskType::Mcp, channel))
-            {
-                return e.query(select).await;
-            }
-        }
-        //如果父环境也没有，就返回空
-        if let Some(e) = self.parent.as_ref() {
-            return e.query(select).await;
-        }
-        Ok(vec![])
     }
 
-    async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
-        //先检查
-        for i in &tasks {
-            let list = self
-                .query(
-                    ThingSelect::Executor(i.get_type().clone(), i.get_exec_channel().to_string())
-                        .into(),
-                )
-                .await?;
-            if list.is_empty() {
-                return anyhow::anyhow!(
-                    "[TaskRuntime:spawn]task executor not found: {:?}",
-                    i.r#type
-                )
-                .err();
+    async fn spawn(&self, tasks: Vec<fae_agent::Task>) -> anyhow::Result<()> {
+        let (ts, ptasks): (Vec<_>, Vec<_>) =
+            tasks.into_iter().partition(|t| Self::is_task_tool_task(t));
+        if !ptasks.is_empty() {
+            if let Some(ref p) = self.parent {
+                p.spawn(ptasks).await?;
+            } else {
+                return anyhow::anyhow!("[TaskRuntime] spawn failed, no parent").err();
             }
         }
-        //后执行
-        for task in tasks {
-            if let Some(e) = self.get_executor(task.get_type(), task.get_exec_channel()) {
-                //优先自己执行
-                let events_channel = self.events.clone();
-                let executor = e.clone();
-                tokio::spawn(async move {
-                    let result = Self::exec(executor, task).await;
-                    if let Err(e) = events_channel.send(EnvEvent::TaskResult(result)).await {
-                        wd_log::log_error_ln!(
-                            "[TaskRuntime:spawn] send task result error: {:?}",
-                            e
-                        );
-                    };
-                });
-            } else if let Some(e) = self.parent.as_ref() {
-                //再委托给父环境
-                e.spawn(vec![task]).await?;
-            } else {
-                //如果父环境也没有，就报错
-                return anyhow::anyhow!(
-                    "[TaskRuntime:spawn] task executor not found: {:?}",
-                    task.r#type
-                )
-                .err();
-            }
+        for task in ts {
+            self.exec_tool(task).await?;
         }
         Ok(())
     }
 
-    async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
-        if let Some(e) = self.get_executor(task.get_type(), task.get_exec_channel()) {
-            //优先自己执行
-            let result = Self::exec(e.clone(), task).await;
-            Ok(result)
-        } else if let Some(e) = self.parent.as_ref() {
-            //再委托给父环境
-            e.execute(task).await
-        } else {
-            //如果父环境也没有，就报错
-            return anyhow::anyhow!(
-                "[TaskRuntime:execute] task executor not found: {:?}",
-                task.r#type
-            )
-            .err();
+    async fn execute(&self, task: fae_agent::Task) -> anyhow::Result<TaskResult> {
+        if Self::is_task_tool_task(&task) {
+            return self.exec_tool(task).await;
         }
-    }
-}
-
-// TaskRuntimeRef is a reference to TaskRuntime.
-#[derive(Clone)]
-pub struct TaskRuntimeRef(Env);
-impl TaskRuntimeRef {
-    pub fn as_env(&self) -> Env {
-        self.0.clone()
-    }
-}
-impl From<TaskRuntime> for TaskRuntimeRef {
-    fn from(runtime: TaskRuntime) -> Self {
-        Self(Env::from(
-            Arc::new(runtime) as Arc<dyn Environment + Send + 'static>
-        ))
-    }
-}
-impl From<Env> for TaskRuntimeRef {
-    fn from(env: Env) -> Self {
-        Self(env)
-    }
-}
-impl Deref for TaskRuntimeRef {
-    type Target = Env;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        if let Some(ref p) = self.parent {
+            p.execute(task).await
+        } else {
+            anyhow::anyhow!("[TaskRuntime] execute failed, no parent").err()
+        }
     }
 }

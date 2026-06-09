@@ -121,7 +121,7 @@ impl Task {
             exec_channel: "default".into(),
         }
     }
-    pub fn with_content(ctx:Context)->Self{
+    pub fn with_content(ctx: Context) -> Self {
         Self::new(ctx, wd_tools::uuid::v4(), "", TaskType::None)
     }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
@@ -206,16 +206,19 @@ impl Task {
             None
         }
     }
-    pub fn deref_mut_args<T:Any,Out>(&mut self,handle:impl FnOnce(Option<&mut T>)->Out) -> Out {
-        if let Some(ref mut args) = self.args{
+    pub fn deref_mut_args<T: Any, Out>(
+        &mut self,
+        handle: impl FnOnce(Option<&mut T>) -> Out,
+    ) -> Out {
+        if let Some(ref mut args) = self.args {
             let opt = (**args).downcast_mut::<T>();
             handle(opt)
         } else {
             handle(None)
         }
     }
-    pub fn deref_args<T:Any,Out>(&self,handle:impl FnOnce(Option<&T>)->Out) -> Out {
-        if let Some(ref args) = self.args{
+    pub fn deref_args<T: Any, Out>(&self, handle: impl FnOnce(Option<&T>) -> Out) -> Out {
+        if let Some(ref args) = self.args {
             let opt = (**args).downcast_ref::<T>();
             handle(opt)
         } else {

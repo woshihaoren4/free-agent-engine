@@ -3,7 +3,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
-use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, Task, TaskExecutor, TaskResult};
+use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, Executor, Task, TaskResult};
 use wd_tools::PFErr;
 
 pub const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
@@ -67,7 +67,7 @@ impl ModelOpenAIApiExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutor for ModelOpenAIApiExecutor {
+impl Executor for ModelOpenAIApiExecutor {
     fn desc(&self) -> String {
         self.desc.clone()
     }

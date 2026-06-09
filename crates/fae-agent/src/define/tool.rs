@@ -1,8 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use serde::{Deserialize, Serialize};
-use wd_tools::channel::{Channel, RecvError};
 use wd_tools::PFErr;
+use wd_tools::channel::{Channel, RecvError};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ToolRequest {
@@ -31,11 +31,11 @@ pub enum ToolRespItem {
 }
 
 #[derive(Debug)]
-pub struct  ToolResponse {
+pub struct ToolResponse {
     once_result: Option<String>,
     stream_chan: Option<Channel<ToolRespItem>>,
     // true: 完成, false: 未完成，当completed时仍然为false，则表示任务失败
-    status: Arc<AtomicBool>
+    status: Arc<AtomicBool>,
 }
 impl Clone for ToolResponse {
     fn clone(&self) -> Self {
@@ -47,7 +47,7 @@ impl Clone for ToolResponse {
     }
 }
 impl ToolResponse {
-    pub fn with_result(res:String)->Self{
+    pub fn with_result(res: String) -> Self {
         Self {
             once_result: Some(res),
             stream_chan: None,
@@ -62,28 +62,29 @@ impl ToolResponse {
             status: Arc::new(AtomicBool::new(false)),
         }
     }
-    pub async fn streaming_push(&self, item: String)->anyhow::Result<()> {
+    pub async fn streaming_push(&self, item: String) -> anyhow::Result<()> {
         if let Some(chan) = &self.stream_chan {
-            chan.send(ToolRespItem::Streaming(item)).await?;Ok(())
-        }else{
+            chan.send(ToolRespItem::Streaming(item)).await?;
+            Ok(())
+        } else {
             anyhow::anyhow!("stream_chan is None").err()
         }
     }
-    pub async fn completed_push(&self, item: String)->anyhow::Result<()> {
+    pub async fn completed_push(&self, item: String) -> anyhow::Result<()> {
         if let Some(chan) = &self.stream_chan {
             chan.send(ToolRespItem::Completed(item)).await?;
             chan.close();
             Ok(())
-        }else{
+        } else {
             anyhow::anyhow!("stream_chan is None").err()
         }
     }
-    pub async fn success_completed_push(&self, item: String) ->anyhow::Result<()> {
+    pub async fn success_completed_push(&self, item: String) -> anyhow::Result<()> {
         self.set_status_to_success();
         self.completed_push(item).await?;
         Ok(())
     }
-    pub async fn error_completed_push(&self, item: String) ->anyhow::Result<()> {
+    pub async fn error_completed_push(&self, item: String) -> anyhow::Result<()> {
         self.completed_push(item).await?;
         Ok(())
     }
@@ -96,7 +97,7 @@ impl ToolResponse {
                 Ok(item) => Ok(item),
                 Err(e) => Err(anyhow::anyhow!("recv error: {:?}", e)),
             }
-        }else{
+        } else {
             anyhow::anyhow!("[ToolResponse] stream_chan is None").err()
         }
     }

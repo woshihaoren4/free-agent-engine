@@ -25,7 +25,7 @@ pub fn fae_home() -> PathBuf {
 }
 
 #[derive(Default, Debug, PartialEq, Eq, Clone)]
-pub struct TimedTask{
+pub struct TimedTask {
     pub task_content: String,
     pub agent_id: String,
     pub user_id: String,
@@ -211,6 +211,14 @@ pub struct Env(Arc<dyn Environment + Send + 'static>);
 impl From<Arc<dyn Environment + Send + 'static>> for Env {
     fn from(env: Arc<dyn Environment + Send + 'static>) -> Self {
         Self(env)
+    }
+}
+impl<T> From<T> for Env
+where
+    T: Environment + Send + 'static,
+{
+    fn from(env: T) -> Self {
+        Self(Arc::new(env))
     }
 }
 impl Env {

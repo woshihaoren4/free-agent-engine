@@ -41,9 +41,7 @@ pub enum ChatMsg {
     Custom(String, String),
 }
 impl ChatMsg {
-    pub fn with_user<T: Into<String>>(
-        query: T,
-    ) -> Self {
+    pub fn with_user<T: Into<String>>(query: T) -> Self {
         Self::User(
             ChatCompletionRequestUserMessageArgs::default()
                 .content(query.into())

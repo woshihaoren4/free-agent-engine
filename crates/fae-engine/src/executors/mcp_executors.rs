@@ -1,6 +1,6 @@
 use fae_agent::{
-    McpServerConfig, McpToolRequest, McpToolResponse, McpToolResult, McpTools, Select, Task,
-    TaskExecutor, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest,
+    Executor, McpServerConfig, McpToolRequest, McpToolResponse, McpToolResult, McpTools, Select,
+    Task, TaskResult, Thing, ThingItem, ThingSelect, ToolRequest,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -400,7 +400,7 @@ impl McpExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutor for McpExecutor {
+impl Executor for McpExecutor {
     fn desc(&self) -> String {
         "MCP Client Executor".to_string()
     }

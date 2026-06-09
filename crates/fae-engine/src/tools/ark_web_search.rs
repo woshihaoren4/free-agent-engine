@@ -1,7 +1,7 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use serde_json::Value;
 use fae_agent::ToolResponse;
+use serde_json::Value;
 
 #[derive(Debug)]
 pub struct ArkWebSearch;

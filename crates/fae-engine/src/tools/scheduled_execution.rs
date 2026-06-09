@@ -1,11 +1,11 @@
-use std::str::FromStr;
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
 use cron::Schedule;
-use fae_agent::{ToolResponse, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID};
+use fae_agent::{GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID, ToolResponse};
 use serde_json::Value;
-use wd_tools::channel::Channel;
+use std::str::FromStr;
 use wd_tools::PFErr;
+use wd_tools::channel::Channel;
 
 pub const SCHEDULED_EXECUTION_TOOL_NAME: &str = "scheduled_execution";
 
@@ -69,19 +69,21 @@ impl Tool for ScheduledExecution {
             .ok_or_else(|| anyhow::anyhow!("cron_expression is required"))?
             .to_string();
         //校验表达式是否合法
-        if let Err(e) = Schedule::from_str(&cron_expression){
-            return anyhow::anyhow!("Invalid cron expression: {}", e).err()
+        if let Err(e) = Schedule::from_str(&cron_expression) {
+            return anyhow::anyhow!("Invalid cron expression: {}", e).err();
         }
-        let execute_once = args_val["execute_once"]
-            .as_bool()
-            .unwrap_or(true);
+        let execute_once = args_val["execute_once"].as_bool().unwrap_or(true);
         let task_content = args_val["task_content"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("task_content is required"))?
             .to_string();
-        let session_id = iden.get(GLOBAL_KEY_SESSION_ID).ok_or_else(|| anyhow::anyhow!("session_id is required"))?.to_string();
-        let agent_id = iden.get(GLOBAL_KEY_AGENT_ID).unwrap_or(iden.get_agent_id().to_string());
-
+        let session_id = iden
+            .get(GLOBAL_KEY_SESSION_ID)
+            .ok_or_else(|| anyhow::anyhow!("session_id is required"))?
+            .to_string();
+        let agent_id = iden
+            .get(GLOBAL_KEY_AGENT_ID)
+            .unwrap_or(iden.get_agent_id().to_string());
 
         let task = ScheduledTask {
             cron_expression,
@@ -92,8 +94,13 @@ impl Tool for ScheduledExecution {
             session_id,
             user_id: iden.get_user_id().to_string(),
         };
-        self.channel.send(task).await.map_err(|e| anyhow::anyhow!("Failed to submit scheduled task: {}", e))?;
+        self.channel
+            .send(task)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to submit scheduled task: {}", e))?;
 
-        Ok(ToolResponse::with_result("Scheduled task submitted successfully.".to_string()))
+        Ok(ToolResponse::with_result(
+            "Scheduled task submitted successfully.".to_string(),
+        ))
     }
 }

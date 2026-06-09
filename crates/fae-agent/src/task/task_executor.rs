@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use wd_tools::PFErr;
 
 #[async_trait::async_trait]
-pub trait TaskExecutor: Debug + Sync {
+pub trait Executor: Debug + Sync {
     fn desc(&self) -> String;
     fn channel(&self) -> String {
         "default".to_string()
@@ -54,7 +54,7 @@ impl<T, In, Out> TaskExecutorExtImpl<T, In, Out> {
 }
 
 #[async_trait::async_trait]
-impl<T, In, Out> TaskExecutor for TaskExecutorExtImpl<T, In, Out>
+impl<T, In, Out> Executor for TaskExecutorExtImpl<T, In, Out>
 where
     T: TaskExecutorExt<In, Out>,
     In: Debug + Send + Sync + 'static,

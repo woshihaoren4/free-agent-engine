@@ -1,6 +1,6 @@
 use fae_agent::{
-    Env, EnvEvent, Environment, Select, GLOBAL_KEY_WORKSPACE, Task, TaskResult, Thing,
-    ThingItem, ThingSelect,
+    Env, EnvEvent, Environment, GLOBAL_KEY_WORKSPACE, Select, Task, TaskResult, Thing, ThingItem,
+    ThingSelect,
 };
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";

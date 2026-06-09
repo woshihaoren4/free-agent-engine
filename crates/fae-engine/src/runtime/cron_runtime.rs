@@ -1,21 +1,24 @@
+use crate::tools::scheduled_execution::SCHEDULED_EXECUTION_TOOL_NAME;
 use crate::tools::{ScheduledExecution, ScheduledTask};
+use crate::{IdenInfo, Tool};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use cron::Schedule;
-use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect, Context, ToolRequest, ToolResponse, TimedTask};
-use std::collections::BinaryHeap;
+use fae_agent::{
+    Context, Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem,
+    ThingSelect, TimedTask, ToolRequest, ToolResponse,
+};
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use chrono::{DateTime, Utc};
-use wd_tools::channel::Channel;
+use tokio::sync::{RwLock, mpsc};
 use wd_tools::PFErr;
-use crate::{IdenInfo, Tool};
-use crate::tools::scheduled_execution::SCHEDULED_EXECUTION_TOOL_NAME;
+use wd_tools::channel::Channel;
 
 pub const CRON_RUNTIME_ID: &str = "FAE_CRON_RUNTIME";
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 struct CronJob {
     task: ScheduledTask,
     next_time: DateTime<Utc>,
@@ -49,7 +52,7 @@ pub struct CronRuntime {
     heap: Arc<RwLock<BinaryHeap<CronJob>>>,
     parent: Option<Env>,
     channel: Channel<ScheduledTask>,
-    spawn_channel: Channel<TaskResult>
+    spawn_channel: Channel<TaskResult>,
 }
 
 impl CronRuntime {
@@ -67,32 +70,38 @@ impl CronRuntime {
     pub fn get_tool(&self) -> ScheduledExecution {
         ScheduledExecution::new(self.channel.clone())
     }
-    pub async fn exec_tool(&self, mut task:Task) ->anyhow::Result<TaskResult>{
+    pub async fn exec_tool(&self, mut task: Task) -> anyhow::Result<TaskResult> {
         if let Some(req) = task.into_inner::<ToolRequest>() {
             let tool = self.get_tool();
-            let iden = IdenInfo::new(task.id.clone(), task.agent_id.clone(),task.user_id.clone(),task.ctx.clone());
+            let iden = IdenInfo::new(
+                task.id.clone(),
+                task.agent_id.clone(),
+                task.user_id.clone(),
+                task.ctx.clone(),
+            );
             return match tool.call(iden, req.arguments).await {
-                Ok(resp) => {
-                    Ok(TaskResult::success(task.id, task.agent_id).set_data(resp))
-                }
+                Ok(resp) => Ok(TaskResult::success(task.id, task.agent_id).set_data(resp)),
                 Err(e) => {
                     let info = format!("Tool[{}] call failed. error: {}", req.tool_name, e);
-                    Ok(TaskResult::success(task.id, task.agent_id).set_data(ToolResponse::with_result(info)))
+                    Ok(TaskResult::success(task.id, task.agent_id)
+                        .set_data(ToolResponse::with_result(info)))
                 }
-            }
-        }else{
-            return anyhow::anyhow!("[ScheduledExecution] task is not a tool request").err()
+            };
+        } else {
+            return anyhow::anyhow!("[ScheduledExecution] task is not a tool request").err();
         }
     }
-    pub fn is_scheduled_tool_task(task:&Task) -> bool {
-        task.get_type() == &TaskType::Tool && task.exec_channel == "default" && task.deref_args::<ToolRequest,bool>(|x|{
-            if let Some(r) = x {
-                r.tool_name.as_str() == SCHEDULED_EXECUTION_TOOL_NAME
-            }else{
-                false
-            }
-        })
-       }
+    pub fn is_scheduled_tool_task(task: &Task) -> bool {
+        task.get_type() == &TaskType::Tool
+            && task.exec_channel == "default"
+            && task.deref_args::<ToolRequest, bool>(|x| {
+                if let Some(r) = x {
+                    r.tool_name.as_str() == SCHEDULED_EXECUTION_TOOL_NAME
+                } else {
+                    false
+                }
+            })
+    }
     pub async fn get_next_job_expire_time(&self) -> std::time::Duration {
         let now = Utc::now();
         let heap = self.heap.read().await;
@@ -103,11 +112,11 @@ impl CronRuntime {
             std::time::Duration::from_secs(3600 * 24 * 365)
         }
     }
-    pub async fn push_job(heap:Arc<RwLock<BinaryHeap<CronJob>>>, job: CronJob) {
+    pub async fn push_job(heap: Arc<RwLock<BinaryHeap<CronJob>>>, job: CronJob) {
         let mut heap = heap.write().await;
         heap.push(job);
     }
-    pub async fn pop_job(heap:Arc<RwLock<BinaryHeap<CronJob>>>) -> Option<CronJob> {
+    pub async fn pop_job(heap: Arc<RwLock<BinaryHeap<CronJob>>>) -> Option<CronJob> {
         let mut heap = heap.write().await;
         heap.pop()
     }
@@ -189,13 +198,17 @@ impl Environment for CronRuntime {
             if name == "scheduled_execution" && chan == "default" {
                 let tool = self.get_tool();
                 use crate::executors::Tool;
-                return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::Tool(
-                    tool.description().to_string(),
-                    tool.arguments(),
-                )).into_self()]);
+                return Ok(vec![
+                    Thing::new(self.id().to_string())
+                        .add_item(ThingItem::Tool(
+                            tool.description().to_string(),
+                            tool.arguments(),
+                        ))
+                        .into_self(),
+                ]);
             }
         }
-        
+
         if let Some(ref p) = self.parent {
             p.query(select).await
         } else {
@@ -204,21 +217,23 @@ impl Environment for CronRuntime {
     }
 
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
-        let (ts, ptasks):(Vec<_>,Vec<_>) = tasks.into_iter().partition(|t|{
-            t.get_type() == &TaskType::Tool && t.exec_channel == "default" && Self::is_scheduled_tool_task(t)
+        let (ts, ptasks): (Vec<_>, Vec<_>) = tasks.into_iter().partition(|t| {
+            t.get_type() == &TaskType::Tool
+                && t.exec_channel == "default"
+                && Self::is_scheduled_tool_task(t)
         });
         if !ptasks.is_empty() {
             if let Some(ref p) = self.parent {
                 p.spawn(ptasks).await?;
             } else {
-                return Err(anyhow::anyhow!("[CronRuntime] spawn failed, no parent"))
+                return Err(anyhow::anyhow!("[CronRuntime] spawn failed, no parent"));
             }
         }
         for i in ts {
             let result = self.exec_tool(i).await?;
             let chan = self.spawn_channel.clone();
             tokio::spawn(async move {
-                if let Err(e) = chan.send(result).await{
+                if let Err(e) = chan.send(result).await {
                     wd_log::log_error_ln!("[CronRuntime] send task result failed: {:?}", e);
                 }
             });
@@ -227,7 +242,10 @@ impl Environment for CronRuntime {
     }
 
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
-        if task.get_type() == &TaskType::Tool && task.exec_channel == "default" && Self::is_scheduled_tool_task(&task){
+        if task.get_type() == &TaskType::Tool
+            && task.exec_channel == "default"
+            && Self::is_scheduled_tool_task(&task)
+        {
             return self.exec_tool(task).await;
         }
         if let Some(ref p) = self.parent {

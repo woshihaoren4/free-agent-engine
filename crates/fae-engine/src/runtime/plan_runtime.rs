@@ -3,9 +3,8 @@ use fae_agent::error::{
     TASK_ERROR_CODE_PLAN_ABORT_USER,
 };
 use fae_agent::{
-    EndPlanTaskArgs, Env, EnvEvent, Environment, Planning, PlanningResult, Select,
-    GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_PLAN_ID, Task, TaskResult, TaskType, Thing,
-    ThingItem, ThingSelect,
+    EndPlanTaskArgs, Env, EnvEvent, Environment, GLOBAL_KEY_AGENT_ID, Planning, PlanningResult,
+    Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect,
 };
 use std::collections::HashMap;
 use std::ops::DerefMut;
@@ -236,7 +235,6 @@ impl PlanRuntime {
                             //下一步执行成功，不移除计划
                             remove_id = String::new();
                         }
-
                     } else {
                         Self::abort_plan_by_error(
                             TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL,

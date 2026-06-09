@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use fae_agent::{Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
+use fae_agent::{
+    Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest,
+    ToolResponse,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Debug;

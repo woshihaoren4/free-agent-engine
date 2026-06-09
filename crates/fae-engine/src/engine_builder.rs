@@ -1,21 +1,23 @@
-use crate::{CronRuntime, WorkspaceBuilder};
 use crate::engine::AgentsEngine;
+use crate::runtime::exec_runtime::ExecRuntime;
 use crate::runtime::plan_runtime::PlanRuntime;
-use crate::runtime::task_runtime::{TaskRuntime, TaskRuntimeRef};
 use crate::workspace::Workspace;
-use fae_agent::{Env, Environment};
+use crate::{CronRuntime, WorkspaceBuilder};
+use fae_agent::Environment;
 
 impl AgentsEngine {
     pub async fn default() -> Self {
-        AgentsEngine::new(TaskRuntime::default())
-            .assemble_runtime(CronRuntime::new()).await
-            .assemble_runtime(PlanRuntime::new()).await
+        AgentsEngine::new(ExecRuntime::default())
+            .assemble_runtime(CronRuntime::new())
+            .await
+            .assemble_runtime(PlanRuntime::new())
+            .await
     }
     pub async fn assemble_runtime(mut self, mut layer: impl Environment + Send + 'static) -> Self {
-        let env = self.runtime.as_env();
+        let env = self.runtime.clone();
         self.runtime = {
             layer.register_parent_env(env).await;
-            TaskRuntimeRef::from(Env::new(layer))
+            layer.into()
         };
         self
     }
@@ -29,7 +31,7 @@ impl AgentsEngine {
         E: FnOnce(&mut WorkspaceBuilder),
     {
         let name = name.into();
-        let mut workspace_builder = WorkspaceBuilder::new(name.clone(), self.runtime.as_env())
+        let mut workspace_builder = WorkspaceBuilder::new(name.clone(), self.runtime.clone())
             .default_init()
             .await;
         setting(&mut workspace_builder);
