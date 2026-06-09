@@ -5,35 +5,38 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
-use fae_agent::{
-    MemoryEntry, Record, SingleSessionMD, GLOBAL_KEY_PROJECT_DIR, GLOBAL_KEY_WORKSPACE,
-};
+use fae_agent::{MemoryEntry, ModelCallConfig, Record, SingleSessionMD, GLOBAL_KEY_PROJECT_DIR};
 use fae_engine::Workspace;
 use std::io::{self, Write};
 use std::pin::Pin;
-use crossterm::style::Stylize;
 use tokio_stream::StreamExt;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 pub struct ChatUi {
     ws: Workspace,
     agent_name: String,
+    model_name: ModelCallConfig,
 }
 
 impl ChatUi {
     pub fn new(ws: Workspace, agent_name: String) -> Self {
-        Self { ws, agent_name }
+        let model_name = ModelCallConfig::default();
+        Self { ws, agent_name, model_name }
     }
 
-    pub async fn run(&mut self) -> io::Result<()> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         enable_raw_mode()?;
+
+        let agent = self.ws.get_agent(&self.agent_name).await?.on_info().await;
+
+        self.model_name = agent.model();
 
         let res = self.run_app().await;
 
         disable_raw_mode()?;
         println!("\r");
 
-        res
+        res?;Ok(())
     }
 
     async fn run_app(&mut self) -> io::Result<()> {
@@ -83,12 +86,11 @@ impl ChatUi {
 
         // Print welcome header
         clear_line()?;
-        print_text(
-            "Welcome to Free Agent Engine CLI!\nType /exit to quit, /reset restart session.\n\n",
-        )?;
+        self.print_welcome_banner()?;
+        print_text("Instructions for Use:\n - '/exit' to quit.\n - '/reset' to restart session.\n - 'ctrl+j' line break.\n\n")?;
 
         loop {
-            Self::redraw_prompt(&input, stream_active, spinner_tick, &mut current_title)?;
+            Self::redraw_prompt(&input, stream_active, spinner_tick, &current_title)?;
 
             let mut event_handled = false;
             let poll_timeout = if stream_active { 50 } else { 100 };
@@ -130,6 +132,19 @@ impl ChatUi {
                                 return Ok(());
                             }
                         }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            //换行
+                            let val = input.value().to_string();
+                            let val = val.trim();
+                            let is_header = user_input.is_empty();
+                            Self::print_user_message(val, is_header)?;
+                            if !user_input.is_empty() {
+                                user_input.push('\n');
+                            }
+                            user_input.push_str(val);
+                            input.reset();
+                            clear_line()?;
+                        }
                         KeyCode::Enter => {
                             let val = input.value().to_string();
                             let val = val.trim();
@@ -158,29 +173,28 @@ impl ChatUi {
                                     print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
                                 }
                                 input.reset();
-                            }else if !val.is_empty(){
-                                println!("--->{:?}\r\n",key);
+                            } else if !val.is_empty() {
                                 let is_header = user_input.is_empty();
-                                Self::print_user_message(val,is_header)?;
+                                Self::print_user_message(val, is_header)?;
+                                if !user_input.is_empty() {
+                                    user_input.push('\n');
+                                }
                                 user_input.push_str(val);
                                 input.reset();
                                 clear_line()?;
-                                if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER) {
-                                    if !stream_active {
-                                        // Self::print_user_message(val)?;
-                                        let msg = Record::from_user_input(user_input.as_str());
-                                        match session.call_stream(msg).await {
-                                            Ok(s) => {
-                                                current_stream = Some(Pin::from(s));
-                                                stream_active = true;
-                                                current_title = "Waiting".to_string();
-                                            }
-                                            Err(e) => {
-                                                print_text(&format!("Failed to send chat: {:?}\n", e))?;
-                                            }
+                                if !stream_active {
+                                    let msg = Record::from_user_input(user_input.as_str());
+                                    match session.call_stream(msg).await {
+                                        Ok(s) => {
+                                            current_stream = Some(Pin::from(s));
+                                            stream_active = true;
+                                            current_title = "Waiting".to_string();
                                         }
-                                        input.reset();
+                                        Err(e) => {
+                                            print_text(&format!("Failed to send chat: {:?}\n", e))?;
+                                        }
                                     }
+                                    user_input.clear();
                                 }
                             }
                         }
@@ -249,6 +263,69 @@ impl ChatUi {
         }
     }
 
+    fn print_welcome_banner(&self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+
+        let version = env!("CARGO_PKG_VERSION");
+        let directory = std::env::current_dir()
+            .ok()
+            .and_then(|p| {
+                let s = p.display().to_string();
+                let home = std::env::var("HOME").ok();
+                Some(match home {
+                    Some(h) if s.starts_with(&h) => format!("~{}", &s[h.len()..]),
+                    _ => s,
+                })
+            })
+            .unwrap_or_else(|| ".".to_string());
+
+        // Banner content lines (without borders).
+        let title = format!(">_ Free Agent Engine CLI (v{})", version);
+        let model_line = format!("agent: {}    model: {}", &self.agent_name, &self.model_name.model);
+        let dir_line = format!("directory: {}", directory);
+
+        let lines = [title.as_str(), "", model_line.as_str(), dir_line.as_str()];
+
+        // Inner width = longest line, with 1 space padding on each side.
+        let content_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let inner_width = content_width + 2;
+
+        let top = format!("╭{}╮", "─".repeat(inner_width));
+        let bottom = format!("╰{}╯", "─".repeat(inner_width));
+
+        queue!(
+            stdout,
+            MoveToColumn(0),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{}\r\n", top)),
+        )?;
+
+        for line in lines {
+            let pad = content_width - line.chars().count();
+            let body = format!(" {}{} ", line, " ".repeat(pad));
+            queue!(
+                stdout,
+                MoveToColumn(0),
+                SetForegroundColor(Color::DarkGrey),
+                Print("│"),
+                SetForegroundColor(Color::White),
+                Print(&body),
+                SetForegroundColor(Color::DarkGrey),
+                Print("│\r\n"),
+            )?;
+        }
+
+        queue!(
+            stdout,
+            MoveToColumn(0),
+            SetForegroundColor(Color::DarkGrey),
+            Print(format!("{}\r\n", bottom)),
+            ResetColor,
+            Print("\r\n"),
+        )?;
+        stdout.flush()
+    }
+
     fn redraw_prompt(
         input: &Input,
         stream_active: bool,
@@ -289,39 +366,35 @@ impl ChatUi {
         stdout.flush()
     }
 
-    fn print_user_message(val: &str, is_header:bool) -> io::Result<()> {
+    fn print_user_message(val: &str, is_header: bool) -> io::Result<()> {
         let mut stdout = io::stdout();
         if is_header {
             let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
             let separator = "─".repeat(cols);
             queue!(
-            stdout,
-            MoveToColumn(0),
-            SetForegroundColor(Color::DarkGrey),
-            Print(format!("{}\r\n", separator)),
-            SetForegroundColor(Color::White),
-            SetAttribute(Attribute::Bold),
-            Print("❯ You\r\n"),
-            SetAttribute(Attribute::Reset),
-            SetForegroundColor(Color::White),
-            Print(format!("{}", val.replace('\n', "\r\n"))),
-            ResetColor,
-            Print("\r\n"),
-            // crossterm::cursor::MoveUp(1)
-        )?;
-        }else{
+                stdout,
+                MoveToColumn(0),
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("{}\r\n", separator)),
+                SetForegroundColor(Color::White),
+                SetAttribute(Attribute::Bold),
+                Print("❯ You\r\n"),
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(Color::White),
+                Print(val.replace('\n', "\r\n")),
+                ResetColor,
+                Print("\r\n"),
+            )?;
+        } else {
             queue!(
-            stdout,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetAttribute(Attribute::Bold),
-            SetAttribute(Attribute::Reset),
-            SetForegroundColor(Color::White),
-            Print(format!("{}", val.replace('\n', "\r\n"))),
-            ResetColor,
-            Print("\r\n"),
-            // crossterm::cursor::MoveUp(1)
-        )?;
+                stdout,
+                MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                SetForegroundColor(Color::White),
+                Print(val.replace('\n', "\r\n")),
+                ResetColor,
+                Print("\r\n"),
+            )?;
         }
         stdout.flush()
     }
