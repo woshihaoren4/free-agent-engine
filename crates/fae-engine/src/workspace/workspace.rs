@@ -1,5 +1,5 @@
 use crate::{AgentCtl, SingleAgentCtlFromFile};
-use fae_agent::{AgentConfig, AgentRef, Env, EnvEvent, Environment, Session, SessionMD};
+use fae_agent::{AgentConfig, AgentRef, AgentTaskStatus, Env, EnvEvent, Environment, Session, SessionMD};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -81,6 +81,16 @@ impl Workspace {
                     EnvEvent::Timed(ref task) => {
                         let aid = task.agent_id.clone();
                         this.push_event(aid, event).await;
+                    }
+                    EnvEvent::Agent(ref agent)=>{
+                        match agent.content {
+                            AgentTaskStatus::Executing(ref _create) => {},
+                            _ => {
+                                let aid = agent.get_push_agent_id();
+                                this.push_event(aid.to_string(), event).await;
+                            },
+                        }
+
                     }
                     _ => {
                         // 其他事件，不处理

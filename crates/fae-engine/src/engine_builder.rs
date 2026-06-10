@@ -2,13 +2,15 @@ use crate::engine::AgentsEngine;
 use crate::runtime::exec_runtime::ExecRuntime;
 use crate::runtime::plan_runtime::PlanRuntime;
 use crate::workspace::Workspace;
-use crate::{CronRuntime, WorkspaceBuilder};
+use crate::{AgentRuntime, CronRuntime, WorkspaceBuilder};
 use fae_agent::Environment;
 
 impl AgentsEngine {
     pub async fn default() -> Self {
         AgentsEngine::new(ExecRuntime::default())
             .assemble_runtime(CronRuntime::new())
+            .await
+            .assemble_runtime(AgentRuntime::default())
             .await
             .assemble_runtime(PlanRuntime::new())
             .await

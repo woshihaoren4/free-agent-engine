@@ -1,4 +1,4 @@
-use crate::{McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
+use crate::{AgentTask, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
 use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
@@ -44,6 +44,8 @@ pub enum EnvEvent {
     Timed(TimedTask),
     // 心跳
     Heartbeat(String),
+    // agent 事件
+    Agent(AgentTask),
     // /// 键值对事件，携带键和值
     // KV(String, Value),
     // /// 自定义事件，携带自定义信息
@@ -82,6 +84,8 @@ pub enum ThingSelect {
     Mcp(String, String),
     /// skill: 渠道，名字, 目录
     Skill(String, String, Option<String>),
+    /// agent 任务记录，任务ID
+    AgenTask(String),
     /// Custom
     Custom(String),
 }
@@ -152,6 +156,8 @@ pub enum ThingItem {
     EnvVar(String),
     /// 智能体
     Agent(String),
+    /// agent 任务记录，任务ID
+    AgenTask(Vec<AgentTaskStatus>),
     /// 技能: Skill头信息
     Skill(SkillHeader),
     /// 自定义事物
@@ -173,6 +179,7 @@ impl ThingItem {
             Self::Tool(s, _) => s.to_string(),
             Self::EnvVar(s) => s.to_string(),
             Self::Agent(s) => s.to_string(),
+            Self::AgenTask(s) => serde_json::to_string(s).unwrap_or("ThingItem::AgenTask".into()),
             Self::Skill(s) => s.to_string(),
             Self::Custom(s) => s.to_string(),
             Self::Mcp(s) => serde_json::to_string(s).unwrap_or("ThingItem::McpServer".into()),

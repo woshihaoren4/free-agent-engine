@@ -1,8 +1,5 @@
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{
-    Agent, AgentConfig, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl,
-    SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
-};
+use crate::{Agent, AgentConfig, AgentTask, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
@@ -26,6 +23,14 @@ where
     async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static>;
 
     async fn on_none(&self) {}
+    // 另一个agent给的任务
+    async fn on_agent_task(&self, env: Env, atask: AgentTask) -> anyhow::Result<()> {
+        anyhow::anyhow!(
+            "[AgentEventExt::{}] not support on_agent_task",
+            self.id(),
+        )
+            .err()
+    }
     /// 处理会话调用事件
     async fn on_session_call(
         &self,
@@ -181,6 +186,7 @@ where
             }
             EnvEvent::Heartbeat(s) => self.agent_event_ext.on_heartbeat(env, s).await,
             EnvEvent::Timed(task) => self.agent_event_ext.on_timed(env, task).await,
+            EnvEvent::Agent(atask) => self.agent_event_ext.on_agent_task(env, atask).await,
         }
     }
 

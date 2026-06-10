@@ -1,12 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{
-    AgentConfig, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE,
-    McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult,
-    SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect,
-    TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home,
-};
+use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTask, AgentTaskStatus};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -702,6 +697,22 @@ where
         let task =
             Task::new(plan.get_context(), plan.id(), task.agent_id, TaskType::Plan).set_args(plan);
         env.spawn(vec![task]).await
+    }
+
+    async fn on_agent_task(&self, env: Env, task: AgentTask) -> anyhow::Result<()> {
+        let content = match task.content{
+            AgentTaskStatus::Create(task) => task,
+            _ =>{
+                return anyhow::anyhow!("[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}", task).err();
+            }
+        };
+        let user_input = format!(
+            "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
+            task.task_id,content.content
+        );
+        let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
+        //todo
+
     }
 
     async fn exit(&self) {
