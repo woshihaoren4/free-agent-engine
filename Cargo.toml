@@ -10,8 +10,9 @@ readme = "README.md"
 members = ["crates/fae-agent", "crates/fae-engine", "examples", "crates/async-openai", "app/fae-ctl"]
 
 [workspace.dependencies]
-wd_log = "0.1.8"
+wd_log = "0.4.0"
 wd_tools = { version = "0.14.15", features = ["full"] }
+wd_event = {version = "0.8.2",registry = "crates-io"}
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.50", features = ["full"] }
@@ -20,4 +21,3 @@ thiserror = "2.0.18"
 async-trait = "0.1.89"
 tokio-stream = "0.1.17"
 serde_yaml = "0.9.34"
-

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 /// A loader that loads agents from a workspace directory structure.
+#[derive(Debug)]
 pub struct SingleAgentCtlFromFile {
     workspace_dir: PathBuf,
     agents: RwLock<HashMap<String, AgentRef>>,
@@ -21,21 +22,15 @@ impl SingleAgentCtlFromFile {
     pub fn get_id() -> &'static str {
         "default_single_agent"
     }
-    pub fn new<P: Into<PathBuf>>(workspace_dir: P) -> Self {
+    pub fn with_dir<P: Into<PathBuf>>(workspace_dir: P) -> Self {
         Self {
             workspace_dir: workspace_dir.into(),
             agents: RwLock::new(HashMap::new()),
         }
     }
-}
-impl Default for SingleAgentCtlFromFile {
-    fn default() -> Self {
-        let base_dir = std::env::var(FAE_WORKSPACE)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        Self::new(base_dir)
+    pub fn with_workspace(ws_name:&str) ->Self{
+        let workspace_dir = fae_agent::fae_home().join(ws_name);
+        Self::with_dir(workspace_dir)
     }
 }
 

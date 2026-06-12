@@ -83,10 +83,10 @@ impl Workspace {
                         this.push_event(aid, event).await;
                     }
                     EnvEvent::Agent(ref agent)=>{
-                        match agent.content {
+                        match agent.task.content {
                             AgentTaskStatus::Executing(ref _create) => {},
                             _ => {
-                                let aid = agent.get_push_agent_id();
+                                let aid = agent.task.get_push_agent_id();
                                 this.push_event(aid.to_string(), event).await;
                             },
                         }

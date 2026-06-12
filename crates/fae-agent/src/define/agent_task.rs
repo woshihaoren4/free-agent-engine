@@ -1,3 +1,4 @@
+use std::any::Any;
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -55,6 +56,8 @@ pub struct AgentTask {
     pub content: AgentTaskStatus,
 }
 
+
+
 impl AgentTask {
     pub fn get_push_agent_id(&self) -> &str {
         match &self.content {
@@ -105,5 +108,37 @@ impl AgentTask {
                 }
             }
         })
+    }
+}
+
+#[derive(Debug)]
+pub struct AgentTaskExt{
+    pub task: AgentTask,
+    pub ext:Option<Box<dyn Any + Sync + Send + 'static>>
+}
+impl AgentTaskExt {
+    pub fn new(task: AgentTask) -> Self {
+        Self{
+            task,
+            ext: None,
+        }
+    }
+    pub fn set(self, ext: Box<dyn Any + Sync + Send + 'static>) -> Self {
+        Self{
+            task: self.task,
+            ext: Some(ext),
+        }
+    }
+    pub fn try_ext_into<T:Any>(&mut self)->Option<T>{
+        if let Some(ext) = self.ext.as_deref() {
+            if ext.downcast_ref::<T>().is_none(){
+                return None
+            }
+        }else{
+            return None;
+        }
+        let t = self.ext.take().unwrap();
+        let x = t.downcast::<T>().unwrap();
+        Some(*x)
     }
 }

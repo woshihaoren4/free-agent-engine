@@ -98,17 +98,6 @@ impl ExecRuntime {
     }
 }
 
-impl Default for ExecRuntime {
-    fn default() -> Self {
-        Self::new()
-            .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
-            .register_executor_ext(TaskType::Tool, ToolExecutor::default())
-            .register_executor(TaskType::Skill, SkillsExecutor::default())
-            .register_executor(TaskType::Mcp, McpExecutor::default())
-            .into_self()
-    }
-}
-
 #[async_trait::async_trait]
 impl Environment for ExecRuntime {
     fn id(&self) -> &'static str {

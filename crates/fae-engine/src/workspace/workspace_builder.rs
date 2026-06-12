@@ -23,14 +23,6 @@ impl WorkspaceBuilder {
             env,
         }
     }
-    pub async fn default_init(mut self) -> Self {
-        let single_agent_loader = SingleAgentCtlFromFile::new(self.name.as_str());
-        self.set_loader(single_agent_loader);
-
-        let workspace_env = WorkspaceRuntime::new(self.name.clone());
-        self.add_env_layer(workspace_env).await;
-        self
-    }
     pub fn build(self) -> Workspace {
         let ws = Workspace {
             status: WorkspaceStatus::default(),
@@ -45,6 +37,9 @@ impl WorkspaceBuilder {
         self.name = name.into();
         self
     }
+    pub fn get_name(&self) -> &str {
+        self.name.as_str()
+    }
     pub fn set_loader(&mut self, loader: impl AgentCtl + Send + 'static) -> &mut Self {
         self.loader = Arc::new(loader);
         self
@@ -52,6 +47,9 @@ impl WorkspaceBuilder {
     pub fn add_loader_layer(&mut self, layer: impl AgentCtl + Send + 'static) -> &mut Self {
         let loader = self.loader.clone();
         self.set_loader(AgentLoaderLayer::new(loader, layer))
+    }
+    pub fn get_loader(&self)->Arc<dyn AgentCtl + Send + 'static>{
+        self.loader.clone()
     }
     pub async fn add_env_layer(
         &mut self,

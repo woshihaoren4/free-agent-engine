@@ -1,5 +1,5 @@
 use crate::{IdenInfo, Tool};
-use fae_agent::{AgentInfo, AgentTask, AgentTaskStatus, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
+use fae_agent::{AgentInfo, AgentTask, AgentTaskExt, AgentTaskStatus, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub trait AgentTaskStore: Debug {
 pub struct AgentRuntime {
     pub task_store: Arc<dyn AgentTaskStore+Send+Sync+'static>,
     pub task_tool: AgentTaskTool,
-    pub channel: Channel<AgentTask>,
+    pub channel: Channel<AgentTaskExt>,
     parent: Option<Env>,
 }
 
@@ -91,24 +91,24 @@ impl Environment for AgentRuntime {
             tokio::select! {
                 res = recv => {
                     let mut task = res?;
-                    self.task_store.push_task(task.clone()).await;
-                    match &mut task.content {
+                    self.task_store.push_task(task.task.clone()).await;
+                    match &mut task.task.content {
                         AgentTaskStatus::Create(e) => {
                             return Ok(EnvEvent::Agent(task));
                         }
                         AgentTaskStatus::Executing(_) => {}
                         AgentTaskStatus::Completed(output) => {
-                            let task_author = self.task_store.get_task_author_info(&task.task_id).await?;
+                            let task_author = self.task_store.get_task_author_info(&task.task.task_id).await?;
                             let author_agent_id = task_author.agent_id.clone();
                             output.task_author = task_author;
-                            let task = TaskResult::success(task.task_id.clone(), author_agent_id).set_data(task);
+                            let task = TaskResult::success(task.task.task_id.clone(), author_agent_id).set_data(task);
                             return Ok(EnvEvent::TaskResult(task));
                         }
                         AgentTaskStatus::Failed(output) => {
-                            let task_author = self.task_store.get_task_author_info(&task.task_id).await?;
+                            let task_author = self.task_store.get_task_author_info(&task.task.task_id).await?;
                             let author_agent_id = task_author.agent_id.clone();
                             output.task_author = task_author;
-                            let task = TaskResult::error(1,"",task.task_id.clone(), author_agent_id).set_data(task);
+                            let task = TaskResult::success(task.task.task_id.clone(), author_agent_id).set_data(task);
                             return Ok(EnvEvent::TaskResult(task));
                         }
                     }

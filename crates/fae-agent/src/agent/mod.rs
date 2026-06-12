@@ -1,6 +1,7 @@
 mod agent_config;
 pub mod single_agent;
 
+use std::fmt::Debug;
 pub use agent_config::*;
 pub use single_agent::*;
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
-pub trait Agent: Sync {
+pub trait Agent:Debug+ Sync {
     /// 智能体ID
     fn id(&self) -> String;
 
@@ -61,5 +62,10 @@ where
 {
     fn from(agent: T) -> Self {
         Self(Arc::new(agent))
+    }
+}
+impl Debug for AgentRef{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AgentRef {:?}", self.0.id())
     }
 }

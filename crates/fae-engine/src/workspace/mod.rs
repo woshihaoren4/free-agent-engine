@@ -8,6 +8,7 @@ mod workspace_session;
 use fae_agent::{AgentConfig, AgentRef, Error};
 pub use file_single_agent_ctl::*;
 use std::any::Any;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use wd_tools::PFErr;
 pub use workspace::*;
@@ -20,7 +21,7 @@ pub struct RecallAgentRef {
 }
 
 #[async_trait::async_trait]
-pub trait AgentCtl: Sync {
+pub trait AgentCtl:Debug+ Sync {
     fn id(&self) -> &str {
         "default"
     }
@@ -84,10 +85,12 @@ where
     }
 }
 
+#[derive(Debug)]
 pub struct AgentLoaderLayer<T> {
     o: Arc<dyn AgentCtl + Send + 'static>,
     n: T,
 }
+
 impl<T> AgentLoaderLayer<T> {
     pub fn new(o: Arc<dyn AgentCtl + Send + 'static>, t: T) -> Self {
         AgentLoaderLayer { o, n: t }

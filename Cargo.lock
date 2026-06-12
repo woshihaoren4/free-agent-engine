@@ -862,7 +862,7 @@ dependencies = [
  "fae-engine",
  "tokio",
  "tokio-stream",
- "wd_log 0.1.8",
+ "wd_log",
 ]
 
 [[package]]
@@ -879,8 +879,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tui-input",
- "wd_log 0.4.0",
- "wd_tools",
+ "wd_log",
+ "wd_tools 0.14.15",
  "zip",
 ]
 
@@ -900,8 +900,9 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
- "wd_log 0.1.8",
- "wd_tools",
+ "wd_event",
+ "wd_log",
+ "wd_tools 0.14.15",
 ]
 
 [[package]]
@@ -920,8 +921,8 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tokio-stream",
- "wd_log 0.1.8",
- "wd_tools",
+ "wd_log",
+ "wd_tools 0.14.15",
 ]
 
 [[package]]
@@ -3813,13 +3814,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "wd_log"
-version = "0.1.8"
+name = "wd_event"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c189c04745563e2160aee8290890b5ffcd0232a46a5616ad3a95d063742b5996"
+checksum = "519a381dd8440f76e349253d7557a227339b4238fb1b6448cca5a8336c8f6d97"
 dependencies = [
- "chrono",
- "lazy_static",
+ "anyhow",
+ "async-trait",
+ "tokio",
+ "wd_log",
+ "wd_tools 0.15.0",
 ]
 
 [[package]]
@@ -3865,6 +3869,12 @@ dependencies = [
  "uuid",
  "wd_sonyflake",
 ]
+
+[[package]]
+name = "wd_tools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053c5a6d1f14f5f7472bd23cda2e1a2df0bec01f27a3e177f25372d26b1197fe"
 
 [[package]]
 name = "web-sys"

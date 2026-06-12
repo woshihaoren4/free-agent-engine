@@ -1,4 +1,4 @@
-use crate::DEFAULT_SYSTEM_PROMPT;
+use crate::{Env, DEFAULT_SYSTEM_PROMPT};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -161,7 +161,7 @@ pub trait AgentConfig: Debug + Sync {
     }
 
     /// agent信息, 包括workspace相关
-    fn metadata(&self, id: &str) -> String {
+    async fn metadata(&self,env:Env, id: &str) -> String {
         "".to_string()
     }
 

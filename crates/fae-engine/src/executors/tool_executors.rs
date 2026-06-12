@@ -64,6 +64,15 @@ pub trait ToolSet: Debug + Sync {
 pub struct ToolSetImplMap {
     tools: HashMap<String, Arc<dyn Tool + Send + 'static>>,
 }
+impl ToolSetImplMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn add_tool<T:Tool + Send + 'static>(mut self, tool: T) -> Self {
+        self.tools.insert(tool.name().to_string(), Arc::new(tool));
+        self
+    }
+}
 #[async_trait]
 impl ToolSet for ToolSetImplMap {
     async fn load(&self, name: &str) -> anyhow::Result<Arc<dyn Tool + Send + 'static>> {
@@ -162,28 +171,10 @@ impl ToolExecutor {
         return Err(anyhow::anyhow!("[ToolExecutor] tools not found: {}", name));
     }
 }
-
-impl Default for ToolExecutor {
-    fn default() -> Self {
-        let mut tools = HashMap::new();
-
-        let tool_list: Vec<Arc<dyn Tool + Send + 'static>> = vec![
-            Arc::new(crate::tools::ExecuteCommand::default()),
-            Arc::new(crate::tools::SendHttpRequest),
-            Arc::new(crate::tools::ReadFile),
-            Arc::new(crate::tools::WriteFile::default()),
-            Arc::new(crate::tools::ListDirectory),
-            Arc::new(crate::tools::ExecutePython),
-            Arc::new(crate::tools::TodoWrite::default()),
-            Arc::new(crate::tools::ArkWebSearch::default()),
-        ];
-
-        for tool in tool_list {
-            tools.insert(tool.name().to_string(), tool);
-        }
-
+impl<T:ToolSet + Send + 'static> From<T> for ToolExecutor {
+    fn from(tools_loader: T) -> Self {
         Self {
-            tools_loader: vec![Box::new(ToolSetImplMap { tools })],
+            tools_loader: vec![Box::new(tools_loader)],
         }
     }
 }

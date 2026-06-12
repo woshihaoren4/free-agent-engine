@@ -1,7 +1,6 @@
-use fae_agent::{
-    Env, EnvEvent, Environment, GLOBAL_KEY_WORKSPACE, Select, Task, TaskResult, Thing, ThingItem,
-    ThingSelect,
-};
+use std::sync::Arc;
+use fae_agent::{Env, EnvEvent, Environment, GLOBAL_KEY_WORKSPACE, Select, Task, TaskResult, Thing, ThingItem, ThingSelect, FAE_WORKSPACE};
+use crate::AgentCtl;
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 
@@ -9,11 +8,12 @@ const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 pub struct WorkspaceRuntime {
     pub name: String,
     parent: Option<Env>,
+    loader: Arc<dyn AgentCtl + Send + 'static>,
 }
 
 impl WorkspaceRuntime {
-    pub fn new(name: String) -> Self {
-        Self { name, parent: None }
+    pub fn new(name: String, loader: Arc<dyn AgentCtl + Send + 'static>) -> Self {
+        Self { name, parent: None, loader }
     }
     pub fn get_env_var(&self, name: &str) -> Option<Thing> {
         match name {
@@ -60,9 +60,16 @@ impl Environment for WorkspaceRuntime {
     async fn query(&self, mut select: Select) -> anyhow::Result<Vec<Thing>> {
         select.workspace = Some(self.name.clone());
         if let ThingSelect::Env(ref key) = select.select {
+            if key == FAE_WORKSPACE {
+                return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::EnvVar(self.name.clone())).into_self()]);
+            }
             if let Some(env) = self.get_env_var(key) {
                 return Ok(vec![env]);
             }
+        }else if let ThingSelect::Agent(id) = select.select{
+            let agent_ref = self.loader.load(id.as_str()).await?;
+            let thing = Thing::new(self.id().to_string()).add_item(ThingItem::Agent(id,agent_ref.desc())).into_self();
+            return Ok(vec![thing]);
         }
         if let Some(ref env) = self.parent {
             env.query(select).await

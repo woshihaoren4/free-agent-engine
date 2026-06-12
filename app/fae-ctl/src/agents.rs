@@ -10,13 +10,8 @@ pub struct Agents {
 
 impl Agents {
     pub async fn new(ws: &str) -> Self {
-        let mut engine = AgentsEngine::default().await;
-        let ws_dir = InitProject::get_workspace_dir(ws);
-        let ws = engine
-            .build_workspace(ws, |builder| {
-                builder.set_loader(SingleAgentCtlFromFile::new(ws_dir));
-            })
-            .await;
+        let engine = AgentsEngine::default().await;
+        let ws = engine.workspace(ws).expect("No workspace found");
         Self { engine, ws }
     }
     pub async fn exit(&self) {

@@ -1,13 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{
-    AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
-    GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory,
-    MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task,
-    TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem,
-    ToolResponse, define_planning_group, fae_home,
-};
+use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTaskExt, Agent};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -18,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
@@ -27,6 +22,11 @@ pub struct SingleAgent<S, M> {
     memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
     session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
+}
+impl<S, M> Debug for SingleAgent<S, M> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SingleAgent {:?}", self.agent_id)
+    }
 }
 
 impl<S, M> SingleAgent<S, M> {
@@ -273,7 +273,7 @@ where
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
-        let agent_metadata = self.agent_config.metadata(&self.agent_id);
+        let agent_metadata = self.agent_config.metadata(self.env.clone(), &self.agent_id).await;
         let memory_metdata = self
             .memory
             .metadata_ext(&self.session_md.user_id(), self.session_md.id())
@@ -281,6 +281,25 @@ where
         let mut info = agent_metadata + &memory_metdata;
         info.push_str(self.agent_info.as_str());
         self.agent_info = info;
+        Ok(())
+    }
+    pub async fn load_sub_agents(&mut self) -> anyhow::Result<()> {
+        let agents = self.agent_config.sub_agents();
+        let mut info = "\n---\n## Sub-agents:\n You have sub-agents, each an expert in a particular field, and you can assign tasks to them using `agent_exec_task`.".to_string();
+        info.push_str("\n<sub_agent_list>\n>");
+        for agent in agents {
+            let things = self
+                .env
+                .query(ThingSelect::Agent(agent.clone()).into())
+                .await?;
+            for mut i in things {
+                while let Some(ThingItem::Agent(id,desc)) = i.items.pop() {
+                    info.push_str(format!("\n - AgentID: {} ,specialty: {}", id, desc).as_str());
+                }
+            }
+        }
+        info.push_str("\n</sub_agent_list>");
+        self.agent_info.push_str(&info);
         Ok(())
     }
     pub async fn load_skills(&mut self) -> anyhow::Result<()> {
@@ -705,9 +724,43 @@ where
         env.spawn(vec![task]).await
     }
 
-    async fn on_agent_task(&self, env: Env, task: AgentTask) -> anyhow::Result<()> {
-        let content = match task.content {
-            AgentTaskStatus::Create(task) => task,
+    async fn on_agent_task(&self, env: Env, mut task: AgentTaskExt) -> anyhow::Result<()> {
+        //先尝试解析渠道
+        let output = task.try_ext_into::<SenderMessageStream<M>>();
+        let mut user_id = String::new();
+        let mut session_id = String::new();
+        //解析返回值
+        let user_input = match task.task.content {
+            AgentTaskStatus::Create(create) => {
+                user_id = create.from_agent.user_id;
+                session_id = create.to_agent.session_id;
+                format!(
+                    "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
+                    task.task.task_id, create.content
+                )
+            },
+            AgentTaskStatus::Completed(result) => {
+                user_id = result.task_author.user_id;
+                if result.task_author.session_id.is_empty() {
+                    return anyhow::anyhow!("[SingleAgent:on_agent_task] Task Not Started, AgentTaskStatus::Completed get session_id is empty").err();
+                }
+                session_id = result.task_author.session_id;
+                format!(
+                    "The task you posted has been completed. \n Result:\n{}",
+                    result.content
+                )
+            },
+            AgentTaskStatus::Failed(result) => {
+                user_id = result.task_author.user_id;
+                if result.task_author.session_id.is_empty() {
+                    return anyhow::anyhow!("[SingleAgent:on_agent_task] Task Not Started, AgentTaskStatus::Failed get session_id is empty").err();
+                }
+                session_id = result.task_author.session_id;
+                format!(
+                    "The task you posted has failed. \n Result:\n{}",
+                    result.content
+                )
+            },
             _ => {
                 return anyhow::anyhow!(
                     "[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}",
@@ -716,10 +769,6 @@ where
                 .err();
             }
         };
-        let user_input = format!(
-            "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
-            task.task_id, content.content
-        );
         let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
         let input = if let Some(msg) = msgs.pop() {
             msg
@@ -728,11 +777,14 @@ where
                 .err();
         };
         //加载session
+        if session_id.is_empty() {
+            session_id = wd_tools::uuid::v4();
+        }
         let info = self
             .session_config
             .must_load_ext(
-                content.to_agent.user_id.as_str(),
-                content.to_agent.session_id.as_str(),
+                user_id.as_str(),
+                session_id.as_str(),
                 input
                     .content()
                     .chars()
@@ -744,12 +796,15 @@ where
         let memory = self.memory.clone();
         let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
             env.clone(),
-            content.to_agent.agent_id.clone(),
+            self.agent_id.clone(),
             info.clone(),
             self.agent_config.clone(),
             memory,
             input,
         );
+        if let Some(out) = output{
+            plan.set_output(out);
+        }
         if let Some(map) = info.extend() {
             plan.extend_context(map);
         }
@@ -760,11 +815,20 @@ where
         let task = Task::new(
             plan.get_context(),
             plan.id(),
-            content.to_agent.agent_id,
+            self.agent_id.clone(),
             TaskType::Plan,
         )
         .set_args(plan);
         env.spawn(vec![task]).await
+    }
+
+    async fn on_task_result_callback(&self, env: Env, mut result: TaskResult) -> anyhow::Result<()> {
+        if let Some(s) = result.into_inner::<AgentTaskExt>(){
+            return self.on_agent_task(env, s).await;
+        }else{
+            wd_log::log_info_ln!("[SingleAgent:on_task_result_callback] Received an unsupported task result status {:?}", result);
+        }
+        Ok(())
     }
 
     async fn exit(&self) {
