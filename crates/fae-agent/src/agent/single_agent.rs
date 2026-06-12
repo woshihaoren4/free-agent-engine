@@ -1,7 +1,13 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTask, AgentTaskStatus};
+use crate::{
+    AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
+    GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory,
+    MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task,
+    TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem,
+    ToolResponse, define_planning_group, fae_home,
+};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -597,7 +603,7 @@ define_planning_group!(
 #[async_trait::async_trait]
 impl<S, M> AgentEventHandle<S, M, M, SingleAgentPlan<S, M>> for SingleAgent<S, M>
 where
-    S: SessionMetadata + Clone + Send + Sync + 'static,
+    S: SessionMetadata + Default + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     fn id(&self) -> String {
@@ -700,19 +706,65 @@ where
     }
 
     async fn on_agent_task(&self, env: Env, task: AgentTask) -> anyhow::Result<()> {
-        let content = match task.content{
+        let content = match task.content {
             AgentTaskStatus::Create(task) => task,
-            _ =>{
-                return anyhow::anyhow!("[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}", task).err();
+            _ => {
+                return anyhow::anyhow!(
+                    "[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}",
+                    task
+                )
+                .err();
             }
         };
         let user_input = format!(
             "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
-            task.task_id,content.content
+            task.task_id, content.content
         );
         let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
-        //todo
-
+        let input = if let Some(msg) = msgs.pop() {
+            msg
+        } else {
+            return anyhow::anyhow!("[SingleAgent:on_agent_task] Failed to create input message")
+                .err();
+        };
+        //加载session
+        let info = self
+            .session_config
+            .must_load_ext(
+                content.to_agent.user_id.as_str(),
+                content.to_agent.session_id.as_str(),
+                input
+                    .content()
+                    .chars()
+                    .take(10)
+                    .collect::<String>()
+                    .as_str(),
+            )
+            .await;
+        let memory = self.memory.clone();
+        let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
+            env.clone(),
+            content.to_agent.agent_id.clone(),
+            info.clone(),
+            self.agent_config.clone(),
+            memory,
+            input,
+        );
+        if let Some(map) = info.extend() {
+            plan.extend_context(map);
+        }
+        if let Some(tips) = info.additional_tips() {
+            plan.additional_session_tips(tips);
+        }
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let task = Task::new(
+            plan.get_context(),
+            plan.id(),
+            content.to_agent.agent_id,
+            TaskType::Plan,
+        )
+        .set_args(plan);
+        env.spawn(vec![task]).await
     }
 
     async fn exit(&self) {
