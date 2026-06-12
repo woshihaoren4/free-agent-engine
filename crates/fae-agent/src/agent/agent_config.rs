@@ -161,7 +161,7 @@ pub trait AgentConfig: Debug + Sync {
     }
 
     /// agent信息, 包括workspace相关
-    async fn metadata(&self,env:Env, id: &str) -> String {
+    async fn metadata(&self,env:Env,user_id:&str, agent_id: &str) -> String {
         "".to_string()
     }
 

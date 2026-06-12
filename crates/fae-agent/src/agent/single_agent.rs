@@ -1,7 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTaskExt, Agent};
+use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTaskExt, Agent, Trigger};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -140,9 +140,9 @@ where
         }
         Ok(())
     }
-    pub fn close(&self) {
-        if let Some(ref output) = self.output {
-            output.close();
+    pub fn close(&mut self) {
+        if let Some(output) = self.output.take() {
+            Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(),output);
         } else {
             if !self.output_content.is_empty() {
                 let content = self.output_content.replace("\n", "\r\n");
@@ -273,7 +273,7 @@ where
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
-        let agent_metadata = self.agent_config.metadata(self.env.clone(), &self.agent_id).await;
+        let agent_metadata = self.agent_config.metadata(self.env.clone(), &self.session_md.user_id(), &self.agent_id).await;
         let memory_metdata = self
             .memory
             .metadata_ext(&self.session_md.user_id(), self.session_md.id())
@@ -285,7 +285,7 @@ where
     }
     pub async fn load_sub_agents(&mut self) -> anyhow::Result<()> {
         let agents = self.agent_config.sub_agents();
-        let mut info = "\n---\n## Sub-agents:\n You have sub-agents, each an expert in a particular field, and you can assign tasks to them using `agent_exec_task`.".to_string();
+        let mut info = "\n---\n## Sub-agents:\nYou can add an agent to the `sub_agent` field in your configuration file. Example field format: [\"agent_a\", \"agent_b\"].\n You have sub-agents, each an expert in a particular field, and you can assign tasks to them using `agent_exec_task`.".to_string();
         info.push_str("\n<sub_agent_list>\n>");
         for agent in agents {
             let things = self
@@ -571,6 +571,8 @@ where
     async fn init(&mut self) -> anyhow::Result<PlanningResult> {
         // 初始化agent信息
         self.init_agent_info().await?;
+        // 加载子agent
+        self.load_sub_agents().await?;
         //加载工具
         self.load_tools().await?;
         //加载skill

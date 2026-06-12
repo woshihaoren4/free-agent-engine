@@ -22,16 +22,19 @@ pub struct AgentRuntime {
     pub task_store: Arc<dyn AgentTaskStore+Send+Sync+'static>,
     pub task_tool: AgentTaskTool,
     pub channel: Channel<AgentTaskExt>,
+    pub spawn_channel: Channel<TaskResult>,
     parent: Option<Env>,
 }
 
 impl AgentRuntime {
     pub fn new(store:impl AgentTaskStore+Send+Sync+'static) -> Self {
         let chan = Channel::with_cap(100);
+        let spawn_chan = Channel::with_cap(100);
         let tool = AgentTaskTool::new(chan.clone());
         Self {
             task_store: Arc::new(store),
             task_tool: tool,
+            spawn_channel: spawn_chan,
             parent: None,
             channel: chan,
         }
@@ -87,6 +90,7 @@ impl Environment for AgentRuntime {
                 None
             };
             let recv = self.channel.recv();
+            let spawn_recv = self.spawn_channel.recv();
 
             tokio::select! {
                 res = recv => {
@@ -112,6 +116,10 @@ impl Environment for AgentRuntime {
                             return Ok(EnvEvent::TaskResult(task));
                         }
                     }
+                }
+                res = spawn_recv =>{
+                    let result = res?;
+                    return Ok(EnvEvent::TaskResult(result));
                 }
                 res = async {
                     if let Some(fut) = parent_fut {
@@ -164,7 +172,10 @@ impl Environment for AgentRuntime {
             }
         }
         for task in ts {
-            self.exec_tool(task).await?;
+            let result = self.exec_tool(task).await?;
+            if let Err(e) = self.spawn_channel.send(result).await{
+                return anyhow::anyhow!("[TaskRuntime] spawn failed, send result error: {:?}", e).err();
+            }
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
-use std::any::Any;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -56,8 +56,6 @@ pub struct AgentTask {
     pub content: AgentTaskStatus,
 }
 
-
-
 impl AgentTask {
     pub fn get_push_agent_id(&self) -> &str {
         match &self.content {
@@ -67,74 +65,88 @@ impl AgentTask {
             AgentTaskStatus::Failed(result) => &result.task_author.agent_id,
         }
     }
-    pub fn arguments()-> serde_json::Value {
+    pub fn arguments() -> serde_json::Value {
+        let agent_info = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "user_id": {"type": "string"}
+            }
+        });
+        let task_result = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"}
+            },
+            "required": ["content"]
+        });
+
         serde_json::json!({
             "type": "object",
-            "description": "Update a task status. Exactly one of the following fields must be provided, corresponding to the task lifecycle.",
+            "description": "Update a task status. The shape must match AgentTask: task_id plus content containing exactly one lifecycle status.",
             "properties": {
-                "create": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task id."
+                },
+                "content": {
                     "type": "object",
-                    "description": "Publish a new task.",
+                    "description": "The task lifecycle status. Exactly one status field must be provided.",
                     "properties": {
-                        "to_agent": {
+                        "create": {
                             "type": "object",
-                            "description": "The agent that will execute the task.",
+                            "description": "Publish a new task.",
                             "properties": {
-                                "agent_id": {"type": "string"},
-                                "session_id": {"type": "string"},
-                                "user_id": {"type": "string"}
+                                "to_agent": agent_info,
+                                "content": {"type": "string", "description": "The task content."}
                             },
-                            "required": ["agent_id", "session_id", "user_id"]
+                            "required": ["to_agent", "content"]
                         },
-                        "content": {"type": "string", "description": "The task content."}
+                        "executing": {
+                            "type": "object",
+                            "description": "Mark the task as executing.",
+                            "properties": {
+                                "content": {"type": "string", "description": "The task is running."}
+                            }
+                        },
+                        "completed": task_result.clone(),
+                        "failed": task_result
                     },
-                    "required": ["to_agent", "content"]
-                },
-                "executing": {
-                    "type": "object",
-                    "description": "Mark the task as executing.",
-                    "properties": {
-                        "content": {"type": "string", "description": "The task is running."}
-                    },
-                    "required": []
-                },
-                "completed": {
-                    "type": "string",
-                    "description": "Mark the task as completed with the result."
-                },
-                "failed": {
-                    "type": "string",
-                    "description": "Mark the task as failed with the reason."
+                    "oneOf": [
+                        {"required": ["create"]},
+                        {"required": ["executing"]},
+                        {"required": ["completed"]},
+                        {"required": ["failed"]}
+                    ]
                 }
-            }
+            },
+            "required": ["task_id", "content"]
         })
     }
 }
 
 #[derive(Debug)]
-pub struct AgentTaskExt{
+pub struct AgentTaskExt {
     pub task: AgentTask,
-    pub ext:Option<Box<dyn Any + Sync + Send + 'static>>
+    pub ext: Option<Box<dyn Any + Sync + Send + 'static>>,
 }
 impl AgentTaskExt {
     pub fn new(task: AgentTask) -> Self {
-        Self{
-            task,
-            ext: None,
-        }
+        Self { task, ext: None }
     }
     pub fn set(self, ext: Box<dyn Any + Sync + Send + 'static>) -> Self {
-        Self{
+        Self {
             task: self.task,
             ext: Some(ext),
         }
     }
-    pub fn try_ext_into<T:Any>(&mut self)->Option<T>{
+    pub fn try_ext_into<T: Any>(&mut self) -> Option<T> {
         if let Some(ext) = self.ext.as_deref() {
-            if ext.downcast_ref::<T>().is_none(){
-                return None
+            if ext.downcast_ref::<T>().is_none() {
+                return None;
             }
-        }else{
+        } else {
             return None;
         }
         let t = self.ext.take().unwrap();

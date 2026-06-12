@@ -245,7 +245,7 @@ impl AgentConfig for AgentConfigFile {
     fn get(&self, key: &str) -> Option<String> {
         self.config.custom.get(key).cloned()
     }
-    async fn metadata(&self,env:Env, id: &str) -> String {
+    async fn metadata(&self,env:Env,user_id:&str, agent_id: &str) -> String {
         //查询workspace
         let mut ts = env.query(ThingSelect::Env(FAE_WORKSPACE.into()).into()).await.unwrap_or_default();
         let workspace = {
@@ -258,7 +258,8 @@ impl AgentConfig for AgentConfigFile {
         meta.push_str(&format!("\n - your fae dir: $FAE_HOME: `{}`", fae_home().display()));
         meta.push_str(&format!("\n - your agent workspace=$FAE_WORKSPACE=`{}`, dir is $FAE_HOME/$FAE_WORKSPACE", workspace));
         meta.push_str(&format!("\n - your AgentName: `{}`", self.name()));
-        meta.push_str(&format!("\n - your AgentId: `{}`", id));
+        meta.push_str(&format!("\n - your AgentId: `{}`", agent_id));
+        meta.push_str(&format!("\n - your UserId: `{}`", user_id));
         meta.push_str(&format!("\n - your Agent dir is $FAE_HOME/$FAE_WORKSPACE/$AgentId"));
         meta.push_str(&format!("\n - your model,tools,skill,mcp_servers,sub_agents config file path:$AGENT_CONFIG_PATH:=`{}`", self.config_path));
         format!(

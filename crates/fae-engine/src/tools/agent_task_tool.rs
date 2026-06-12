@@ -40,6 +40,7 @@ impl Tool for AgentTaskTool {
         let channel = self.chan.clone();
         let mut task: AgentTask = serde_json::from_str(&args)
             .map_err(|e| anyhow::anyhow!("[AgentTaskTool] invalid arguments: {}", e))?;
+        println!("--->1");
         match &mut task.content {
             AgentTaskStatus::Create(create) => {
                 if create.to_agent.agent_id.is_empty() {
@@ -51,6 +52,7 @@ impl Tool for AgentTaskTool {
                     user_id: iden.get_user_id().to_string(),
                 };
                 task.task_id = iden.task_id;
+                println!("--->2");
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
@@ -60,6 +62,7 @@ impl Tool for AgentTaskTool {
                         Ok(())
                     }
                 );
+                println!("--->3");
             }
             AgentTaskStatus::Executing(executing) => {
                 if task.task_id.is_empty() {
@@ -105,9 +108,6 @@ impl Tool for AgentTaskTool {
                 );
             }
         }
-
-
-
 
         Ok(ToolResponse::with_result("Task update successfully.".into()))
     }
