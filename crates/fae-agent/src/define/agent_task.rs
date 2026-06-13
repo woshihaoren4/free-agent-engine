@@ -52,6 +52,7 @@ pub enum AgentTaskStatus {
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub struct AgentTask {
+    #[serde(default)]
     pub task_id: String,
     pub content: AgentTaskStatus,
 }
@@ -77,6 +78,7 @@ impl AgentTask {
         let task_result = serde_json::json!({
             "type": "object",
             "properties": {
+                "description": "The task result. task_id field must be provided.",
                 "content": {"type": "string"}
             },
             "required": ["content"]
@@ -96,7 +98,7 @@ impl AgentTask {
                     "properties": {
                         "create": {
                             "type": "object",
-                            "description": "Publish a new task.",
+                            "description": "Publish a new task. task_id is auto generated.",
                             "properties": {
                                 "to_agent": agent_info,
                                 "content": {"type": "string", "description": "The task content."}
@@ -105,7 +107,7 @@ impl AgentTask {
                         },
                         "executing": {
                             "type": "object",
-                            "description": "Mark the task as executing.",
+                            "description": "Mark the task as executing.task_id must be provided.",
                             "properties": {
                                 "content": {"type": "string", "description": "The task is running."}
                             }
@@ -121,7 +123,7 @@ impl AgentTask {
                     ]
                 }
             },
-            "required": ["task_id", "content"]
+            "required": ["content"]
         })
     }
 }

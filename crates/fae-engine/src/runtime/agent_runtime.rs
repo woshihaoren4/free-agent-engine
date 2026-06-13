@@ -1,25 +1,28 @@
+use crate::tools::{AGENT_TASK_TOOL_NAME, AgentTaskTool};
 use crate::{IdenInfo, Tool};
-use fae_agent::{AgentInfo, AgentTask, AgentTaskExt, AgentTaskStatus, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
+use fae_agent::{
+    AgentInfo, AgentTask, AgentTaskExt, AgentTaskStatus, Env, EnvEvent, Environment, Select,
+    TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse,
+};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use wd_tools::channel::Channel;
 use wd_tools::PFErr;
-use crate::tools::{AgentTaskTool, AGENT_TASK_TOOL_NAME};
+use wd_tools::channel::Channel;
 
 const AGENT_TASK_RUNTIME_ID: &str = "AGENT_TASK_RUNTIME_ID";
 
 #[async_trait::async_trait]
 pub trait AgentTaskStore: Debug {
     async fn push_task(&self, task: AgentTask);
-    async fn load_tasks(&self,task_id:&str) -> anyhow::Result<Vec<AgentTask>>;
-    async fn get_task_author_info(&self,task_id:&str) -> anyhow::Result<AgentInfo>;
+    async fn load_tasks(&self, task_id: &str) -> anyhow::Result<Vec<AgentTask>>;
+    async fn get_task_author_info(&self, task_id: &str) -> anyhow::Result<AgentInfo>;
 }
 
 #[derive(Debug)]
 pub struct AgentRuntime {
-    pub task_store: Arc<dyn AgentTaskStore+Send+Sync+'static>,
+    pub task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
     pub task_tool: AgentTaskTool,
     pub channel: Channel<AgentTaskExt>,
     pub spawn_channel: Channel<TaskResult>,
@@ -27,7 +30,7 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub fn new(store:impl AgentTaskStore+Send+Sync+'static) -> Self {
+    pub fn new(store: impl AgentTaskStore + Send + Sync + 'static) -> Self {
         let chan = Channel::with_cap(100);
         let spawn_chan = Channel::with_cap(100);
         let tool = AgentTaskTool::new(chan.clone());
@@ -132,7 +135,6 @@ impl Environment for AgentRuntime {
                 }
             };
         }
-
     }
 
     async fn query(&self, select: Select) -> anyhow::Result<Vec<Thing>> {
@@ -147,9 +149,9 @@ impl Environment for AgentRuntime {
                         .into_self(),
                 ]);
             }
-        }else if let ThingSelect::AgenTask(id) = &select.select {
+        } else if let ThingSelect::AgenTask(id) = &select.select {
             let tasks = self.task_store.load_tasks(id).await?;
-            let tasks = tasks.into_iter().map(|x|x.content).collect::<Vec<_>>();
+            let tasks = tasks.into_iter().map(|x| x.content).collect::<Vec<_>>();
             let mut source = Thing::new(self.id().to_string());
             let thing = source.add_item(ThingItem::AgenTask(tasks)).into_self();
             return Ok(vec![thing]);
@@ -173,8 +175,9 @@ impl Environment for AgentRuntime {
         }
         for task in ts {
             let result = self.exec_tool(task).await?;
-            if let Err(e) = self.spawn_channel.send(result).await{
-                return anyhow::anyhow!("[TaskRuntime] spawn failed, send result error: {:?}", e).err();
+            if let Err(e) = self.spawn_channel.send(result).await {
+                return anyhow::anyhow!("[TaskRuntime] spawn failed, send result error: {:?}", e)
+                    .err();
             }
         }
         Ok(())
@@ -194,8 +197,8 @@ impl Environment for AgentRuntime {
 
 // -------------- AgentTaskStore 的内存实现 --------------
 #[derive(Debug)]
-pub struct DefaultAgentTaskStore{
-    pub map:RwLock<HashMap<String,Vec<AgentTask>>>,
+pub struct DefaultAgentTaskStore {
+    pub map: RwLock<HashMap<String, Vec<AgentTask>>>,
 }
 
 #[async_trait::async_trait]
@@ -213,7 +216,7 @@ impl AgentTaskStore for DefaultAgentTaskStore {
         let read = self.map.read().await;
         if let Some(s) = read.get(task_id) {
             Ok(s.clone())
-        }else{
+        } else {
             return anyhow::anyhow!("[TaskRuntime] load_tasks failed, task_id not found").err();
         }
     }
@@ -221,19 +224,20 @@ impl AgentTaskStore for DefaultAgentTaskStore {
     async fn get_task_author_info(&self, task_id: &str) -> anyhow::Result<AgentInfo> {
         let read = self.map.read().await;
         if let Some(s) = read.get(task_id) {
-            for i in s.iter().rev(){
-                if let AgentTaskStatus::Create(ref t) = i.content{
+            for i in s.iter().rev() {
+                if let AgentTaskStatus::Create(ref t) = i.content {
                     return Ok(t.from_agent.clone());
                 }
             }
         }
-        return anyhow::anyhow!("[TaskRuntime] get_task_author_info failed, task_id not found").err();
+        return anyhow::anyhow!("[TaskRuntime] get_task_author_info failed, task_id not found")
+            .err();
     }
 }
 
 impl Default for DefaultAgentTaskStore {
     fn default() -> Self {
-        Self{
+        Self {
             map: RwLock::new(HashMap::new()),
         }
     }

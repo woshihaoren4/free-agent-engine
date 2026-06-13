@@ -1,7 +1,13 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, define_planning_group, fae_home, AgentTaskExt, Agent, Trigger};
+use crate::{
+    Agent, AgentConfig, AgentTask, AgentTaskExt, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
+    GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory,
+    MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task,
+    TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem,
+    ToolResponse, Trigger, define_planning_group, fae_home,
+};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -117,7 +123,8 @@ where
             self.context.set(k, v);
         }
     }
-    async fn send(&mut self, msg: M) -> anyhow::Result<()> {
+    async fn send(&mut self, mut msg: M) -> anyhow::Result<()> {
+        msg.set_agent_id(self.agent_id.clone());
         if let Some(ref output) = self.output {
             output.send(msg).await?;
         } else {
@@ -142,7 +149,7 @@ where
     }
     pub fn close(&mut self) {
         if let Some(output) = self.output.take() {
-            Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(),output);
+            Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(), output);
         } else {
             if !self.output_content.is_empty() {
                 let content = self.output_content.replace("\n", "\r\n");
@@ -273,7 +280,10 @@ where
         Ok(PlanningResult::Tasks(vec![task]))
     }
     pub async fn init_agent_info(&mut self) -> anyhow::Result<()> {
-        let agent_metadata = self.agent_config.metadata(self.env.clone(), &self.session_md.user_id(), &self.agent_id).await;
+        let agent_metadata = self
+            .agent_config
+            .metadata(self.env.clone(), &self.session_md.user_id(), &self.agent_id)
+            .await;
         let memory_metdata = self
             .memory
             .metadata_ext(&self.session_md.user_id(), self.session_md.id())
@@ -285,7 +295,7 @@ where
     }
     pub async fn load_sub_agents(&mut self) -> anyhow::Result<()> {
         let agents = self.agent_config.sub_agents();
-        let mut info = "\n---\n## Sub-agents:\nYou can add an agent to the `sub_agent` field in your configuration file. Example field format: [\"agent_a\", \"agent_b\"].\n You have sub-agents, each an expert in a particular field, and you can assign tasks to them using `agent_exec_task`.".to_string();
+        let mut info = "\n---\n## Sub-agents:\nYou can add an agent to the `sub_agent` field in your configuration file. Example field format: [\"agent_a\", \"agent_b\"].\nEach subagent is an expert in a specific field. If you need to handle tasks in the corresponding field, you must initiate a call to them through `agent_exec_task`.".to_string();
         info.push_str("\n<sub_agent_list>\n>");
         for agent in agents {
             let things = self
@@ -293,7 +303,7 @@ where
                 .query(ThingSelect::Agent(agent.clone()).into())
                 .await?;
             for mut i in things {
-                while let Some(ThingItem::Agent(id,desc)) = i.items.pop() {
+                while let Some(ThingItem::Agent(id, desc)) = i.items.pop() {
                     info.push_str(format!("\n - AgentID: {} ,specialty: {}", id, desc).as_str());
                 }
             }
@@ -740,7 +750,7 @@ where
                     "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
                     task.task.task_id, create.content
                 )
-            },
+            }
             AgentTaskStatus::Completed(result) => {
                 user_id = result.task_author.user_id;
                 if result.task_author.session_id.is_empty() {
@@ -751,7 +761,7 @@ where
                     "The task you posted has been completed. \n Result:\n{}",
                     result.content
                 )
-            },
+            }
             AgentTaskStatus::Failed(result) => {
                 user_id = result.task_author.user_id;
                 if result.task_author.session_id.is_empty() {
@@ -762,7 +772,7 @@ where
                     "The task you posted has failed. \n Result:\n{}",
                     result.content
                 )
-            },
+            }
             _ => {
                 return anyhow::anyhow!(
                     "[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}",
@@ -804,7 +814,7 @@ where
             memory,
             input,
         );
-        if let Some(out) = output{
+        if let Some(out) = output {
             plan.set_output(out);
         }
         if let Some(map) = info.extend() {
@@ -824,11 +834,18 @@ where
         env.spawn(vec![task]).await
     }
 
-    async fn on_task_result_callback(&self, env: Env, mut result: TaskResult) -> anyhow::Result<()> {
-        if let Some(s) = result.into_inner::<AgentTaskExt>(){
+    async fn on_task_result_callback(
+        &self,
+        env: Env,
+        mut result: TaskResult,
+    ) -> anyhow::Result<()> {
+        if let Some(s) = result.into_inner::<AgentTaskExt>() {
             return self.on_agent_task(env, s).await;
-        }else{
-            wd_log::log_info_ln!("[SingleAgent:on_task_result_callback] Received an unsupported task result status {:?}", result);
+        } else {
+            wd_log::log_info_ln!(
+                "[SingleAgent:on_task_result_callback] Received an unsupported task result status {:?}",
+                result
+            );
         }
         Ok(())
     }

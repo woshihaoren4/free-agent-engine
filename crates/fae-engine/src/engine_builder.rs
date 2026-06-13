@@ -1,39 +1,53 @@
+use crate::agent_runtime::DefaultAgentTaskStore;
 use crate::engine::AgentsEngine;
 use crate::runtime::exec_runtime::ExecRuntime;
 use crate::runtime::plan_runtime::PlanRuntime;
 use crate::workspace::Workspace;
-use crate::{AgentRuntime, CronRuntime, McpExecutor, ModelOpenAIApiExecutor, SingleAgentCtlFromFile, SkillsExecutor, ToolExecutor, ToolSetImplMap, WorkspaceBuilder, WorkspaceRuntime};
+use crate::{
+    AgentRuntime, CronRuntime, McpExecutor, ModelOpenAIApiExecutor, SingleAgentCtlFromFile,
+    SkillsExecutor, ToolExecutor, ToolSetImplMap, WorkspaceBuilder, WorkspaceRuntime,
+};
 use fae_agent::{Environment, TaskType};
-use crate::agent_runtime::DefaultAgentTaskStore;
 
 impl AgentsEngine {
     pub async fn default() -> Self {
         let mut engine = AgentsEngine::new(
             ExecRuntime::new()
-            .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
-            .register_executor_ext(TaskType::Tool, ToolExecutor::from(ToolSetImplMap::new()
-                .add_tool(crate::tools::ExecuteCommand::default())
-                .add_tool(crate::tools::SendHttpRequest)
-                .add_tool(crate::tools::ReadFile)
-                .add_tool(crate::tools::WriteFile::default())
-                .add_tool(crate::tools::ListDirectory)
-                .add_tool(crate::tools::ExecutePython)
-                .add_tool(crate::tools::TodoWrite::default())
-                .add_tool(crate::tools::ArkWebSearch::default())))
-            .register_executor(TaskType::Skill, SkillsExecutor::default())
-            .register_executor(TaskType::Mcp, McpExecutor::default())
-            .into_self())
-            .assemble_runtime(CronRuntime::new())
-            .await
-            .assemble_runtime(AgentRuntime::new(DefaultAgentTaskStore::default()))
-            .await
-            .assemble_runtime(PlanRuntime::new())
-            .await;
+                .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
+                .register_executor_ext(
+                    TaskType::Tool,
+                    ToolExecutor::from(
+                        ToolSetImplMap::new()
+                            .add_tool(crate::tools::ExecuteCommand::default())
+                            .add_tool(crate::tools::SendHttpRequest)
+                            .add_tool(crate::tools::ReadFile)
+                            .add_tool(crate::tools::WriteFile::default())
+                            .add_tool(crate::tools::ListDirectory)
+                            .add_tool(crate::tools::ExecutePython)
+                            .add_tool(crate::tools::TodoWrite::default())
+                            .add_tool(crate::tools::ArkWebSearch::default()),
+                    ),
+                )
+                .register_executor(TaskType::Skill, SkillsExecutor::default())
+                .register_executor(TaskType::Mcp, McpExecutor::default())
+                .into_self(),
+        )
+        .assemble_runtime(CronRuntime::new())
+        .await
+        .assemble_runtime(AgentRuntime::new(DefaultAgentTaskStore::default()))
+        .await
+        .assemble_runtime(PlanRuntime::new())
+        .await;
         // add default workspace main
         let mut builder = WorkspaceBuilder::new("main", engine.runtime.clone());
         builder.set_loader(SingleAgentCtlFromFile::with_workspace(builder.get_name()));
         let loader = builder.get_loader();
-        builder.add_env_layer(WorkspaceRuntime::new(builder.get_name().to_string(),loader)).await;
+        builder
+            .add_env_layer(WorkspaceRuntime::new(
+                builder.get_name().to_string(),
+                loader,
+            ))
+            .await;
         engine.set_workspaces(builder.get_name().to_string(), builder.build());
         engine
     }

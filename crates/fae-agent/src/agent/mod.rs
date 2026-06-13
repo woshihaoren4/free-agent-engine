@@ -1,9 +1,9 @@
 mod agent_config;
 pub mod single_agent;
 
-use std::fmt::Debug;
 pub use agent_config::*;
 pub use single_agent::*;
+use std::fmt::Debug;
 
 use crate::session::Session;
 use crate::{Command, Env, EnvEvent, Memory, SessionCtl, SessionMD};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// 智能体 trait，定义智能体的核心接口
 #[async_trait::async_trait]
-pub trait Agent:Debug+ Sync {
+pub trait Agent: Debug + Sync {
     /// 智能体ID
     fn id(&self) -> String;
 
@@ -64,7 +64,7 @@ where
         Self(Arc::new(agent))
     }
 }
-impl Debug for AgentRef{
+impl Debug for AgentRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "AgentRef {:?}", self.0.id())
     }

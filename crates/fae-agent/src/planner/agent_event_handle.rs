@@ -1,12 +1,15 @@
-use std::fmt::{Debug, Formatter};
 use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{Agent, AgentConfig, AgentTask, AgentTaskExt, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
+use crate::{
+    Agent, AgentConfig, AgentTask, AgentTaskExt, Command, Env, EnvEvent, Memory, Message, Planning,
+    Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
+};
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wd_tools::PFErr;
 
 #[async_trait::async_trait]
-pub trait AgentEventHandle<S, In, Out, P>:Debug+ Sync
+pub trait AgentEventHandle<S, In, Out, P>: Debug + Sync
 where
     S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static,
@@ -26,11 +29,7 @@ where
     async fn on_none(&self) {}
     // 另一个agent给的任务
     async fn on_agent_task(&self, env: Env, atask: AgentTaskExt) -> anyhow::Result<()> {
-        anyhow::anyhow!(
-            "[AgentEventExt::{}] not support on_agent_task",
-            self.id(),
-        )
-            .err()
+        anyhow::anyhow!("[AgentEventExt::{}] not support on_agent_task", self.id(),).err()
     }
     /// 处理会话调用事件
     async fn on_session_call(
@@ -132,7 +131,10 @@ pub struct AgentEventHandleImpl<E, S, In, Out, P> {
     _p: PhantomData<P>,
 }
 
-impl<E, S, In, Out, P> Debug for AgentEventHandleImpl<E, S, In, Out, P> where E: Debug {
+impl<E, S, In, Out, P> Debug for AgentEventHandleImpl<E, S, In, Out, P>
+where
+    E: Debug,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "AgentEventHandle {:?}", self.agent_event_ext)
     }

@@ -48,7 +48,7 @@ impl WorkspaceBuilder {
         let loader = self.loader.clone();
         self.set_loader(AgentLoaderLayer::new(loader, layer))
     }
-    pub fn get_loader(&self)->Arc<dyn AgentCtl + Send + 'static>{
+    pub fn get_loader(&self) -> Arc<dyn AgentCtl + Send + 'static> {
         self.loader.clone()
     }
     pub async fn add_env_layer(

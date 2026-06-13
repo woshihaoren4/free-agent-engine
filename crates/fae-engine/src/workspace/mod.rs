@@ -21,7 +21,7 @@ pub struct RecallAgentRef {
 }
 
 #[async_trait::async_trait]
-pub trait AgentCtl:Debug+ Sync {
+pub trait AgentCtl: Debug + Sync {
     fn id(&self) -> &str {
         "default"
     }

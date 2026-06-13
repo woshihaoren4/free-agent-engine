@@ -228,7 +228,11 @@ impl ChatUi {
                                         } else {
                                             format!(" [{}]", current_title)
                                         };
-                                        print_text(&format!("\n\n❯ {}{}\n", self.agent_name, title_suffix))?;
+                                        Self::print_agent_header(
+                                            &record.agent_id,
+                                            &title_suffix,
+                                            &print_text,
+                                        )?;
                                     }
                                     let content = record.content();
                                     if !content.is_empty() {
@@ -333,6 +337,18 @@ impl ChatUi {
             ResetColor,
             Print("\r\n"),
         )?;
+        stdout.flush()
+    }
+
+    fn print_agent_header<F>(agent_id: &str, title_suffix: &str, print_text: &F) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        let mut stdout = io::stdout();
+        queue!(stdout, SetForegroundColor(Color::Green))?;
+        stdout.flush()?;
+        print_text(&format!("\n\n❯ {}{}\n", agent_id, title_suffix))?;
+        queue!(stdout, ResetColor)?;
         stdout.flush()
     }
 

@@ -1,6 +1,9 @@
-use std::sync::Arc;
-use fae_agent::{Env, EnvEvent, Environment, GLOBAL_KEY_WORKSPACE, Select, Task, TaskResult, Thing, ThingItem, ThingSelect, FAE_WORKSPACE};
 use crate::AgentCtl;
+use fae_agent::{
+    Env, EnvEvent, Environment, FAE_WORKSPACE, GLOBAL_KEY_WORKSPACE, Select, Task, TaskResult,
+    Thing, ThingItem, ThingSelect,
+};
+use std::sync::Arc;
 
 const DEFAULT_WORKSPACE_RUNTIME_ID: &str = "FAE_DEFAULT_WORKSPACE_RUNTIME";
 
@@ -13,7 +16,11 @@ pub struct WorkspaceRuntime {
 
 impl WorkspaceRuntime {
     pub fn new(name: String, loader: Arc<dyn AgentCtl + Send + 'static>) -> Self {
-        Self { name, parent: None, loader }
+        Self {
+            name,
+            parent: None,
+            loader,
+        }
     }
     pub fn get_env_var(&self, name: &str) -> Option<Thing> {
         match name {
@@ -61,14 +68,20 @@ impl Environment for WorkspaceRuntime {
         select.workspace = Some(self.name.clone());
         if let ThingSelect::Env(ref key) = select.select {
             if key == FAE_WORKSPACE {
-                return Ok(vec![Thing::new(self.id().to_string()).add_item(ThingItem::EnvVar(self.name.clone())).into_self()]);
+                return Ok(vec![
+                    Thing::new(self.id().to_string())
+                        .add_item(ThingItem::EnvVar(self.name.clone()))
+                        .into_self(),
+                ]);
             }
             if let Some(env) = self.get_env_var(key) {
                 return Ok(vec![env]);
             }
-        }else if let ThingSelect::Agent(id) = select.select{
+        } else if let ThingSelect::Agent(id) = select.select {
             let agent_ref = self.loader.load(id.as_str()).await?;
-            let thing = Thing::new(self.id().to_string()).add_item(ThingItem::Agent(id,agent_ref.desc())).into_self();
+            let thing = Thing::new(self.id().to_string())
+                .add_item(ThingItem::Agent(id, agent_ref.desc()))
+                .into_self();
             return Ok(vec![thing]);
         }
         if let Some(ref env) = self.parent {

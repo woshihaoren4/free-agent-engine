@@ -252,7 +252,9 @@ impl InitProject {
                 .expect("Failed to create fae_coding agent directory");
             let mut fae_coding_config = AgentConfigData::default()
                 .set_name("风筝编程助手")
-                .set_description("风筝编程助手是一个智能编程助手，用于您所有的编码任务。")
+                .set_description(
+                    "风筝编程助手是一个智能编程助手，用于项目开发，写脚本，错误修复，代码优化等。",
+                )
                 .set_prompt_path(format!("{}/prompt/aicoding.txt", fae_dir.display()));
             fae_coding_config
                 .init("fae_coding", &ws_dir)

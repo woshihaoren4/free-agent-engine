@@ -73,6 +73,7 @@ pub trait MemoryEntry: Message {
         Self: Sized;
     fn title(&self) -> String;
     fn content(&self) -> &str;
+    fn set_agent_id(&mut self, agent_id: String);
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
     // 是否需要记住该条记录，落盘
     fn is_remember(&self) -> bool {
@@ -98,6 +99,8 @@ pub enum RecordItem {
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct Record {
     pub id: String,
+    #[serde(default)]
+    pub agent_id: String,
     pub item: RecordItem,
 }
 impl Record {
@@ -134,6 +137,7 @@ impl From<RecordItem> for Record {
     fn from(item: RecordItem) -> Self {
         Self {
             id: "".to_string(),
+            agent_id: "".to_string(),
             item,
         }
     }
@@ -142,6 +146,7 @@ impl Default for Record {
     fn default() -> Self {
         Self {
             id: "".to_string(),
+            agent_id: "".to_string(),
             item: RecordItem::Wait,
         }
     }
@@ -161,6 +166,7 @@ impl MemoryEntry for Record {
                 msgs.push(Record {
                     id: wd_tools::uuid::v4(),
                     item: RecordItem::UserInput(m),
+                    agent_id: "".to_string(),
                 });
             }
             ChatMsg::Assistant(m) => match m {
@@ -336,6 +342,9 @@ impl MemoryEntry for Record {
         }
     }
 
+    fn set_agent_id(&mut self, agent_id: String) {
+        self.agent_id = agent_id;
+    }
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage> {
         match self.item {
             RecordItem::UserInput(m) => Some(ChatCompletionRequestMessage::User(m)),

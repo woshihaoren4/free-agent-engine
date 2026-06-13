@@ -28,7 +28,7 @@ impl SingleAgentCtlFromFile {
             agents: RwLock::new(HashMap::new()),
         }
     }
-    pub fn with_workspace(ws_name:&str) ->Self{
+    pub fn with_workspace(ws_name: &str) -> Self {
         let workspace_dir = fae_agent::fae_home().join(ws_name);
         Self::with_dir(workspace_dir)
     }

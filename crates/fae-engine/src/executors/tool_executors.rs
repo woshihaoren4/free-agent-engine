@@ -68,7 +68,7 @@ impl ToolSetImplMap {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn add_tool<T:Tool + Send + 'static>(mut self, tool: T) -> Self {
+    pub fn add_tool<T: Tool + Send + 'static>(mut self, tool: T) -> Self {
         self.tools.insert(tool.name().to_string(), Arc::new(tool));
         self
     }
@@ -171,7 +171,7 @@ impl ToolExecutor {
         return Err(anyhow::anyhow!("[ToolExecutor] tools not found: {}", name));
     }
 }
-impl<T:ToolSet + Send + 'static> From<T> for ToolExecutor {
+impl<T: ToolSet + Send + 'static> From<T> for ToolExecutor {
     fn from(tools_loader: T) -> Self {
         Self {
             tools_loader: vec![Box::new(tools_loader)],

@@ -1,4 +1,7 @@
-use crate::{AgentTask, AgentTaskExt, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
+use crate::{
+    AgentTask, AgentTaskExt, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult,
+    TaskType,
+};
 use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
@@ -157,7 +160,7 @@ pub enum ThingItem {
     /// 环境变量
     EnvVar(String),
     /// 智能体,agent_id,agent desc
-    Agent(String,String),
+    Agent(String, String),
     /// agent 任务记录，任务ID
     AgenTask(Vec<AgentTaskStatus>),
     /// 技能: Skill头信息
@@ -180,7 +183,7 @@ impl ThingItem {
             Self::Module(s) => s.to_string(),
             Self::Tool(s, _) => s.to_string(),
             Self::EnvVar(s) => s.to_string(),
-            Self::Agent(id,desc) => format!("AgentID: {},specialty: {}", id, desc),
+            Self::Agent(id, desc) => format!("AgentID: {},specialty: {}", id, desc),
             Self::AgenTask(s) => serde_json::to_string(s).unwrap_or("ThingItem::AgenTask".into()),
             Self::Skill(s) => s.to_string(),
             Self::Custom(s) => s.to_string(),
