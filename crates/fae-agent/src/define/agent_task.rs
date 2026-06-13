@@ -76,57 +76,54 @@ impl AgentTaskStatus {
                 "agent_id": {"type": "string"},
                 "session_id": {"type": "string"},
                 "user_id": {"type": "string"}
-            }
+            },
+            "required": ["agent_id"]
         });
         let task_result = serde_json::json!({
             "type": "object",
-            "properties": {
-                "description": "The task result. task_id field must be provided.",
-                "content": {"type": "string"}
-            },
-            "required": ["content"]
-        });
-
-        serde_json::json!({
-            "type": "object",
-            "description": "Update a task status. The shape must match AgentTask: task_id plus content containing exactly one lifecycle status.",
             "properties": {
                 "task_id": {
                     "type": "string",
                     "description": "The task id."
                 },
-                "content": {
-                    "type": "object",
-                    "description": "The task lifecycle status. Exactly one status field must be provided.",
-                    "properties": {
-                        "create": {
-                            "type": "object",
-                            "description": "Publish a new task. task_id is auto generated.",
-                            "properties": {
-                                "to_agent": agent_info,
-                                "content": {"type": "string", "description": "The task content."}
-                            },
-                            "required": ["to_agent", "content"]
-                        },
-                        "executing": {
-                            "type": "object",
-                            "description": "Mark the task as executing.task_id must be provided.",
-                            "properties": {
-                                "content": {"type": "string", "description": "The task is running."}
-                            }
-                        },
-                        "completed": task_result.clone(),
-                        "failed": task_result
-                    },
-                    "oneOf": [
-                        {"required": ["create"]},
-                        {"required": ["executing"]},
-                        {"required": ["completed"]},
-                        {"required": ["failed"]}
-                    ]
-                }
+                "content": {"type": "string"}
             },
-            "required": ["content"]
+            "required": ["task_id", "content"]
+        });
+
+        serde_json::json!({
+            "type": "object",
+            "description": "Update an agent task lifecycle status. The shape must match AgentTaskStatus and contain exactly one lifecycle status.",
+            "properties": {
+                "create": {
+                    "type": "object",
+                    "description": "Publish a new task. task_id is auto generated.",
+                    "properties": {
+                        "executor": agent_info,
+                        "content": {"type": "string", "description": "The task content."}
+                    },
+                    "required": ["executor", "content"]
+                },
+                "executing": {
+                    "type": "object",
+                    "description": "Mark the task as executing. task_id must be provided.",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "The task id."
+                        }
+                    },
+                    "required": ["task_id"]
+                },
+                "completed": task_result.clone(),
+                "failed": task_result
+            },
+            "oneOf": [
+                {"required": ["create"]},
+                {"required": ["executing"]},
+                {"required": ["completed"]},
+                {"required": ["failed"]}
+            ]
         })
     }
 }
