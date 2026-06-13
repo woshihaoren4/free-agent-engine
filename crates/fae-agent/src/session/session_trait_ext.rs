@@ -3,7 +3,7 @@ use pin_project::pin_project;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 use wd_tools::PFErr;
 
 // 使用 `#[pin_project]` 宏来安全地实现 Pin 投影

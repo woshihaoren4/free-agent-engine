@@ -1,7 +1,7 @@
 use super::EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL;
 use crate::{
     AgentConfig, Env, FAE_DEFAULT_MODEL, FAE_WORKSPACE, ModelCallConfig, OPENAI_DEFAULT_MODEL,
-    Select, SkillConfig, ThingSelect, ToolConfig, fae_home, utils,
+    SkillConfig, ThingSelect, ToolConfig, fae_home, utils,
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,7 @@ impl Default for AgentConfigData {
                 //    1:Minimal,2:Low, 3:Medium, 4:High,
                 reasoning_effort: Some(2),
                 frequency_penalty: None,
+                #[allow(deprecated)]
                 max_tokens: None,
                 max_completion_tokens: None,
                 presence_penalty: None,

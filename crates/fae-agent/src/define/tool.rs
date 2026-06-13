@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wd_tools::PFErr;
-use wd_tools::channel::{Channel, RecvError};
+use wd_tools::channel::Channel;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ToolRequest {

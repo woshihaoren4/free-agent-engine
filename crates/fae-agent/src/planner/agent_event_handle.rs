@@ -1,7 +1,7 @@
-use crate::define::{Msg, OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
+use crate::define::{OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
 use crate::{
-    Agent, AgentConfig, AgentTask, AgentTaskExt, Command, Env, EnvEvent, Memory, Message, Planning,
-    Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
+    Agent, AgentConfig, AgentTask, Command, Env, EnvEvent, Memory, Message, Planning, Session,
+    SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
 };
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
@@ -28,7 +28,7 @@ where
 
     async fn on_none(&self) {}
     // 另一个agent给的任务
-    async fn on_agent_task(&self, env: Env, atask: AgentTaskExt) -> anyhow::Result<()> {
+    async fn on_agent_task(&self, _env: Env, _atask: AgentTask) -> anyhow::Result<()> {
         anyhow::anyhow!("[AgentEventExt::{}] not support on_agent_task", self.id(),).err()
     }
     /// 处理会话调用事件
@@ -36,7 +36,7 @@ where
         &self,
         _env: Env,
         meta: &mut S,
-        input: In,
+        _input: In,
         _output: OutMsgOnce<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
@@ -51,8 +51,8 @@ where
         &self,
         _env: Env,
         meta: &mut S,
-        input: In,
-        output: SenderMessageStream<Out>,
+        _input: In,
+        _output: SenderMessageStream<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_call_stream, session_id:{:?}",
@@ -66,8 +66,8 @@ where
         &self,
         _env: Env,
         meta: &mut S,
-        input: ReceiverMessageStream<In>,
-        output: OutMsgOnce<Out>,
+        _input: ReceiverMessageStream<In>,
+        _output: OutMsgOnce<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_stream_call, session_id:{:?}",
@@ -79,10 +79,10 @@ where
     /// 输入输出双流式
     async fn on_session_stream(
         &self,
-        env: Env,
+        _env: Env,
         meta: &mut S,
-        input: ReceiverMessageStream<In>,
-        output: SenderMessageStream<Out>,
+        _input: ReceiverMessageStream<In>,
+        _output: SenderMessageStream<Out>,
     ) -> anyhow::Result<P> {
         anyhow::anyhow!(
             "[AgentEventExt::{}] not support on_session_stream, session_id:{:?}",
@@ -92,7 +92,7 @@ where
         .err()
     }
     /// 任务结果回调
-    async fn on_task_result_callback(&self, env: Env, result: TaskResult) -> anyhow::Result<()> {
+    async fn on_task_result_callback(&self, _env: Env, result: TaskResult) -> anyhow::Result<()> {
         wd_log::log_info_ln!(
             "[AgentEventExt::{}] on_task_result_callback: {:?}",
             self.id(),
@@ -101,7 +101,7 @@ where
         Ok(())
     }
     /// 指令
-    async fn on_command(&self, env: Env, command: String) -> anyhow::Result<()> {
+    async fn on_command(&self, _env: Env, command: String) -> anyhow::Result<()> {
         wd_log::log_info_ln!(
             "[AgentEventExt::{}] on_command_callback: {:?}",
             self.id(),
@@ -110,12 +110,12 @@ where
         Ok(())
     }
     /// 心跳
-    async fn on_heartbeat(&self, env: Env, heartbeat: String) -> anyhow::Result<()> {
+    async fn on_heartbeat(&self, _env: Env, _heartbeat: String) -> anyhow::Result<()> {
         wd_log::log_info_ln!("[AgentEventExt::{}] on_heartbeat", self.id());
         Ok(())
     }
     /// 定时事件
-    async fn on_timed(&self, env: Env, task: TimedTask) -> anyhow::Result<()> {
+    async fn on_timed(&self, _env: Env, _task: TimedTask) -> anyhow::Result<()> {
         wd_log::log_info_ln!("[AgentEventExt::{}] on_timed", self.id());
         Ok(())
     }

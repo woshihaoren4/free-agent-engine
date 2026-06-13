@@ -156,12 +156,12 @@ pub trait AgentConfig: Debug + Sync {
     }
 
     /// 获取其他自定义配置项
-    fn get(&self, key: &str) -> Option<String> {
+    fn get(&self, _key: &str) -> Option<String> {
         None
     }
 
     /// agent信息, 包括workspace相关
-    async fn metadata(&self, env: Env, user_id: &str, agent_id: &str) -> String {
+    async fn metadata(&self, _env: Env, _user_id: &str, _agent_id: &str) -> String {
         "".to_string()
     }
 

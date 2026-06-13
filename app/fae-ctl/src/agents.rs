@@ -1,7 +1,6 @@
 use crate::args::AgentArgs;
-use crate::init_project::InitProject;
 use fae_agent::SingleSessionMD;
-use fae_engine::{AgentsEngine, SingleAgentCtlFromFile, Workspace};
+use fae_engine::{AgentsEngine, Workspace};
 
 pub struct Agents {
     engine: AgentsEngine,

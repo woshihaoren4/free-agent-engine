@@ -2,7 +2,6 @@ use crate::{Memory, Message, Msg};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 #[async_trait::async_trait]

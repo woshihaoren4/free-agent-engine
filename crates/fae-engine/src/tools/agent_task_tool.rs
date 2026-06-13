@@ -1,22 +1,27 @@
+use crate::agent_runtime::AgentTaskStore;
 use crate::{IdenInfo, Tool};
 use chrono::Timelike;
 use fae_agent::{
-    AgentInfo, AgentTask, AgentTaskExt, AgentTaskStatus, GLOBAL_KEY_AGENT_ID,
-    GLOBAL_KEY_SESSION_ID, ToolResponse,
+    AgentInfo, AgentTask, AgentTaskStatus, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID, ToolResponse,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use wd_tools::channel::Channel;
 
 pub const AGENT_TASK_TOOL_NAME: &str = "agent_exec_task";
 
 #[derive(Debug)]
 pub struct AgentTaskTool {
-    chan: Channel<AgentTaskExt>,
+    chan: Channel<AgentTask>,
+    pub task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
 }
 
 impl AgentTaskTool {
-    pub fn new(chan: Channel<AgentTaskExt>) -> Self {
-        Self { chan }
+    pub fn new(
+        chan: Channel<AgentTask>,
+        task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
+    ) -> Self {
+        Self { chan, task_store }
     }
 }
 
@@ -32,7 +37,7 @@ impl Tool for AgentTaskTool {
     }
 
     fn arguments(&self) -> Value {
-        AgentTask::arguments()
+        AgentTaskStatus::arguments()
     }
 
     async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
@@ -41,71 +46,98 @@ impl Tool for AgentTaskTool {
             .unwrap_or(iden.get_agent_id().to_string());
         let session_id = iden.get(GLOBAL_KEY_SESSION_ID).unwrap_or("".to_string());
         let channel = self.chan.clone();
-        let mut task: AgentTask = serde_json::from_str(&args)
+        let mut task: AgentTaskStatus = serde_json::from_str(&args)
             .map_err(|e| anyhow::anyhow!("[AgentTaskTool] invalid arguments: {}", e))?;
-        match &mut task.content {
-            AgentTaskStatus::Create(create) => {
-                if create.to_agent.agent_id.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "[AgentTaskTool] to_agent.agent_id is empty"
-                    ));
-                }
-                create.from_agent = AgentInfo {
+        let task_id = task.get_task_id().to_string();
+        let status = task.status().to_string();
+        match task {
+            AgentTaskStatus::Create(mut create) => {
+                //发布者
+                let author = AgentInfo {
                     agent_id: iden
                         .get(GLOBAL_KEY_AGENT_ID)
                         .unwrap_or(iden.get_agent_id().to_string()),
                     session_id: iden.get(GLOBAL_KEY_SESSION_ID).unwrap_or("".to_string()),
                     user_id: iden.get_user_id().to_string(),
                 };
-                task.task_id = wd_tools::uuid::v4();
+                //记录任务
+                if create.executor.session_id.is_empty() {
+                    create.executor.session_id = session_id.to_string();
+                }
+                let mut task = AgentTask::default()
+                    .set_task_id(wd_tools::uuid::v4())
+                    .set_status(status)
+                    .set_author(author)
+                    .set_executor(create.executor)
+                    .set_content(create.content);
+                task.update_timestamp();
+                self.task_store.push_task(task.clone()).await;
+                //挂钩子，等当前agent执行完成，则开始执行任务
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
                     |_ctx, output| async move {
-                        let task = AgentTaskExt::new(task).set(output);
+                        task.set_ext(output);
                         channel.send(task).await?;
                         Ok(())
                     },
                 );
             }
             AgentTaskStatus::Executing(executing) => {
-                if task.task_id.is_empty() {
-                    return Err(anyhow::anyhow!("[AgentTaskTool] task_id is empty"));
+                if executing.task_id.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "[AgentTaskTool] executing.task_id is empty"
+                    ));
                 }
-                executing.timestamp = wd_tools::time::Utc::now().second() as u64;
+                self.task_store
+                    .update_status_executing(executing.task_id.as_str())
+                    .await?;
+                //不需要挂钩子，因为当前agent正在执行任务，等当前任务完成，再执行下一个任务
+            }
+            AgentTaskStatus::Completed(result) => {
+                if result.task_id.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "[AgentTaskTool] completed.task_id is empty"
+                    ));
+                }
+                //移除任务
+                let task = self.task_store.remove_task(result.task_id.as_str()).await;
+                let mut task = if let Some(mut t) = task {
+                    t.set_result(result.content).set_status(status)
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "[AgentTaskTool] completed task[{}] buf not found .",
+                        result.task_id
+                    ));
+                };
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
                     |_ctx, output| async move {
-                        let task = AgentTaskExt::new(task).set(output);
+                        task.set_ext(output);
                         channel.send(task).await?;
                         Ok(())
                     },
                 );
             }
-            AgentTaskStatus::Completed(_result) => {
-                if task.task_id.is_empty() {
-                    return Err(anyhow::anyhow!("[AgentTaskTool] task_id is empty"));
+            AgentTaskStatus::Failed(result) => {
+                if result.task_id.is_empty() {
+                    return Err(anyhow::anyhow!("[AgentTaskTool] failed.task_id is empty"));
                 }
+                let mut task = self.task_store.remove_task(result.task_id.as_str()).await;
+                let mut task = if let Some(mut t) = task {
+                    t.set_result(result.content).set_status(status)
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "[AgentTaskTool] failed task[{}] buf not found .",
+                        result.task_id
+                    ));
+                };
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
                     |_ctx, output| async move {
-                        let task = AgentTaskExt::new(task).set(output);
-                        channel.send(task).await?;
-                        Ok(())
-                    },
-                );
-            }
-            AgentTaskStatus::Failed(_result) => {
-                if task.task_id.is_empty() {
-                    return Err(anyhow::anyhow!("[AgentTaskTool] task_id is empty"));
-                }
-                fae_agent::Hook::agent_call_session_over(
-                    &agent_id,
-                    &session_id,
-                    |_ctx, output| async move {
-                        let task = AgentTaskExt::new(task).set(output);
+                        task.set_ext(output);
                         channel.send(task).await?;
                         Ok(())
                     },

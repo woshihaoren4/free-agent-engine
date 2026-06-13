@@ -2,20 +2,20 @@ use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
 use crate::{
-    Agent, AgentConfig, AgentTask, AgentTaskExt, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
-    GLOBAL_KEY_SESSION_ID, GLOBAL_KEY_WORKSPACE, McpToolRequest, McpToolResult, McpTools, Memory,
-    MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task,
-    TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem,
-    ToolResponse, Trigger, define_planning_group, fae_home,
+    AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
+    GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan,
+    PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType,
+    ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
+    define_planning_group,
 };
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
-    ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
-    FunctionObjectArgs, ReasoningEffort,
+    ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
+    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs,
+    ReasoningEffort,
 };
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -186,6 +186,7 @@ where
         if let Some(max_completion_tokens) = model.max_completion_tokens {
             req.max_completion_tokens(max_completion_tokens);
         }
+        #[allow(deprecated)]
         if let Some(max_tokens) = model.max_tokens {
             req.max_tokens(max_tokens);
         }
@@ -480,7 +481,7 @@ where
                 match result {
                     ToolRespItem::Streaming(item) => {
                         tool_out.set_output(item);
-                        let mut record = M::from_openai_msg(ChatMsg::Tool(tool_out.clone()));
+                        let record = M::from_openai_msg(ChatMsg::Tool(tool_out.clone()));
                         for i in record.clone() {
                             self.send(i).await?;
                         }
@@ -736,41 +737,31 @@ where
         env.spawn(vec![task]).await
     }
 
-    async fn on_agent_task(&self, env: Env, mut task: AgentTaskExt) -> anyhow::Result<()> {
+    async fn on_agent_task(&self, env: Env, mut task: AgentTask) -> anyhow::Result<()> {
         //先尝试解析渠道
         let output = task.try_ext_into::<SenderMessageStream<M>>();
         let mut user_id = String::new();
         let mut session_id = String::new();
         //解析返回值
-        let user_input = match task.task.content {
-            AgentTaskStatus::Create(create) => {
-                user_id = create.from_agent.user_id;
-                session_id = create.to_agent.session_id;
+        let user_input = match task.get_status() {
+            AgentTaskStatus::CREATE => {
+                user_id = task.executor.user_id;
+                session_id = task.executor.session_id;
                 format!(
                     "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
-                    task.task.task_id, create.content
+                    task.task_id, task.content
                 )
             }
-            AgentTaskStatus::Completed(result) => {
-                user_id = result.task_author.user_id;
-                if result.task_author.session_id.is_empty() {
-                    return anyhow::anyhow!("[SingleAgent:on_agent_task] Task Not Started, AgentTaskStatus::Completed get session_id is empty").err();
-                }
-                session_id = result.task_author.session_id;
-                format!(
-                    "The task you posted has been completed. \n Result:\n{}",
-                    result.content
-                )
+            AgentTaskStatus::EXECUTING => {
+                wd_log::log_info_ln!("[SingleAgent:on_agent_task] Executing task: {:?}", task);
+                return Ok(());
             }
-            AgentTaskStatus::Failed(result) => {
-                user_id = result.task_author.user_id;
-                if result.task_author.session_id.is_empty() {
-                    return anyhow::anyhow!("[SingleAgent:on_agent_task] Task Not Started, AgentTaskStatus::Failed get session_id is empty").err();
-                }
-                session_id = result.task_author.session_id;
+            AgentTaskStatus::COMPLETED | AgentTaskStatus::FAILED => {
+                user_id = task.author.user_id;
+                session_id = task.author.session_id;
                 format!(
-                    "The task you posted has failed. \n Result:\n{}",
-                    result.content
+                    "The task you posted has been completed. \nTask Details: {}\n---\nExecutor: {}\n Task Status: {}\n Result:\n{}",
+                    task.content, task.executor.agent_id, task.status, task.result
                 )
             }
             _ => {
@@ -839,7 +830,7 @@ where
         env: Env,
         mut result: TaskResult,
     ) -> anyhow::Result<()> {
-        if let Some(s) = result.into_inner::<AgentTaskExt>() {
+        if let Some(s) = result.into_inner::<AgentTask>() {
             return self.on_agent_task(env, s).await;
         } else {
             wd_log::log_info_ln!(

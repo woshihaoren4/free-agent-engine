@@ -1,16 +1,12 @@
-use crate::{
-    AgentTask, AgentTaskExt, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult,
-    TaskType,
-};
+use crate::{AgentTask, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
 use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wd_tools::PFArc;
 
 pub const FAE_HOME: &'static str = "FAE_HOME";
 pub const FAE_WORKSPACE: &'static str = "FAE_WORKSPACE";
@@ -48,7 +44,7 @@ pub enum EnvEvent {
     // 心跳
     Heartbeat(String),
     // agent 事件
-    Agent(AgentTaskExt),
+    Agent(AgentTask),
     // /// 键值对事件，携带键和值
     // KV(String, Value),
     // /// 自定义事件，携带自定义信息
@@ -89,8 +85,6 @@ pub enum ThingSelect {
     Skill(String, String, Option<String>),
     /// agent: 渠道，名字
     Agent(String),
-    /// agent 任务记录，任务ID
-    AgenTask(String),
     /// Custom
     Custom(String),
 }
@@ -286,18 +280,17 @@ impl Environment for NoneEnv {
 
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
         if let Some(env) = &self.0 {
-            return env.spawn(tasks).await;
+            env.spawn(tasks).await
         } else {
-            return Err(anyhow::anyhow!("NoneEnv spawn failed!"));
+            Err(anyhow::anyhow!("NoneEnv spawn failed!"))
         }
-        Ok(())
     }
 
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
         if let Some(env) = &self.0 {
-            return env.execute(task).await;
+            env.execute(task).await
         } else {
-            return Err(anyhow::anyhow!("NoneEnv execute failed!"));
+            Err(anyhow::anyhow!("NoneEnv execute failed!"))
         }
     }
 }

@@ -1,8 +1,8 @@
 use crate::tools::{AGENT_TASK_TOOL_NAME, AgentTaskTool};
 use crate::{IdenInfo, Tool};
 use fae_agent::{
-    AgentInfo, AgentTask, AgentTaskExt, AgentTaskStatus, Env, EnvEvent, Environment, Select,
-    TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse,
+    AgentTask, AgentTaskStatus, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing,
+    ThingItem, ThingSelect, ToolRequest, ToolResponse,
 };
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -16,30 +16,31 @@ const AGENT_TASK_RUNTIME_ID: &str = "AGENT_TASK_RUNTIME_ID";
 #[async_trait::async_trait]
 pub trait AgentTaskStore: Debug {
     async fn push_task(&self, task: AgentTask);
-    async fn load_tasks(&self, task_id: &str) -> anyhow::Result<Vec<AgentTask>>;
-    async fn get_task_author_info(&self, task_id: &str) -> anyhow::Result<AgentInfo>;
+    async fn update_status_executing(&self, task_id: &str) -> anyhow::Result<()>;
+    async fn remove_task(&self, task_id: &str) -> Option<AgentTask>;
 }
 
 #[derive(Debug)]
 pub struct AgentRuntime {
     pub task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
     pub task_tool: AgentTaskTool,
-    pub channel: Channel<AgentTaskExt>,
-    pub spawn_channel: Channel<TaskResult>,
+    pub channel: Channel<AgentTask>,
+    pub task_result_channel: Channel<TaskResult>,
     parent: Option<Env>,
 }
 
 impl AgentRuntime {
     pub fn new(store: impl AgentTaskStore + Send + Sync + 'static) -> Self {
         let chan = Channel::with_cap(100);
-        let spawn_chan = Channel::with_cap(100);
-        let tool = AgentTaskTool::new(chan.clone());
+        let task_store = Arc::new(store);
+        let task_tool = AgentTaskTool::new(chan.clone(), task_store.clone());
+        let task_result_channel = Channel::with_cap(100);
         Self {
-            task_store: Arc::new(store),
-            task_tool: tool,
-            spawn_channel: spawn_chan,
+            task_store,
+            task_tool,
             parent: None,
             channel: chan,
+            task_result_channel,
         }
     }
     pub async fn exec_tool(&self, mut task: fae_agent::Task) -> anyhow::Result<TaskResult> {
@@ -93,36 +94,27 @@ impl Environment for AgentRuntime {
                 None
             };
             let recv = self.channel.recv();
-            let spawn_recv = self.spawn_channel.recv();
+            let task_result_recv = self.task_result_channel.recv();
 
             tokio::select! {
                 res = recv => {
                     let mut task = res?;
-                    self.task_store.push_task(task.task.clone()).await;
-                    match &mut task.task.content {
-                        AgentTaskStatus::Create(e) => {
+                    match task.get_status() {
+                        AgentTaskStatus::CREATE => {
                             return Ok(EnvEvent::Agent(task));
                         }
-                        AgentTaskStatus::Executing(_) => {}
-                        AgentTaskStatus::Completed(output) => {
-                            let task_author = self.task_store.get_task_author_info(&task.task.task_id).await?;
-                            let author_agent_id = task_author.agent_id.clone();
-                            output.task_author = task_author;
-                            let task = TaskResult::success(task.task.task_id.clone(), author_agent_id).set_data(task);
+                        AgentTaskStatus::COMPLETED | AgentTaskStatus::FAILED => {
+                            let task = TaskResult::success(task.get_task_id(), task.get_author_id()).set_data(task);
                             return Ok(EnvEvent::TaskResult(task));
                         }
-                        AgentTaskStatus::Failed(output) => {
-                            let task_author = self.task_store.get_task_author_info(&task.task.task_id).await?;
-                            let author_agent_id = task_author.agent_id.clone();
-                            output.task_author = task_author;
-                            let task = TaskResult::success(task.task.task_id.clone(), author_agent_id).set_data(task);
-                            return Ok(EnvEvent::TaskResult(task));
+                        _ => {
+                            // 其他状态，不处理
                         }
                     }
                 }
-                res = spawn_recv =>{
-                    let result = res?;
-                    return Ok(EnvEvent::TaskResult(result));
+                res = task_result_recv => {
+                    let task_result = res?;
+                    return Ok(EnvEvent::TaskResult(task_result));
                 }
                 res = async {
                     if let Some(fut) = parent_fut {
@@ -149,12 +141,6 @@ impl Environment for AgentRuntime {
                         .into_self(),
                 ]);
             }
-        } else if let ThingSelect::AgenTask(id) = &select.select {
-            let tasks = self.task_store.load_tasks(id).await?;
-            let tasks = tasks.into_iter().map(|x| x.content).collect::<Vec<_>>();
-            let mut source = Thing::new(self.id().to_string());
-            let thing = source.add_item(ThingItem::AgenTask(tasks)).into_self();
-            return Ok(vec![thing]);
         }
         if let Some(ref p) = self.parent {
             p.query(select).await
@@ -175,7 +161,7 @@ impl Environment for AgentRuntime {
         }
         for task in ts {
             let result = self.exec_tool(task).await?;
-            if let Err(e) = self.spawn_channel.send(result).await {
+            if let Err(e) = self.task_result_channel.send(result).await {
                 return anyhow::anyhow!("[TaskRuntime] spawn failed, send result error: {:?}", e)
                     .err();
             }
@@ -198,40 +184,31 @@ impl Environment for AgentRuntime {
 // -------------- AgentTaskStore 的内存实现 --------------
 #[derive(Debug)]
 pub struct DefaultAgentTaskStore {
-    pub map: RwLock<HashMap<String, Vec<AgentTask>>>,
+    pub map: RwLock<HashMap<String, AgentTask>>,
 }
 
 #[async_trait::async_trait]
 impl AgentTaskStore for DefaultAgentTaskStore {
     async fn push_task(&self, task: AgentTask) {
-        let mut write = self.map.write().await;
-        if let Some(s) = write.get_mut(&task.task_id) {
-            s.push(task);
-        } else {
-            write.insert(task.task_id.clone(), vec![task]);
-        }
+        self.map
+            .write()
+            .await
+            .insert(task.get_task_id().to_string(), task);
     }
 
-    async fn load_tasks(&self, task_id: &str) -> anyhow::Result<Vec<AgentTask>> {
-        let read = self.map.read().await;
-        if let Some(s) = read.get(task_id) {
-            Ok(s.clone())
+    async fn update_status_executing(&self, task_id: &str) -> anyhow::Result<()> {
+        let mut map = self.map.write().await;
+        if let Some(task) = map.get_mut(task_id) {
+            task.status = AgentTaskStatus::EXECUTING.to_string();
+            task.update_timestamp();
         } else {
-            return anyhow::anyhow!("[TaskRuntime] load_tasks failed, task_id not found").err();
+            return anyhow::anyhow!("task not found: {}", task_id).err();
         }
+        Ok(())
     }
 
-    async fn get_task_author_info(&self, task_id: &str) -> anyhow::Result<AgentInfo> {
-        let read = self.map.read().await;
-        if let Some(s) = read.get(task_id) {
-            for i in s.iter().rev() {
-                if let AgentTaskStatus::Create(ref t) = i.content {
-                    return Ok(t.from_agent.clone());
-                }
-            }
-        }
-        return anyhow::anyhow!("[TaskRuntime] get_task_author_info failed, task_id not found")
-            .err();
+    async fn remove_task(&self, task_id: &str) -> Option<AgentTask> {
+        self.map.write().await.remove(task_id)
     }
 }
 

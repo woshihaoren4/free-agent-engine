@@ -1,9 +1,6 @@
 use crate::executors::{IdenInfo, Tool};
 use async_trait::async_trait;
-use fae_agent::{
-    GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_PROJECT, GLOBAL_KEY_PROJECT_DIR, GLOBAL_KEY_WORKSPACE,
-    ToolResponse,
-};
+use fae_agent::{GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_PROJECT_DIR, GLOBAL_KEY_WORKSPACE, ToolResponse};
 use serde_json::Value;
 use std::path::PathBuf;
 use tokio::fs;
