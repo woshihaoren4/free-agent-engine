@@ -23,6 +23,7 @@ impl AgentsEngine {
                             .add_tool(crate::tools::ReadFile)
                             .add_tool(crate::tools::WriteFile::default())
                             .add_tool(crate::tools::ListDirectory)
+                            .add_tool(crate::tools::ApplyPatch::default())
                             .add_tool(crate::tools::ExecutePython)
                             .add_tool(crate::tools::TodoWrite::default())
                             .add_tool(crate::tools::ArkWebSearch::default()),

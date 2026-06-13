@@ -67,6 +67,7 @@ impl Default for AgentConfigData {
                 ToolConfig::new("execute_command"),
                 ToolConfig::new("read_file"),
                 ToolConfig::new("write_file"),
+                ToolConfig::new("apply_patch"),
                 ToolConfig::new("send_http_request"),
                 ToolConfig::new("execute_python"),
                 ToolConfig::new("todo_write"),
