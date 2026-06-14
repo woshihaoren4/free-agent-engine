@@ -58,6 +58,7 @@ impl Default for AgentConfigData {
                 #[allow(deprecated)]
                 max_tokens: None,
                 max_completion_tokens: None,
+                min_compact_window_size: Some(65536),
                 presence_penalty: None,
                 temperature: Some(1.0),
                 top_p: Some(1.0),

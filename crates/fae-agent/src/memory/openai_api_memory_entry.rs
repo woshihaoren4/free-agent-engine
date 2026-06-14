@@ -4,7 +4,8 @@ use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
-    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FunctionCall,
+    ChatCompletionRequestUserMessageContentPart, CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse, FunctionCall,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,9 @@ pub struct ToolCall {
 }
 
 pub trait MemoryEntry: Message {
+    fn from_custom_msg(id:String, content: String) -> Self
+    where
+        Self: Sized;
     fn from_openai_msg(msg: ChatMsg) -> Vec<Self>
     where
         Self: Sized;
@@ -72,6 +76,7 @@ pub trait MemoryEntry: Message {
     where
         Self: Sized;
     fn title(&self) -> String;
+    fn size(&self) -> usize;
     fn content(&self) -> &str;
     fn set_agent_id(&mut self, agent_id: String);
     fn to_openai_message(self) -> Option<ChatCompletionRequestMessage>;
@@ -80,6 +85,9 @@ pub trait MemoryEntry: Message {
         false
     }
     fn try_to_tool_call(&self) -> Option<ToolCall> {
+        None
+    }
+    fn try_to_model(&self) -> Option<String> {
         None
     }
 }
@@ -152,6 +160,35 @@ impl Default for Record {
     }
 }
 
+fn str_size(content: &str) -> usize {
+    content.chars().count()
+}
+
+fn serialized_size<T: Serialize>(value: &T) -> usize {
+    serde_json::to_string(value)
+        .map(|content| str_size(&content))
+        .unwrap_or_default()
+}
+
+fn user_message_content_size(content: &ChatCompletionRequestUserMessageContent) -> usize {
+    match content {
+        ChatCompletionRequestUserMessageContent::Text(text) => str_size(text),
+        ChatCompletionRequestUserMessageContent::Array(parts) => parts
+            .iter()
+            .map(|part| match part {
+                ChatCompletionRequestUserMessageContentPart::Text(text) => str_size(&text.text),
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(image) => {
+                    str_size(&image.image_url.url)
+                }
+                ChatCompletionRequestUserMessageContentPart::InputAudio(audio) => {
+                    str_size(&audio.input_audio.data)
+                }
+                ChatCompletionRequestUserMessageContentPart::File(file) => serialized_size(file),
+            })
+            .sum(),
+    }
+}
+
 impl Message for Record {
     fn id(&self) -> &str {
         &self.id
@@ -159,6 +196,13 @@ impl Message for Record {
 }
 
 impl MemoryEntry for Record {
+    fn from_custom_msg(id:String, content: String) -> Self {
+        Self {
+            id: "".into(),
+            agent_id: "".to_string(),
+            item: RecordItem::Custom(id, content),
+        }
+    }
     fn from_openai_msg(msg: ChatMsg) -> Vec<Self> {
         let mut msgs = vec![];
         match msg {
@@ -327,6 +371,18 @@ impl MemoryEntry for Record {
         }
     }
 
+    fn size(&self) -> usize {
+        match &self.item {
+            RecordItem::UserInput(m) => user_message_content_size(&m.content),
+            RecordItem::ModelThought(content) => str_size(content),
+            RecordItem::ModelOutput(content) => str_size(content),
+            RecordItem::ToolCall(tc) => str_size(&tc.arguments),
+            RecordItem::ToolOutput(to) => str_size(&to.output),
+            RecordItem::Custom(_, content) => str_size(content),
+            RecordItem::Wait => 0,
+        }
+    }
+
     fn content(&self) -> &str {
         match &self.item {
             RecordItem::UserInput(m) => match &m.content {
@@ -392,6 +448,12 @@ impl MemoryEntry for Record {
     {
         match &self.item {
             RecordItem::ToolCall(tc) => Some(tc.clone()),
+            _ => None,
+        }
+    }
+    fn try_to_model(&self) -> Option<String> {
+        match &self.item {
+            RecordItem::ModelOutput(text) => Some(text.clone()),
             _ => None,
         }
     }

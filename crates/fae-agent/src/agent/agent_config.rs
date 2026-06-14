@@ -27,6 +27,9 @@ pub struct ModelCallConfig {
     pub max_completion_tokens: Option<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_compact_window_size: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>, // min: -2.0, max: 2.0, default 0
 
     #[serde(skip_serializing_if = "Option::is_none")]

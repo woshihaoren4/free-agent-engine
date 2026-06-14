@@ -131,7 +131,7 @@ where
     T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     /// 用户记忆
-    async fn get_user_info_ext(&self, user_id: &str) -> anyhow::Result<String> {
+    async fn on_user_info(&self, user_id: &str) -> anyhow::Result<String> {
         let user_dir = self.memory_dir.join(user_id);
         let user_file = user_dir.join("user.txt");
         let mem = if user_file.exists() {
@@ -174,7 +174,7 @@ where
     }
 
     /// 记忆信息
-    async fn metadata_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<String> {
+    async fn on_metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String> {
         let mut info = "\n## Your memory Metadata:".to_string();
         info.push_str(&format!(
             "\n - This dialogue identifier $SESSION_ID: `{}`",
@@ -188,7 +188,7 @@ where
         ));
         Ok(info)
     }
-    async fn load_ext(
+    async fn on_load(
         &self,
         user_id: &str,
         session_id: &str,
@@ -206,7 +206,7 @@ where
         Ok(vec![])
     }
 
-    async fn push_ext(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()> {
+    async fn on_push(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()> {
         let session_id_owned = session_id.to_string();
         let user_id_owned = user_id.to_string();
         let should_flush = {
@@ -236,7 +236,7 @@ where
         Ok(())
     }
 
-    async fn update_ext(&self, user_id: &str, item: T) -> anyhow::Result<()> {
+    async fn on_update(&self, user_id: &str, item: T) -> anyhow::Result<()> {
         let id = item.id().to_string();
         let mut target_session = None;
         let should_flush = {
@@ -274,7 +274,7 @@ where
         Ok(())
     }
 
-    async fn delete_ext(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()> {
+    async fn on_delete(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()> {
         let should_flush = {
             let mut store = self.store.write().await;
             if let Some(user_store) = store.get_mut(user_id) {
@@ -304,7 +304,7 @@ where
         Ok(())
     }
 
-    async fn reset_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
+    async fn on_reset(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
         {
             let mut store = self.store.write().await;
             if let Some(user_store) = store.get_mut(user_id) {
@@ -323,7 +323,7 @@ where
         Ok(())
     }
 
-    async fn flush_ext(&self) -> anyhow::Result<()> {
+    async fn on_flush(&self) -> anyhow::Result<()> {
         let sessions: Vec<(String, String)> = {
             let store = self.store.read().await;
             let mut res = Vec::new();

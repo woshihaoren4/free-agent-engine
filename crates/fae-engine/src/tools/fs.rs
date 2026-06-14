@@ -25,6 +25,11 @@ impl Tool for ReadFile {
                 "path": {
                     "type": "string",
                     "description": "The path to the file to read."
+                },
+                "with_line_numbers": {
+                    "type": "boolean",
+                    "description": "Whether to include line numbers in the returned file content.It is recommended to set this to true when reading code files.",
+                    "default": false
                 }
             },
             "required": ["path"]
@@ -36,9 +41,39 @@ impl Tool for ReadFile {
         let path = args_val["path"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("path is required"))?;
+        let with_line_numbers = args_val
+            .get("with_line_numbers")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let content = fs::read_to_string(path).await?;
+        let content = if with_line_numbers {
+            add_line_numbers(&content)
+        } else {
+            content
+        };
         Ok(ToolResponse::with_result(content))
     }
+}
+
+fn add_line_numbers(content: &str) -> String {
+    let line_count = content.lines().count();
+    if line_count == 0 {
+        return String::new();
+    }
+
+    let width = line_count.to_string().len();
+    let mut result = content
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>width$}: {}", index + 1, line, width = width))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
 }
 
 #[derive(Default, Debug)]
@@ -187,5 +222,38 @@ impl Tool for ListDirectory {
         }
 
         Ok(ToolResponse::with_result(serde_json::to_string(&result)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_file_arguments_include_optional_line_numbers() {
+        let arguments = ReadFile.arguments();
+
+        assert_eq!(
+            arguments["properties"]["with_line_numbers"]["default"],
+            json!(false)
+        );
+        assert_eq!(
+            arguments["properties"]["with_line_numbers"]["type"],
+            json!("boolean")
+        );
+        assert!(
+            !arguments["required"]
+                .as_array()
+                .expect("required should be an array")
+                .contains(&json!("with_line_numbers"))
+        );
+    }
+
+    #[test]
+    fn add_line_numbers_preserves_trailing_newline() {
+        let content = "alpha\n\nomega\n";
+
+        assert_eq!(add_line_numbers(content), "1: alpha\n2: \n3: omega\n");
     }
 }

@@ -8,20 +8,30 @@ use crate::{
     ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
     define_planning_group,
 };
-use async_openai::types::chat::{
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
-    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs,
-    ReasoningEffort,
-};
+use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use wd_tools::PFErr;
+
+const COMPACT_PROMPT: &str = "Please compress the current conversation context, preserving only the information necessary to continue the task later. Remove repetition, small talk, low-value reasoning, and already-resolved intermediate steps.
+The compressed result should include:
+1. The user’s final goal and explicit requirements
+2. Work completed so far and key decisions made
+3. Remaining tasks
+4. Important file paths, commands, configurations, APIs, and constraints
+5. Discovered issues, errors, test results, and risks
+6. Preferences or limitations that must be followed later
+Requirements:
+- Keep facts accurate and do not introduce new assumptions
+- Use concise bullet points
+- Preserve actionable details and omit irrelevant process
+- If any information is unconfirmed, clearly mark it as “unconfirmed”
+- Output only the compressed context; do not explain the compression method";
 
 pub struct SingleAgent<S, M> {
     agent_id: String,
@@ -73,6 +83,8 @@ pub struct SingleAgentPlanSessionCallStream<S, M> {
     mcp_tools: Vec<(String, McpToolRequest)>,
     //执行上下文
     context: Context,
+    // 上下文压缩,true:压缩,false:不压缩
+    compact_context: bool,
 }
 
 impl<S, M> SingleAgentPlanSessionCallStream<S, M>
@@ -109,6 +121,7 @@ where
             tools: HashMap::new(),
             mcp_tools: Vec::new(),
             agent_info: String::new(),
+            compact_context: false,
         }
     }
     fn set_output(&mut self, output: SenderMessageStream<M>) {
@@ -169,7 +182,54 @@ where
             .unwrap()
             .as_secs()
     }
-    pub async fn build_openai_api_request(&self) -> anyhow::Result<CreateChatCompletionRequest> {
+    pub async fn start_compact(&mut self, mut req: CreateChatCompletionRequestArgs,mut messages: VecDeque<ChatCompletionRequestMessage>) -> anyhow::Result<CreateChatCompletionRequest> {
+        // 修改上下文压缩状态
+        self.compact_context = true;
+        // 组装上下文压缩提示词
+        messages.push_front(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(COMPACT_PROMPT)
+                .build()
+                .expect("build message failed!")
+                .into());
+        messages.push_back(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("The current context is too long; you must perform a compression process.")
+                .build()
+                .expect("build message failed!")
+                .into(),
+        );
+        req.messages(messages);
+
+        //发送通知
+        self.send(MemoryEntry::from_custom_msg("Compacting".to_string(), "Context length exceeds limit, start compressing context...".to_string())).await?;
+        Ok(req.build()?)
+    }
+    pub async fn end_compact(&mut self) -> anyhow::Result<PlanningResult> {
+        self.compact_context = false;
+        // 获取压缩后的结果
+        let mut compact_text = String::new();
+        while let Some(msg) = self.exec_records.pop(){
+            if let Some(text) = msg.try_to_model(){
+                compact_text = text;
+                break;
+            }
+        }
+        if compact_text.is_empty() {
+            return anyhow::anyhow!("[SingleAgent::{}]compact text is empty", self.agent_id).err();
+        }
+        //清理执行记录
+        self.memory.on_reset(self.session_md.user_id(), self.session_md.id()).await?;
+        self.doing.clear();
+        self.exec_records.clear();
+        //添加压缩后的结果
+        self.exec_records.push(M::from_openai_msg(ChatMsg::with_user(compact_text)).pop().unwrap());
+        //发送通知
+        self.send(MemoryEntry::from_custom_msg("Compacted".to_string(), "Context compression completed.".to_string())).await?;
+        // 重新生成任务
+        self.make_model_task().await
+    }
+    pub async fn build_openai_api_request(&mut self) -> anyhow::Result<CreateChatCompletionRequest> {
         let model = self.agent_config.model();
         let mut req = CreateChatCompletionRequestArgs::default();
         req.model(model.model.as_str());
@@ -207,22 +267,13 @@ where
                 _ => {}
             }
         }
-        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-        //添加prompt
-        let mut prompt = self.agent_config.prompt();
-        prompt.push_str("\n");
-        prompt.push_str(self.agent_info.as_str());
-        messages.push(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(prompt)
-                .build()
-                .expect("build message failed!")
-                .into(),
-        );
+        // 组装上下文
+        let mut messages: VecDeque<ChatCompletionRequestMessage> = VecDeque::new();
+        let mut context_size = 0;
         //添加历史消息
         for item in self
             .memory
-            .load_ext(
+            .on_load(
                 &self.session_md.user_id(),
                 self.session_md.id(),
                 0,
@@ -230,16 +281,39 @@ where
             )
             .await?
         {
+            context_size += item.size();
             if let Some(msg) = item.to_openai_message() {
-                messages.push(msg);
+                messages.push_back(msg);
             }
         }
         // 添加中间调用的消息
         for item in self.exec_records.iter() {
+            context_size += item.size();
             if let Some(msg) = item.clone().to_openai_message() {
-                messages.push(msg);
+                messages.push_back(msg);
             }
         }
+        // 组装prompt
+        let mut prompt = self.agent_config.prompt();
+        prompt.push_str("\n");
+        prompt.push_str(self.agent_info.as_str());
+        context_size += prompt.chars().count();
+        // 压缩判断
+        if let Some(min_compact_window_size) = model.min_compact_window_size {
+            // wd_log::log_info_ln!("context size: {}, min compact window size: {}", context_size, min_compact_window_size);
+            if context_size as u32 >= min_compact_window_size {
+                //触发上下文压缩
+                return self.start_compact(req,messages).await;
+            }
+        }
+        //添加prompt
+        messages.push_front(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(prompt)
+                .build()
+                .expect("build message failed!")
+                .into(),
+        );
         req.messages(messages);
         // 添加工具
         let mut tools = Vec::new();
@@ -267,7 +341,7 @@ where
         Ok(req.build()?)
     }
 
-    pub async fn make_model_task(&self) -> anyhow::Result<PlanningResult> {
+    pub async fn make_model_task(&mut self) -> anyhow::Result<PlanningResult> {
         let exec_channel = self.agent_config.model().channel;
         let req = self.build_openai_api_request().await?;
         let task = Task::new(
@@ -287,7 +361,7 @@ where
             .await;
         let memory_metdata = self
             .memory
-            .metadata_ext(&self.session_md.user_id(), self.session_md.id())
+            .on_metadata(&self.session_md.user_id(), self.session_md.id())
             .await?;
         let mut info = agent_metadata + &memory_metdata;
         info.push_str(self.agent_info.as_str());
@@ -396,7 +470,7 @@ where
         // 添加user_info
         let info = self
             .memory
-            .get_user_info_ext(&self.session_md.user_id())
+            .on_user_info(&self.session_md.user_id())
             .await?;
         self.agent_info.push_str(&info);
         Ok(())
@@ -557,11 +631,15 @@ where
         if !tool_tasks.is_empty() {
             return Ok(PlanningResult::Tasks(tool_tasks));
         }
+        //是否是上下文压缩
+        if self.compact_context {
+            return self.end_compact().await;
+        }
         // 仅为模型输出
         for msg in std::mem::take(&mut self.exec_records) {
             if msg.is_remember() {
                 self.memory
-                    .push_ext(&self.session_md.user_id(), self.session_md.id(), msg)
+                    .on_push(&self.session_md.user_id(), self.session_md.id(), msg)
                     .await?;
             }
         }

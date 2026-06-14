@@ -10,7 +10,7 @@ pub trait MemoryMessageExt<
 >: Debug + Sync
 {
     ///用户记忆，对应到user prompt
-    async fn get_user_info_ext(&self, user_id: &str) -> anyhow::Result<String>;
+    async fn on_user_info(&self, user_id: &str) -> anyhow::Result<String>;
 
     ///设置用户记忆,append:是否追加
     async fn set_user_info_ext(
@@ -21,10 +21,10 @@ pub trait MemoryMessageExt<
     ) -> anyhow::Result<()>;
 
     /// 记忆信息，对应到system prompt
-    async fn metadata_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>;
+    async fn on_metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>;
 
     /// 加载/获取记忆
-    async fn load_ext(
+    async fn on_load(
         &self,
         user_id: &str,
         session_id: &str,
@@ -33,19 +33,19 @@ pub trait MemoryMessageExt<
     ) -> anyhow::Result<Vec<T>>;
 
     /// 追加单条记忆
-    async fn push_ext(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()>;
+    async fn on_push(&self, user_id: &str, session_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 更新单条记忆内容
-    async fn update_ext(&self, user_id: &str, item: T) -> anyhow::Result<()>;
+    async fn on_update(&self, user_id: &str, item: T) -> anyhow::Result<()>;
 
     /// 删除单条记忆
-    async fn delete_ext(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()>;
+    async fn on_delete(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()>;
 
     /// 重置记忆
-    async fn reset_ext(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
+    async fn on_reset(&self, user_id: &str, session_id: &str) -> anyhow::Result<()>;
 
     /// 刷新记忆，将缓存的内容刷新到磁盘中
-    async fn flush_ext(&self) -> anyhow::Result<()>;
+    async fn on_flush(&self) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -54,7 +54,7 @@ where
     T: Message + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn get_user_info(&self, user_id: &str) -> anyhow::Result<String> {
-        self.get_user_info_ext(user_id).await
+        self.on_user_info(user_id).await
     }
 
     async fn set_user_info(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()> {
@@ -62,7 +62,7 @@ where
     }
 
     async fn metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String> {
-        self.metadata_ext(user_id, session_id).await
+        self.on_metadata(user_id, session_id).await
     }
 
     async fn load(
@@ -72,7 +72,7 @@ where
         offset: usize,
         limit: usize,
     ) -> anyhow::Result<Vec<Msg>> {
-        let vec = self.load_ext(user_id, session_id, offset, limit).await?;
+        let vec = self.on_load(user_id, session_id, offset, limit).await?;
         Ok(vec
             .into_iter()
             .map(|item| Msg::new(item))
@@ -81,7 +81,7 @@ where
 
     async fn push(&self, user_id: &str, session_id: &str, msg: Msg) -> anyhow::Result<()> {
         match msg.into_inner::<T>() {
-            Ok(msg) => self.push_ext(user_id, session_id, msg).await,
+            Ok(msg) => self.on_push(user_id, session_id, msg).await,
             Err(e) => Err(anyhow::anyhow!(
                 "[MemoryMessageExtImpl] msg {:?} is not T",
                 e
@@ -91,7 +91,7 @@ where
 
     async fn update(&self, user_id: &str, msg: Msg) -> anyhow::Result<()> {
         match msg.into_inner::<T>() {
-            Ok(msg) => self.update_ext(user_id, msg).await,
+            Ok(msg) => self.on_update(user_id, msg).await,
             Err(e) => Err(anyhow::anyhow!(
                 "[MemoryMessageExtImpl] msg {:?} is not T",
                 e
@@ -100,14 +100,14 @@ where
     }
 
     async fn delete(&self, user_id: &str, session_id: &str, id: &str) -> anyhow::Result<()> {
-        self.delete_ext(user_id, session_id, id).await
+        self.on_delete(user_id, session_id, id).await
     }
 
     async fn reset(&self, user_id: &str, session_id: &str) -> anyhow::Result<()> {
-        self.reset_ext(user_id, session_id).await
+        self.on_reset(user_id, session_id).await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
-        self.flush_ext().await
+        self.on_flush().await
     }
 }
