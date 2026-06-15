@@ -98,7 +98,7 @@ impl Environment for AgentRuntime {
 
             tokio::select! {
                 res = recv => {
-                    let mut task = res?;
+                    let task = res?;
                     match task.get_status() {
                         AgentTaskStatus::CREATE => {
                             return Ok(EnvEvent::Agent(task));

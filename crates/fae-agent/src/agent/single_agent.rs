@@ -176,6 +176,7 @@ where
             }
         }
     }
+    #[allow(dead_code)]
     fn get_timestamp() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -818,8 +819,8 @@ where
     async fn on_agent_task(&self, env: Env, mut task: AgentTask) -> anyhow::Result<()> {
         //先尝试解析渠道
         let output = task.try_ext_into::<SenderMessageStream<M>>();
-        let mut user_id = String::new();
-        let mut session_id = String::new();
+        let mut user_id = "".to_string();
+        let mut session_id = "".to_string();
         //解析返回值
         let user_input = match task.get_status() {
             AgentTaskStatus::CREATE => {

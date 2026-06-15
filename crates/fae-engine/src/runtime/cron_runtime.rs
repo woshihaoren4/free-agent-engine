@@ -134,7 +134,6 @@ impl Environment for CronRuntime {
 
     async fn watch(&self) -> anyhow::Result<EnvEvent> {
         loop {
-            let now = Utc::now();
             let sleep_duration = self.get_next_job_expire_time().await;
             let sleep_fut = tokio::time::sleep(sleep_duration);
             let recv_fut = self.channel.recv();

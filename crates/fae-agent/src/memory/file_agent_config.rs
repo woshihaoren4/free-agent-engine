@@ -207,6 +207,7 @@ impl AgentConfigFile {
     }
 
     /// 内部方法：保存配置到文件
+    #[allow(dead_code)]
     async fn save(&self, data: &AgentConfigData) -> anyhow::Result<()> {
         let content = serde_json::to_string_pretty(data)?;
         tokio::fs::write(&self.config_path, content)

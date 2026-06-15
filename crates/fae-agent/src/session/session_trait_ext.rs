@@ -37,7 +37,7 @@ impl<Out: 'static + Send + Message> Stream for MessageStreamLayer<Out> {
             let pinned_inner = self.as_mut().project().inner;
 
             match pinned_inner.poll_next(cx) {
-                Poll::Ready(Some(mut msg)) => match msg.into_inner::<Out>() {
+                Poll::Ready(Some(msg)) => match msg.into_inner::<Out>() {
                     Ok(msg) => return Poll::Ready(Some(msg)),
                     Err(e) => {
                         wd_log::log_error_ln!(

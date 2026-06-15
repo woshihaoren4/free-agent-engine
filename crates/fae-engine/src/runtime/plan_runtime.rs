@@ -185,7 +185,7 @@ impl PlanRuntime {
         let chan = self.events.clone();
         let env = self.parent.clone();
         tokio::spawn(async move {
-            let mut remove_id = String::new();
+            let mut remove_id = "".to_string();
             let plan = Self::get_plan_raw(&plans, result.agent_id.as_str()).await;
             let plan = if let Some(p) = plan {
                 p
@@ -292,7 +292,7 @@ impl Environment for PlanRuntime {
             } else {
                 return Ok(event);
             };
-            let (tid, aid) = if let Some(id) = Self::parse_plan_sub_id(&task_result.agent_id) {
+            let (_tid, _aid) = if let Some(id) = Self::parse_plan_sub_id(&task_result.agent_id) {
                 id
             } else {
                 return Ok(EnvEvent::TaskResult(task_result));
