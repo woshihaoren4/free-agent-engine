@@ -394,6 +394,7 @@ fn allowed_dirs(iden: &IdenInfo) -> Vec<PathBuf> {
         fae_home_dir.join("prompt"),
         fae_home_dir.join("mcp"),
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        fae_home_dir.clone(),
     ];
 
     if let Some(ws) = iden.get(GLOBAL_KEY_WORKSPACE) {

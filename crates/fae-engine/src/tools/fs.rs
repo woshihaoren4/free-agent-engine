@@ -128,6 +128,7 @@ impl Tool for WriteFile {
             fae_home_dir.join("prompt"),
             fae_home_dir.join("mcp"),
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            fae_home_dir.clone(),
         ];
 
         if let Some(ws) = iden.get(GLOBAL_KEY_WORKSPACE) {
