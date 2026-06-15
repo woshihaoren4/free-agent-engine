@@ -18,7 +18,7 @@ async fn main() {
             agents::Agents::exec(ws, args).await;
         }
         args::Commands::Uninstall => {
-            uninstall::Uninstall {}.exec();
+            uninstall::Uninstall {}.exec(ws);
         }
     }
 }
