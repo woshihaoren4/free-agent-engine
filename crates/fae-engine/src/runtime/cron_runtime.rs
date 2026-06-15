@@ -2,7 +2,7 @@ use crate::tools::scheduled_execution::SCHEDULED_EXECUTION_TOOL_NAME;
 use crate::tools::{ScheduledExecution, ScheduledTask};
 use crate::{IdenInfo, Tool};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local};
 use cron::Schedule;
 use fae_agent::{
     Context, Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem,
@@ -21,7 +21,7 @@ pub const CRON_RUNTIME_ID: &str = "FAE_CRON_RUNTIME";
 #[derive(Debug, Clone)]
 struct CronJob {
     task: ScheduledTask,
-    next_time: DateTime<Utc>,
+    next_time: DateTime<Local>,
     schedule: Schedule,
 }
 
@@ -103,7 +103,7 @@ impl CronRuntime {
             })
     }
     pub async fn get_next_job_expire_time(&self) -> std::time::Duration {
-        let now = Utc::now();
+        let now = Local::now();
         let heap = self.heap.read().await;
         if let Some(job) = heap.peek() {
             let duration = job.next_time.signed_duration_since(now).to_std();
@@ -136,6 +136,7 @@ impl Environment for CronRuntime {
         loop {
             let sleep_duration = self.get_next_job_expire_time().await;
             let sleep_fut = tokio::time::sleep(sleep_duration);
+            wd_log::log_info_ln!("[CronRuntime] sleep for {:?}s", sleep_duration);
             let recv_fut = self.channel.recv();
             let spawn_fut = self.spawn_channel.recv();
             let heap = self.heap.clone();
@@ -150,7 +151,7 @@ impl Environment for CronRuntime {
                 res = recv_fut => {
                     let task = res?;
                     if let Ok(schedule) = Schedule::from_str(&task.cron_expression) {
-                        if let Some(next_time) = schedule.upcoming(Utc).next() {
+                        if let Some(next_time) = schedule.upcoming(Local).next() {
                             Self::push_job(heap.clone(), CronJob {task,
                                 next_time,
                                 schedule,}).await;
@@ -165,7 +166,7 @@ impl Environment for CronRuntime {
                 _ = sleep_fut => {
                     if let Some(mut job) = Self::pop_job(heap.clone()).await {
                         if !job.task.execute_once {
-                            if let Some(next_time) = job.schedule.upcoming(Utc).next() {
+                            if let Some(next_time) = job.schedule.upcoming(Local).next() {
                                 job.next_time = next_time;
                                 Self::push_job(heap.clone(), job.clone()).await;
                             }
