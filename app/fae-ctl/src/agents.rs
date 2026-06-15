@@ -1,4 +1,4 @@
-use crate::args::AgentArgs;
+use crate::args::{AgentArgs, DEFAULT_AGENT_ID, DEFAULT_USER_ID};
 use fae_agent::SingleSessionMD;
 use fae_engine::{AgentsEngine, Workspace};
 
@@ -54,8 +54,8 @@ impl Agents {
     }
     pub async fn exec(wd: String, args: AgentArgs) {
         let this = Self::new(&wd).await;
-        let agent = args.id.unwrap_or("main".to_string());
-        let user_id = args.user.unwrap_or("master".to_string());
+        let agent = args.id.unwrap_or(DEFAULT_AGENT_ID.to_string());
+        let user_id = args.user.unwrap_or(DEFAULT_USER_ID.to_string());
         if args.history {
             this.chat_history(&agent, &user_id).await;
         } else if args.chat {

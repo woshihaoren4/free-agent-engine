@@ -1,10 +1,13 @@
 use clap::{Args, Parser, Subcommand};
 
+pub const DEFAULT_AGENT_ID: &str = "fae-assistant";
+pub const DEFAULT_USER_ID: &str = "master";
+
 #[derive(Args, Debug)]
 pub struct AgentArgs {
-    #[arg(alias = "name", short, long, help = "agent id, default is main")]
+    #[arg(alias = "name", short, long, help = format!("agent id, default is {}", DEFAULT_AGENT_ID))]
     pub id: Option<String>,
-    #[arg(short, long, help = "user id, default master")]
+    #[arg(short, long, help = format!("user id, default is {}", DEFAULT_USER_ID))]
     pub user: Option<String>,
     #[arg(short, long, default_value_t = false, help = "start chat with agent")]
     pub chat: bool,

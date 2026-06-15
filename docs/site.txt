@@ -1,4 +1,7 @@
 prompt/aicoding.txt
 prompt/claw.txt
+prompt/assistant.txt
+prompt/aitest.txt
 skills/weather/SKILL.md
 skills/drawio-skill.zip
+skills/fae/SKILL.md

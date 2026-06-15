@@ -1,10 +1,12 @@
-use fae_agent::AgentConfigData;
+use fae_agent::{AgentConfigData, SkillConfig, ToolConfig};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+const PROMPT_ASSISTANT: &str = include_str!("../../../docs/prompt/assistant.txt");
 const PROMPT_AICODING: &str = include_str!("../../../docs/prompt/aicoding.txt");
 const PROMPT_CLAW: &str = include_str!("../../../docs/prompt/claw.txt");
+const PROMPT_AITEST: &str = include_str!("../../../docs/prompt/aitest.txt");
 const MCP_LIST_JSON: &str = r#"{
 	"mcpServers": {
 		"mcp_name1": {
@@ -17,6 +19,96 @@ const MCP_LIST_JSON: &str = r#"{
 		}
 	}
 }"#;
+
+struct AgentTemplate {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    prompt_file: &'static str,
+    tools: &'static [&'static str],
+    skills: &'static [&'static str],
+    sub_agents: &'static [&'static str],
+}
+
+const DEFAULT_AGENTS: &[AgentTemplate] = &[
+    AgentTemplate {
+        id: "fae-assistant",
+        name: "风筝任务协调助手",
+        description: "风筝任务协调助手负责理解、拆解、分配和监督多个 Agent 协作完成任务。",
+        prompt_file: "assistant.txt",
+        tools: &[
+            "read_file",
+            "list_directory",
+            "send_http_request",
+            "ark_web_search",
+            "todo_write",
+            "scheduled_execution",
+            "agent_exec_task",
+        ],
+        skills: &["weather","fae"],
+        sub_agents: &["fae-aicoding", "fae-claw", "fae-aitest"],
+    },
+    AgentTemplate {
+        id: "fae-aicoding",
+        name: "风筝编程助手",
+        description: "风筝编程助手用于项目开发、脚本编写、错误修复、代码优化和工程实现。",
+        prompt_file: "aicoding.txt",
+        tools: &[
+            "execute_command",
+            "read_file",
+            "write_file",
+            "list_directory",
+            "apply_patch",
+            "execute_python",
+            "todo_write",
+        ],
+        skills: &["drawio-skill"],
+        sub_agents: &[],
+    },
+    AgentTemplate {
+        id: "fae-claw",
+        name: "风筝电脑管家",
+        description: "风筝电脑管家用于计算机自动化、文件处理、系统操作、办公任务和通用问答。",
+        prompt_file: "claw.txt",
+        tools: &[
+            "execute_command",
+            "read_file",
+            "write_file",
+            "list_directory",
+            "send_http_request",
+            "execute_python",
+            "todo_write",
+            "ark_web_search",
+            "scheduled_execution",
+        ],
+        skills: &["weather", "drawio-skill"],
+        sub_agents: &[],
+    },
+    AgentTemplate {
+        id: "fae-aitest",
+        name: "风筝测试助手",
+        description: "风筝测试助手负责审查实现、设计测试、执行验证并判断代码是否满足需求。",
+        prompt_file: "aitest.txt",
+        tools: &[
+            "execute_command",
+            "read_file",
+            "list_directory",
+            "send_http_request",
+            "execute_python",
+            "todo_write",
+        ],
+        skills: &[],
+        sub_agents: &[],
+    },
+];
+
+fn tool_configs(tools: &[&str]) -> Vec<ToolConfig> {
+    tools.iter().copied().map(ToolConfig::new).collect()
+}
+
+fn skill_configs(skills: &[&str]) -> Vec<SkillConfig> {
+    skills.iter().copied().map(SkillConfig::new).collect()
+}
 
 pub struct InitProject {}
 
@@ -201,21 +293,21 @@ impl InitProject {
             wd_log::log_info_ln!("file {} already exists", mcp_list_path.display());
         }
 
-        // 检查并在～/.fae/prompt目录下创建aicoding.txt和claw.txt文件
-        let aicoding_path = prompt_dir.join("aicoding.txt");
-        if !aicoding_path.exists() {
-            wd_log::log_info_ln!("create file {}", aicoding_path.display());
-            fs::write(&aicoding_path, PROMPT_AICODING).expect("Failed to write aicoding.txt");
-        } else {
-            wd_log::log_info_ln!("file {} already exists", aicoding_path.display());
-        }
-
-        let claw_path = prompt_dir.join("claw.txt");
-        if !claw_path.exists() {
-            wd_log::log_info_ln!("create file {}", claw_path.display());
-            fs::write(&claw_path, PROMPT_CLAW).expect("Failed to write claw.txt");
-        } else {
-            wd_log::log_info_ln!("file {} already exists", claw_path.display());
+        // 检查并在～/.fae/prompt目录下创建默认 prompt 文件
+        for (prompt_file, prompt_content) in [
+            ("assistant.txt", PROMPT_ASSISTANT),
+            ("aicoding.txt", PROMPT_AICODING),
+            ("claw.txt", PROMPT_CLAW),
+            ("aitest.txt", PROMPT_AITEST),
+        ] {
+            let prompt_path = prompt_dir.join(prompt_file);
+            if !prompt_path.exists() {
+                wd_log::log_info_ln!("create file {}", prompt_path.display());
+                fs::write(&prompt_path, prompt_content)
+                    .unwrap_or_else(|_| panic!("Failed to write {}", prompt_file));
+            } else {
+                wd_log::log_info_ln!("file {} already exists", prompt_path.display());
+            }
         }
 
         // 创建～/.fae/{ws}目录
@@ -227,41 +319,35 @@ impl InitProject {
             wd_log::log_info_ln!("directory {} already exists", ws_dir.display());
         }
 
-        // 检查并在～/.fae/{ws}目录下创建main agent prompt：claw.txt
-        let main_agent_dir = ws_dir.join("main");
-        if !main_agent_dir.exists() {
-            wd_log::log_info_ln!("create agent main in {}", ws_dir.display());
-            fs::create_dir_all(&main_agent_dir).expect("Failed to create main agent directory");
-            let mut main_config = AgentConfigData::default()
-                .set_name("风筝小管家")
-                .set_description("风筝小管家是一个智能助手，用于回复主人的任何问题，并提供一定的执行能力，并且会记得主人的任何嘱托。")
-                .set_prompt_path(format!("{}/prompt/claw.txt", fae_dir.display()));
-            main_config
-                .init("main", &ws_dir)
-                .await
-                .expect("Failed to init main agent config");
-        } else {
-            wd_log::log_info_ln!("agent main already exists in {}", ws_dir.display());
-        }
-
-        // 检查并在～/.fae/{ws}目录下创建fae_coding，prompt：aicoding.txt
-        let fae_coding_agent_dir = ws_dir.join("fae_coding");
-        if !fae_coding_agent_dir.exists() {
-            wd_log::log_info_ln!("create agent fae_coding in {}", ws_dir.display());
-            fs::create_dir_all(&fae_coding_agent_dir)
-                .expect("Failed to create fae_coding agent directory");
-            let mut fae_coding_config = AgentConfigData::default()
-                .set_name("风筝编程助手")
-                .set_description(
-                    "风筝编程助手是一个智能编程助手，用于项目开发，写脚本，错误修复，代码优化等。",
-                )
-                .set_prompt_path(format!("{}/prompt/aicoding.txt", fae_dir.display()));
-            fae_coding_config
-                .init("fae_coding", &ws_dir)
-                .await
-                .expect("Failed to init fae_coding agent config");
-        } else {
-            wd_log::log_info_ln!("agent fae_coding already exists in {}", ws_dir.display());
+        // 检查并在～/.fae/{ws}目录下创建默认 agent
+        for agent in DEFAULT_AGENTS {
+            let agent_dir = ws_dir.join(agent.id);
+            if !agent_dir.exists() {
+                wd_log::log_info_ln!("create agent {} in {}", agent.id, ws_dir.display());
+                fs::create_dir_all(&agent_dir)
+                    .unwrap_or_else(|_| panic!("Failed to create {} agent directory", agent.id));
+                let mut config = AgentConfigData::default()
+                    .set_name(agent.name)
+                    .set_description(agent.description)
+                    .set_prompt_path(format!(
+                        "{}/prompt/{}",
+                        fae_dir.display(),
+                        agent.prompt_file
+                    ));
+                config.tools = tool_configs(agent.tools);
+                config.skills = skill_configs(agent.skills);
+                config.sub_agents = agent
+                    .sub_agents
+                    .iter()
+                    .map(|agent_id| agent_id.to_string())
+                    .collect();
+                config
+                    .init(agent.id, &ws_dir)
+                    .await
+                    .unwrap_or_else(|_| panic!("Failed to init {} agent config", agent.id));
+            } else {
+                wd_log::log_info_ln!("agent {} already exists in {}", agent.id, ws_dir.display());
+            }
         }
 
         wd_log::log_info_ln!("init project success.");
