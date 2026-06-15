@@ -61,6 +61,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "apply_patch",
             "execute_python",
             "todo_write",
+            "agent_exec_task",
         ],
         skills: &["drawio-skill","fae"],
         sub_agents: &[],
