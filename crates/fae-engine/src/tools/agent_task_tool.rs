@@ -64,6 +64,9 @@ impl Tool for AgentTaskTool {
                 if create.executor.session_id.is_empty() {
                     create.executor.session_id = session_id.to_string();
                 }
+                if create.executor.user_id.is_empty() {
+                    create.executor.user_id = author.user_id;
+                }
                 let mut task = AgentTask::default()
                     .set_task_id(wd_tools::uuid::v4())
                     .set_status(status)
