@@ -62,7 +62,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "execute_python",
             "todo_write",
         ],
-        skills: &["drawio-skill"],
+        skills: &["drawio-skill","fae"],
         sub_agents: &[],
     },
     AgentTemplate {
@@ -80,8 +80,9 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "todo_write",
             "ark_web_search",
             "scheduled_execution",
+            "agent_exec_task",
         ],
-        skills: &["weather", "drawio-skill"],
+        skills: &["weather", "drawio-skill","fae"],
         sub_agents: &[],
     },
     AgentTemplate {
@@ -96,6 +97,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "send_http_request",
             "execute_python",
             "todo_write",
+            "agent_exec_task",
         ],
         skills: &[],
         sub_agents: &[],
