@@ -875,8 +875,6 @@ dependencies = [
  "dirs",
  "fae-agent",
  "fae-engine",
- "libc",
- "ratatui",
  "reqwest 0.13.3",
  "tokio",
  "tokio-stream",
