@@ -45,7 +45,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "scheduled_execution",
             "agent_exec_task",
         ],
-        skills: &["weather","fae"],
+        skills: &["weather", "fae"],
         sub_agents: &["fae-aicoding", "fae-claw", "fae-aitest"],
     },
     AgentTemplate {
@@ -63,7 +63,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "todo_write",
             "agent_exec_task",
         ],
-        skills: &["drawio-skill","fae"],
+        skills: &["drawio-skill", "fae"],
         sub_agents: &[],
     },
     AgentTemplate {
@@ -83,7 +83,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "scheduled_execution",
             "agent_exec_task",
         ],
-        skills: &["weather", "drawio-skill","fae"],
+        skills: &["weather", "drawio-skill", "fae"],
         sub_agents: &[],
     },
     AgentTemplate {

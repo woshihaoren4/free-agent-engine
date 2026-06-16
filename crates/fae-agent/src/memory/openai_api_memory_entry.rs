@@ -61,7 +61,7 @@ pub struct ToolCall {
 }
 
 pub trait MemoryEntry: Message {
-    fn from_custom_msg(id:String, content: String) -> Self
+    fn from_custom_msg(id: String, content: String) -> Self
     where
         Self: Sized;
     fn from_openai_msg(msg: ChatMsg) -> Vec<Self>
@@ -196,7 +196,7 @@ impl Message for Record {
 }
 
 impl MemoryEntry for Record {
-    fn from_custom_msg(id:String, content: String) -> Self {
+    fn from_custom_msg(id: String, content: String) -> Self {
         Self {
             id: "".into(),
             agent_id: "".to_string(),

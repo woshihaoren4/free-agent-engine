@@ -8,7 +8,12 @@ use crate::{
     ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
     define_planning_group,
 };
-use async_openai::types::chat::{ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort};
+use async_openai::types::chat::{
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    FunctionObjectArgs, ReasoningEffort,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -183,7 +188,11 @@ where
             .unwrap()
             .as_secs()
     }
-    pub async fn start_compact(&mut self, mut req: CreateChatCompletionRequestArgs,mut messages: VecDeque<ChatCompletionRequestMessage>) -> anyhow::Result<CreateChatCompletionRequest> {
+    pub async fn start_compact(
+        &mut self,
+        mut req: CreateChatCompletionRequestArgs,
+        mut messages: VecDeque<ChatCompletionRequestMessage>,
+    ) -> anyhow::Result<CreateChatCompletionRequest> {
         // 修改上下文压缩状态
         self.compact_context = true;
         // 组装上下文压缩提示词
@@ -192,7 +201,8 @@ where
                 .content(COMPACT_PROMPT)
                 .build()
                 .expect("build message failed!")
-                .into());
+                .into(),
+        );
         messages.push_back(
             ChatCompletionRequestUserMessageArgs::default()
                 .content("The current context is too long; you must perform a compression process.")
@@ -203,15 +213,19 @@ where
         req.messages(messages);
 
         //发送通知
-        self.send(MemoryEntry::from_custom_msg("Compacting".to_string(), "Context length exceeds limit, start compressing context...".to_string())).await?;
+        self.send(MemoryEntry::from_custom_msg(
+            "Compacting".to_string(),
+            "Context length exceeds limit, start compressing context...".to_string(),
+        ))
+        .await?;
         Ok(req.build()?)
     }
     pub async fn end_compact(&mut self) -> anyhow::Result<PlanningResult> {
         self.compact_context = false;
         // 获取压缩后的结果
         let mut compact_text = String::new();
-        while let Some(msg) = self.exec_records.pop(){
-            if let Some(text) = msg.try_to_model(){
+        while let Some(msg) = self.exec_records.pop() {
+            if let Some(text) = msg.try_to_model() {
                 compact_text = text;
                 break;
             }
@@ -220,17 +234,29 @@ where
             return anyhow::anyhow!("[SingleAgent::{}]compact text is empty", self.agent_id).err();
         }
         //清理执行记录
-        self.memory.on_reset(self.session_md.user_id(), self.session_md.id()).await?;
+        self.memory
+            .on_reset(self.session_md.user_id(), self.session_md.id())
+            .await?;
         self.doing.clear();
         self.exec_records.clear();
         //添加压缩后的结果
-        self.exec_records.push(M::from_openai_msg(ChatMsg::with_user(compact_text)).pop().unwrap());
+        self.exec_records.push(
+            M::from_openai_msg(ChatMsg::with_user(compact_text))
+                .pop()
+                .unwrap(),
+        );
         //发送通知
-        self.send(MemoryEntry::from_custom_msg("Compacted".to_string(), "Context compression completed.".to_string())).await?;
+        self.send(MemoryEntry::from_custom_msg(
+            "Compacted".to_string(),
+            "Context compression completed.".to_string(),
+        ))
+        .await?;
         // 重新生成任务
         self.make_model_task().await
     }
-    pub async fn build_openai_api_request(&mut self) -> anyhow::Result<CreateChatCompletionRequest> {
+    pub async fn build_openai_api_request(
+        &mut self,
+    ) -> anyhow::Result<CreateChatCompletionRequest> {
         let model = self.agent_config.model();
         let mut req = CreateChatCompletionRequestArgs::default();
         req.model(model.model.as_str());
@@ -304,7 +330,7 @@ where
             // wd_log::log_info_ln!("context size: {}, min compact window size: {}", context_size, min_compact_window_size);
             if context_size as u32 >= min_compact_window_size {
                 //触发上下文压缩
-                return self.start_compact(req,messages).await;
+                return self.start_compact(req, messages).await;
             }
         }
         //添加prompt
@@ -469,10 +495,7 @@ where
     }
     pub async fn load_memory(&mut self) -> anyhow::Result<()> {
         // 添加user_info
-        let info = self
-            .memory
-            .on_user_info(&self.session_md.user_id())
-            .await?;
+        let info = self.memory.on_user_info(&self.session_md.user_id()).await?;
         self.agent_info.push_str(&info);
         Ok(())
     }

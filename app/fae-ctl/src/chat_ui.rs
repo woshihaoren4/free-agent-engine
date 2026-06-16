@@ -1,5 +1,5 @@
 use crossterm::{
-    cursor::MoveToColumn,
+    cursor::{MoveToColumn, SetCursorStyle},
     event::{self, Event, KeyCode, KeyModifiers},
     queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
@@ -18,6 +18,35 @@ pub struct ChatUi {
     model_name: ModelCallConfig,
 }
 
+struct TerminalSession;
+
+impl TerminalSession {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+
+        let session = Self;
+        if let Err(err) = Self::set_cursor_style(SetCursorStyle::SteadyBar) {
+            drop(session);
+            return Err(err);
+        }
+
+        Ok(session)
+    }
+
+    fn set_cursor_style(style: SetCursorStyle) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        queue!(stdout, style)?;
+        stdout.flush()
+    }
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = Self::set_cursor_style(SetCursorStyle::DefaultUserShape);
+        let _ = disable_raw_mode();
+    }
+}
+
 impl ChatUi {
     pub fn new(ws: Workspace, agent_name: String) -> Self {
         let model_name = ModelCallConfig::default();
@@ -29,7 +58,7 @@ impl ChatUi {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        enable_raw_mode()?;
+        let terminal_session = TerminalSession::enter()?;
 
         let agent = self.ws.get_agent(&self.agent_name).await?.on_info().await;
 
@@ -37,7 +66,7 @@ impl ChatUi {
 
         let res = self.run_app().await;
 
-        disable_raw_mode()?;
+        drop(terminal_session);
         println!("\r");
 
         res?;
