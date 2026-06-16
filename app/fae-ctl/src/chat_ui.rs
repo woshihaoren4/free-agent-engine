@@ -2,8 +2,9 @@ use crossterm::{
     ExecutableCommand,
     cursor::{SetCursorStyle, Show},
     event::{
-        self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -135,8 +136,20 @@ impl ChatUi {
                             return ChatRunOutcome::err(state, e);
                         }
                     };
-                    if matches!(&event, Event::Resize(_, _)) {
-                        needs_draw = true;
+                    match &event {
+                        Event::Resize(_, _) => needs_draw = true,
+                        Event::Mouse(mouse) => match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                state.scroll_up();
+                                needs_draw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                state.scroll_down();
+                                needs_draw = true;
+                            }
+                            _ => {}
+                        },
+                        _ => {}
                     }
                     if let Event::Key(key) = event {
                         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -191,8 +204,6 @@ impl ChatUi {
                             {
                                 state.input.handle(InputRequest::InsertChar('\n'));
                             }
-                            KeyCode::PageUp => state.scroll_up(),
-                            KeyCode::PageDown => state.scroll_down(),
                             KeyCode::Enter if key.modifiers.is_empty() => {
                                 let raw = state.input.value().to_string();
                                 let val = raw.trim();
@@ -425,7 +436,7 @@ impl ChatUi {
             Span::styled("reset", Style::default().fg(Color::DarkGray)),
             Span::styled("  Ctrl+C ", Style::default().fg(Color::White)),
             Span::styled("abort/quit", Style::default().fg(Color::DarkGray)),
-            Span::styled("  PgUp/PgDn ", Style::default().fg(Color::White)),
+            Span::styled("  Wheel ", Style::default().fg(Color::White)),
             Span::styled("scroll", Style::default().fg(Color::DarkGray)),
         ]);
         frame.render_widget(Paragraph::new(help), area);
@@ -500,6 +511,7 @@ impl TerminalGuard {
         let terminal_file = tty.try_clone()?;
         enable_raw_mode()?;
         tty.execute(EnterAlternateScreen)?;
+        tty.execute(EnableMouseCapture)?;
         tty.execute(PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
@@ -512,6 +524,7 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = self.tty.execute(PopKeyboardEnhancementFlags);
+        let _ = self.tty.execute(DisableMouseCapture);
         let _ = self.tty.execute(SetCursorStyle::DefaultUserShape);
         let _ = self.tty.execute(Show);
         let _ = self.tty.execute(LeaveAlternateScreen);
