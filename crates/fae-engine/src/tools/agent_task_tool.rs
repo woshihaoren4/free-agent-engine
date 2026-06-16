@@ -49,8 +49,10 @@ impl Tool for AgentTaskTool {
             .map_err(|e| anyhow::anyhow!("[AgentTaskTool] invalid arguments: {}", e))?;
         let _task_id = task.get_task_id().to_string();
         let status = task.status().to_string();
+        let mut result_content = "Task update successfully.".to_string();
         match task {
             AgentTaskStatus::Create(mut create) => {
+                result_content.push_str("\nPlease wait for me to complete this task, and I will notify you when it is finished.");
                 //发布者
                 let author = AgentInfo {
                     agent_id: iden
@@ -97,6 +99,8 @@ impl Tool for AgentTaskTool {
                 //不需要挂钩子，因为当前agent正在执行任务，等当前任务完成，再执行下一个任务
             }
             AgentTaskStatus::Completed(result) => {
+                result_content.push_str("\nThe results have been sent to the task publisher; you can end your task now.");
+                //移除任务
                 if result.task_id.is_empty() {
                     return Err(anyhow::anyhow!(
                         "[AgentTaskTool] completed.task_id is empty"
@@ -123,6 +127,8 @@ impl Tool for AgentTaskTool {
                 );
             }
             AgentTaskStatus::Failed(result) => {
+                result_content.push_str("\nThe results have been sent to the task publisher; you can end your task now.");
+                //移除任务
                 if result.task_id.is_empty() {
                     return Err(anyhow::anyhow!("[AgentTaskTool] failed.task_id is empty"));
                 }
@@ -148,7 +154,7 @@ impl Tool for AgentTaskTool {
         }
 
         Ok(ToolResponse::with_result(
-            "Task update successfully.".into(),
+            result_content,
         ))
     }
 }

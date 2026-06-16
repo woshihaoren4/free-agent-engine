@@ -140,7 +140,7 @@ where
             "".to_string()
         };
         let mut info = "\n---\n## About user memory:".to_string();
-        info.push_str("  - You must update your memory once you have a clear understanding of some user attributes or preferences.");
+        info.push_str("Everything that needs to be remembered must be recorded in this file, whether the user actively asks you to remember it or the content you discover automatically.");
         info.push_str(&format!("\nStorage file path: `{}`.", user_file.display()));
         info.push_str(&format!("\nRecorded content: \n{}", mem));
         Ok(info)
