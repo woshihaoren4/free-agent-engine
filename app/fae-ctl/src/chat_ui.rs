@@ -1,16 +1,30 @@
 use crossterm::{
-    cursor::MoveToColumn,
-    event::{self, Event, KeyCode, KeyModifiers},
-    queue,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
+    cursor::Show,
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use fae_agent::{GLOBAL_KEY_PROJECT_DIR, MemoryEntry, ModelCallConfig, Record, SingleSessionMD};
 use fae_engine::Workspace;
-use std::io::{self, Write};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Layout, Margin, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Paragraph, Wrap},
+};
+use std::io;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio_stream::StreamExt;
-use tui_input::{Input, backend::crossterm::EventHandler};
+use tui_input::{
+    Input, InputRequest,
+    backend::crossterm::{EventHandler, to_input_request},
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
 pub struct ChatUi {
     ws: Workspace,
@@ -29,399 +43,579 @@ impl ChatUi {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        enable_raw_mode()?;
-
         let agent = self.ws.get_agent(&self.agent_name).await?.on_info().await;
-
         self.model_name = agent.model();
 
-        let res = self.run_app().await;
+        let guard = TerminalGuard::enter()?;
+        let backend = CrosstermBackend::new(io::stdout());
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
 
-        disable_raw_mode()?;
-        println!("\r");
+        let res = self.run_app(&mut terminal).await;
 
-        res?;
-        Ok(())
+        let _ = terminal.show_cursor();
+        drop(terminal);
+        drop(guard);
+
+        res
     }
 
-    async fn run_app(&mut self) -> io::Result<()> {
-        let mut input = Input::default();
-
-        let clear_line = || -> io::Result<()> {
-            let mut stdout = io::stdout();
-            queue!(stdout, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
-            stdout.flush()
-        };
-
-        let print_text = |text: &str| -> io::Result<()> {
-            let mut stdout = io::stdout();
-            queue!(stdout, Clear(ClearType::FromCursorDown))?;
-            let text = text.replace('\n', "\r\n");
-            print!("{}", text);
-            queue!(
-                stdout,
-                crossterm::style::Print("\n"),
-                crossterm::cursor::MoveUp(1)
-            )?;
-            stdout.flush()
-        };
-
-        let session_config = SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".");
+    async fn run_app(&mut self, terminal: &mut Tui) -> anyhow::Result<()> {
+        let mut state = ChatState::default();
+        let session_config = Self::new_session_config();
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
-        let mut session = match self
+        let mut session = self
             .ws
             .session_call_stream::<_, Record, Record>(&self.agent_name, session_config)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                clear_line()?;
-                print_text(&format!("Failed to create session: {:?}\n", e))?;
-                return Ok(());
-            }
-        };
+            .await?;
 
         let mut stream_active = false;
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
             None;
-        let mut current_title = String::new();
-        let mut spinner_tick: usize = 0;
-        let mut user_input = String::new();
-
-        // Print welcome header
-        clear_line()?;
-        self.print_welcome_banner()?;
-        print_text(
-            "Instructions for Use:\n - '/exit' to quit.\n - '/reset' to restart session.\n - 'ctrl+j' line break.\n - 'ctrl+c' to abort session or quit cli.\n\n",
-        )?;
 
         loop {
-            Self::redraw_prompt(&input, stream_active, spinner_tick, &current_title)?;
+            terminal.draw(|frame| self.render(frame, &mut state))?;
 
-            let mut event_handled = false;
-            let poll_timeout = if stream_active { 50 } else { 100 };
+            if event::poll(Duration::from_millis(if stream_active { 30 } else { 120 }))? {
+                if let Event::Key(key) = event::read()? {
+                    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
 
-            if crossterm::event::poll(std::time::Duration::from_millis(poll_timeout))? {
-                let event = event::read()?;
-                event_handled = true;
-                match event {
-                    Event::Key(key) => match key.code {
+                    match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if stream_active {
-                                stream_active = false;
-                                current_stream = None;
-                                clear_line()?;
-                                print_text("\n[Session aborted. Starting a new session...]\n\n")?;
-                                let session_config = SingleSessionMD::default();
-                                session_id = session_config.id.clone();
-                                user_id = session_config.user_id.clone();
-                                session = match self
-                                    .ws
-                                    .session_call_stream::<_, Record, Record>(
-                                        &self.agent_name,
-                                        session_config,
-                                    )
-                                    .await
-                                {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        clear_line()?;
-                                        print_text(&format!(
-                                            "Failed to create new session: {:?}\n",
-                                            e
-                                        ))?;
-                                        return Ok(());
-                                    }
-                                };
-                                input.reset();
-                            } else {
+                            if !stream_active {
                                 return Ok(());
                             }
+                            stream_active = false;
+                            current_stream = None;
+                            state.current_title.clear();
+                            state.push_system("Session aborted. Starting a new session.");
+                            let session_config = Self::new_session_config();
+                            session_id = session_config.id.clone();
+                            user_id = session_config.user_id.clone();
+                            session = self
+                                .ws
+                                .session_call_stream::<_, Record, Record>(
+                                    &self.agent_name,
+                                    session_config,
+                                )
+                                .await?;
+                            state.input.reset();
+                            state.status = "Ready".to_string();
                         }
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            //换行
-                            let val = input.value().to_string();
-                            let val = val.trim();
-                            let is_header = user_input.is_empty();
-                            Self::print_user_message(val, is_header)?;
-                            if !user_input.is_empty() {
-                                user_input.push('\n');
-                            }
-                            user_input.push_str(val);
-                            input.reset();
-                            clear_line()?;
+                            state.input.handle(InputRequest::InsertChar('\n'));
                         }
+                        KeyCode::PageUp => state.scroll_up(),
+                        KeyCode::PageDown => state.scroll_down(),
                         KeyCode::Enter => {
-                            let val = input.value().to_string();
-                            let val = val.trim();
+                            let raw = state.input.value().to_string();
+                            let val = raw.trim();
                             if val.starts_with("/exit") {
                                 return Ok(());
                             } else if val.starts_with("/reset") {
-                                if stream_active {
-                                    stream_active = false;
-                                    current_stream = None;
-                                }
-                                clear_line()?;
+                                stream_active = false;
+                                current_stream = None;
+                                state.input.reset();
+                                state.current_title.clear();
                                 if let Err(e) = self
                                     .ws
                                     .session_reset(&self.agent_name, &user_id, &session_id)
                                     .await
                                 {
-                                    print_text(&format!("Failed to reset session: {:?}\n", e))?;
+                                    state.push_error(format!("Failed to reset session: {e:?}"));
                                 } else {
-                                    let text = " Session reset successfully ";
-                                    let cols =
-                                        crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80)
-                                            as usize;
-                                    let inner_cols = cols.saturating_sub(4);
-                                    let dashes_len = inner_cols.saturating_sub(text.len()) / 2;
-                                    let dashes = "-".repeat(dashes_len);
-                                    print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
+                                    state.messages.clear();
+                                    state.push_system("Session reset successfully.");
+                                    state.status = "Ready".to_string();
                                 }
-                                input.reset();
                             } else if !val.is_empty() {
-                                let is_header = user_input.is_empty();
-                                Self::print_user_message(val, is_header)?;
-                                if !user_input.is_empty() {
-                                    user_input.push('\n');
-                                }
-                                user_input.push_str(val);
-                                input.reset();
-                                clear_line()?;
-                                if !stream_active {
-                                    let msg = Record::from_user_input(user_input.as_str());
-                                    match session.call_stream(msg).await {
+                                if stream_active {
+                                    state.status =
+                                        "Assistant is still responding. Ctrl+C aborts it."
+                                            .to_string();
+                                } else {
+                                    let msg = raw.trim().to_string();
+                                    state.input.reset();
+                                    state.push_user(msg.clone());
+                                    match session.call_stream(Record::from_user_input(msg)).await {
                                         Ok(s) => {
                                             current_stream = Some(Pin::from(s));
                                             stream_active = true;
-                                            current_title = "Waiting".to_string();
+                                            state.current_title = "Waiting".to_string();
+                                            state.status = "Waiting".to_string();
                                         }
                                         Err(e) => {
-                                            print_text(&format!("Failed to send chat: {:?}\n", e))?;
+                                            state.push_error(format!("Failed to send chat: {e:?}"));
+                                            state.status = "Ready".to_string();
                                         }
                                     }
-                                    user_input.clear();
                                 }
                             }
                         }
                         _ => {
-                            input.handle_event(&Event::Key(key));
+                            if to_input_request(&Event::Key(key)).is_some() {
+                                state.input.handle_event(&Event::Key(key));
+                            }
                         }
-                    },
-                    _ => {}
+                    }
                 }
             }
 
             if stream_active {
-                if let Some(ref mut st) = current_stream {
-                    let select_timeout = if event_handled { 0 } else { 20 };
-                    tokio::select! {
-                        record_opt = st.next() => {
-                            match record_opt {
-                                Some(record) => {
-                                    let t = record.title();
-                                    if current_title != t {
-                                        current_title = t.clone();
-                                        let title_suffix = if current_title.is_empty() || current_title == "Waiting" {
-                                            String::new()
-                                        } else {
-                                            format!(" [{}]", current_title)
-                                        };
-                                        Self::print_agent_header(
-                                            &record.agent_id,
-                                            &title_suffix,
-                                            &print_text,
-                                        )?;
-                                    }
-                                    let content = record.content();
-                                    if !content.is_empty() {
-                                        if current_title == "Thinking" {
-                                            let mut stdout = io::stdout();
-                                            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
-                                            stdout.flush()?;
-                                            print_text(content)?;
-                                            queue!(stdout, ResetColor)?;
-                                            stdout.flush()?;
-                                        } else if current_title.starts_with("CallTool") || current_title.starts_with("ToolOut") {
-                                            let mut stdout = io::stdout();
-                                            queue!(stdout, SetForegroundColor(Color::Yellow))?;
-                                            stdout.flush()?;
-                                            print_text(content)?;
-                                            queue!(stdout, ResetColor)?;
-                                            stdout.flush()?;
-                                        } else {
-                                            print_text(content)?;
-                                        }
-                                    }
-                                }
-                                None => {
-                                    stream_active = false;
-                                    current_stream = None;
-                                    print_text("\n\n")?;
-                                }
-                            }
-                            spinner_tick = spinner_tick.wrapping_add(1);
+                let mut done = false;
+                if let Some(stream) = current_stream.as_mut() {
+                    match tokio::time::timeout(Duration::from_millis(20), stream.next()).await {
+                        Ok(Some(record)) => {
+                            let title = record.title();
+                            state.current_title = title.clone();
+                            state.status = title;
+                            state.push_record(&record, &self.agent_name);
                         }
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(select_timeout)) => {
-                            spinner_tick = spinner_tick.wrapping_add(1);
-                        }
+                        Ok(None) => done = true,
+                        Err(_) => {}
                     }
                 } else {
-                    stream_active = false;
+                    done = true;
                 }
+
+                if done {
+                    stream_active = false;
+                    current_stream = None;
+                    state.current_title.clear();
+                    state.status = "Ready".to_string();
+                }
+                state.spinner_tick = state.spinner_tick.wrapping_add(1);
             }
         }
     }
 
-    fn print_welcome_banner(&self) -> io::Result<()> {
-        let mut stdout = io::stdout();
+    fn render(&self, frame: &mut Frame<'_>, state: &mut ChatState) {
+        let area = frame.area();
+        let input_height = Self::input_height(state.input.value(), area.width);
+        let chunks = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
 
-        let version = env!("CARGO_PKG_VERSION");
-        let directory = std::env::current_dir()
-            .ok()
-            .and_then(|p| {
-                let s = p.display().to_string();
-                let home = std::env::var("HOME").ok();
-                Some(match home {
-                    Some(h) if s.starts_with(&h) => format!("~{}", &s[h.len()..]),
-                    _ => s,
-                })
-            })
-            .unwrap_or_else(|| ".".to_string());
+        self.render_header(frame, chunks[0]);
+        self.render_history(frame, chunks[1], state);
+        self.render_status(frame, chunks[2], state);
+        self.render_input(frame, chunks[3], state);
+        self.render_help(frame, chunks[4]);
+    }
 
-        // Banner content lines (without borders).
-        let title = format!(">_ Free Agent Engine CLI (v{})", version);
-        let model_line = format!(
-            "agent: {}    model: {}",
-            &self.agent_name, &self.model_name.model
+    fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
+        let dir = compact_current_dir();
+        let header = Text::from(vec![
+            Line::from(vec![
+                Span::styled(
+                    ">_ ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Free Agent Engine",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("agent ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&self.agent_name, Style::default().fg(Color::Green)),
+                Span::styled("  model ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&self.model_name.model, Style::default().fg(Color::Yellow)),
+                Span::styled("  dir ", Style::default().fg(Color::DarkGray)),
+                Span::styled(dir, Style::default().fg(Color::White)),
+            ]),
+        ]);
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(Paragraph::new(header).block(block), area);
+    }
+
+    fn render_history(&self, frame: &mut Frame<'_>, area: Rect, state: &mut ChatState) {
+        let mut lines = Vec::new();
+        if state.messages.is_empty() {
+            lines.push(Line::styled(
+                "Ask a question to start.",
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            for message in &state.messages {
+                lines.extend(message.render_lines(&self.agent_name));
+            }
+        }
+
+        let height = wrapped_height(&lines, area.width as usize);
+        let max_scroll = height.saturating_sub(area.height as usize) as u16;
+        if state.follow_tail {
+            state.scroll = max_scroll;
+        } else {
+            state.scroll = state.scroll.min(max_scroll);
+        }
+
+        let history = Paragraph::new(Text::from(lines))
+            .scroll((state.scroll, 0))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(history, area);
+    }
+
+    fn render_status(&self, frame: &mut Frame<'_>, area: Rect, state: &ChatState) {
+        let status = if state.current_title.is_empty() {
+            state.status.clone()
+        } else {
+            let spinners = ["|", "/", "-", "\\"];
+            format!(
+                "{} {}",
+                spinners[(state.spinner_tick / 2) % spinners.len()],
+                state.current_title
+            )
+        };
+        let line = Line::from(vec![
+            Span::styled(" ", Style::default().bg(Color::DarkGray)),
+            Span::styled(
+                status,
+                Style::default().fg(Color::Black).bg(Color::DarkGray),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    fn render_input(&self, frame: &mut Frame<'_>, area: Rect, state: &ChatState) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                " Message ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let text = if state.input.value().is_empty() {
+            Text::from(Line::styled(
+                "Type a message...",
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Text::from(state.input.value().to_string())
+        };
+        frame.render_widget(
+            Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+            area,
         );
-        let dir_line = format!("directory: {}", directory);
+        let (x, y) = input_cursor_position(state.input.value(), state.input.cursor(), inner);
+        frame.set_cursor_position((x, y));
+    }
 
-        let lines = [title.as_str(), "", model_line.as_str(), dir_line.as_str()];
+    fn render_help(&self, frame: &mut Frame<'_>, area: Rect) {
+        let help = Line::from(vec![
+            Span::styled(" Enter ", Style::default().fg(Color::White)),
+            Span::styled("send", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Ctrl+J ", Style::default().fg(Color::White)),
+            Span::styled("newline", Style::default().fg(Color::DarkGray)),
+            Span::styled("  /reset ", Style::default().fg(Color::White)),
+            Span::styled("reset", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Ctrl+C ", Style::default().fg(Color::White)),
+            Span::styled("abort/quit", Style::default().fg(Color::DarkGray)),
+            Span::styled("  PgUp/PgDn ", Style::default().fg(Color::White)),
+            Span::styled("scroll", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(help), area);
+    }
 
-        // Inner width = longest line, with 1 space padding on each side.
-        let content_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-        let inner_width = content_width + 2;
+    fn input_height(value: &str, terminal_width: u16) -> u16 {
+        let inner_width = terminal_width.saturating_sub(4).max(1) as usize;
+        let rows = value
+            .split('\n')
+            .map(|line| (UnicodeWidthStr::width(line).max(1) + inner_width - 1) / inner_width)
+            .sum::<usize>()
+            .clamp(1, 6);
+        rows as u16 + 2
+    }
 
-        let top = format!("╭{}╮", "─".repeat(inner_width));
-        let bottom = format!("╰{}╯", "─".repeat(inner_width));
+    fn new_session_config() -> SingleSessionMD {
+        SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".")
+    }
+}
 
-        queue!(
-            stdout,
-            MoveToColumn(0),
-            SetForegroundColor(Color::DarkGrey),
-            Print(format!("{}\r\n", top)),
-        )?;
+struct TerminalGuard;
 
-        for line in lines {
-            let pad = content_width - line.chars().count();
-            let body = format!(" {}{} ", line, " ".repeat(pad));
-            queue!(
-                stdout,
-                MoveToColumn(0),
-                SetForegroundColor(Color::DarkGrey),
-                Print("│"),
-                SetForegroundColor(Color::White),
-                Print(&body),
-                SetForegroundColor(Color::DarkGrey),
-                Print("│\r\n"),
-            )?;
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+struct ChatState {
+    input: Input,
+    messages: Vec<ChatMessage>,
+    status: String,
+    current_title: String,
+    spinner_tick: usize,
+    scroll: u16,
+    follow_tail: bool,
+}
+
+impl Default for ChatState {
+    fn default() -> Self {
+        Self {
+            input: Input::default(),
+            messages: Vec::new(),
+            status: "Ready".to_string(),
+            current_title: String::new(),
+            spinner_tick: 0,
+            scroll: 0,
+            follow_tail: true,
+        }
+    }
+}
+
+impl ChatState {
+    fn push_user(&mut self, content: String) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::User,
+            title: "You".to_string(),
+            agent_id: String::new(),
+            content,
+        });
+        self.follow_tail = true;
+    }
+
+    fn push_system(&mut self, content: impl Into<String>) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            title: "System".to_string(),
+            agent_id: String::new(),
+            content: content.into(),
+        });
+        self.follow_tail = true;
+    }
+
+    fn push_error(&mut self, content: impl Into<String>) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::Error,
+            title: "Error".to_string(),
+            agent_id: String::new(),
+            content: content.into(),
+        });
+        self.follow_tail = true;
+    }
+
+    fn push_record(&mut self, record: &Record, fallback_agent: &str) {
+        let content = record.content();
+        if content.is_empty() {
+            return;
         }
 
-        queue!(
-            stdout,
-            MoveToColumn(0),
-            SetForegroundColor(Color::DarkGrey),
-            Print(format!("{}\r\n", bottom)),
-            ResetColor,
-            Print("\r\n"),
-        )?;
-        stdout.flush()
-    }
-
-    fn print_agent_header<F>(agent_id: &str, title_suffix: &str, print_text: &F) -> io::Result<()>
-    where
-        F: Fn(&str) -> io::Result<()>,
-    {
-        let mut stdout = io::stdout();
-        queue!(stdout, SetForegroundColor(Color::Green))?;
-        stdout.flush()?;
-        print_text(&format!("\n\n❯ {}{}\n", agent_id, title_suffix))?;
-        queue!(stdout, ResetColor)?;
-        stdout.flush()
-    }
-
-    fn redraw_prompt(
-        input: &Input,
-        stream_active: bool,
-        spinner_tick: usize,
-        title: &str,
-    ) -> io::Result<()> {
-        let mut stdout = io::stdout();
-
-        if stream_active {
-            let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let spinner = spinners[(spinner_tick / 2) % spinners.len()];
-            let msg = format!("{} {}...", spinner, title);
-            queue!(
-                stdout,
-                crossterm::cursor::SavePosition,
-                crossterm::cursor::MoveToNextLine(1),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
-                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                crossterm::style::Print(&msg),
-                crossterm::style::ResetColor,
-                crossterm::cursor::RestorePosition
-            )?;
+        let title = record.title();
+        let role = MessageRole::from_title(&title);
+        let agent_id = if record.agent_id.is_empty() {
+            fallback_agent.to_string()
         } else {
-            queue!(stdout, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
-            queue!(
-                stdout,
-                SetForegroundColor(Color::Blue),
-                SetAttribute(Attribute::Bold),
-                Print("❯ "),
-                ResetColor,
-                SetAttribute(Attribute::Reset),
-                Print(input.value())
-            )?;
+            record.agent_id.clone()
+        };
 
-            let cursor_pos = input.visual_cursor() as u16 + 2;
-            queue!(stdout, MoveToColumn(cursor_pos))?;
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == role
+                && last.agent_id == agent_id
+                && role.can_append(&last.title, &title)
+            {
+                last.title = title;
+                last.content.push_str(content);
+                self.follow_tail = true;
+                return;
+            }
         }
-        stdout.flush()
+
+        self.messages.push(ChatMessage {
+            role,
+            title,
+            agent_id,
+            content: content.to_string(),
+        });
+        self.follow_tail = true;
     }
 
-    fn print_user_message(val: &str, is_header: bool) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        if is_header {
-            let cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80) as usize;
-            let separator = "─".repeat(cols);
-            queue!(
-                stdout,
-                MoveToColumn(0),
-                SetForegroundColor(Color::DarkGrey),
-                Print(format!("{}\r\n", separator)),
-                SetForegroundColor(Color::White),
-                SetAttribute(Attribute::Bold),
-                Print("❯ You\r\n"),
-                SetAttribute(Attribute::Reset),
-                SetForegroundColor(Color::White),
-                Print(val.replace('\n', "\r\n")),
-                ResetColor,
-                Print("\r\n"),
-            )?;
+    fn scroll_up(&mut self) {
+        self.follow_tail = false;
+        self.scroll = self.scroll.saturating_sub(8);
+    }
+
+    fn scroll_down(&mut self) {
+        self.follow_tail = false;
+        self.scroll = self.scroll.saturating_add(8);
+    }
+}
+
+struct ChatMessage {
+    role: MessageRole,
+    title: String,
+    agent_id: String,
+    content: String,
+}
+
+impl ChatMessage {
+    fn render_lines(&self, fallback_agent: &str) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let (label, color) = match self.role {
+            MessageRole::User => ("You".to_string(), Color::Cyan),
+            MessageRole::Assistant => {
+                let agent = if self.agent_id.is_empty() {
+                    fallback_agent
+                } else {
+                    &self.agent_id
+                };
+                (agent.to_string(), Color::Green)
+            }
+            MessageRole::Thought => ("thinking".to_string(), Color::DarkGray),
+            MessageRole::Tool => (self.title.clone(), Color::Yellow),
+            MessageRole::System => ("system".to_string(), Color::Blue),
+            MessageRole::Error => ("error".to_string(), Color::Red),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                "› ",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        let body_style = self.role.body_style();
+        for line in self.content.split('\n') {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line.to_string(), body_style),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageRole {
+    User,
+    Assistant,
+    Thought,
+    Tool,
+    System,
+    Error,
+}
+
+impl MessageRole {
+    fn from_title(title: &str) -> Self {
+        if title == "Thinking" {
+            Self::Thought
+        } else if title.starts_with("CallTool") || title.starts_with("ToolOut") {
+            Self::Tool
         } else {
-            queue!(
-                stdout,
-                MoveToColumn(0),
-                Clear(ClearType::CurrentLine),
-                SetForegroundColor(Color::White),
-                Print(val.replace('\n', "\r\n")),
-                ResetColor,
-                Print("\r\n"),
-            )?;
+            Self::Assistant
         }
-        stdout.flush()
     }
+
+    fn can_append(self, previous_title: &str, next_title: &str) -> bool {
+        match self {
+            Self::Tool => {
+                previous_title.starts_with("CallTool") == next_title.starts_with("CallTool")
+                    && previous_title.starts_with("ToolOut") == next_title.starts_with("ToolOut")
+            }
+            Self::Assistant | Self::Thought => previous_title == next_title,
+            Self::User | Self::System | Self::Error => false,
+        }
+    }
+
+    fn body_style(self) -> Style {
+        match self {
+            Self::Thought => Style::default().fg(Color::DarkGray),
+            Self::Tool => Style::default().fg(Color::Yellow),
+            Self::Error => Style::default().fg(Color::Red),
+            _ => Style::default().fg(Color::White),
+        }
+    }
+}
+
+fn wrapped_height(lines: &[Line<'_>], width: usize) -> usize {
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            if line_width == 0 {
+                1
+            } else {
+                (line_width + width - 1) / width
+            }
+        })
+        .sum()
+}
+
+fn input_cursor_position(value: &str, cursor: usize, area: Rect) -> (u16, u16) {
+    let width = area.width.max(1) as usize;
+    let mut x = 0usize;
+    let mut y = 0usize;
+
+    for ch in value.chars().take(cursor) {
+        if ch == '\n' {
+            x = 0;
+            y += 1;
+            continue;
+        }
+
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if x + ch_width > width {
+            x = 0;
+            y += 1;
+        }
+        x += ch_width;
+    }
+
+    let max_y = area.height.saturating_sub(1) as usize;
+    (
+        area.x.saturating_add(x.min(width.saturating_sub(1)) as u16),
+        area.y.saturating_add(y.min(max_y) as u16),
+    )
+}
+
+fn compact_current_dir() -> String {
+    std::env::current_dir()
+        .ok()
+        .map(|path| {
+            let path = path.display().to_string();
+            match std::env::var("HOME") {
+                Ok(home) if path.starts_with(&home) => format!("~{}", &path[home.len()..]),
+                _ => path,
+            }
+        })
+        .unwrap_or_else(|| ".".to_string())
 }
