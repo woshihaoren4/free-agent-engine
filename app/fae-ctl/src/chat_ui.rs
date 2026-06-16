@@ -1,6 +1,6 @@
 use crossterm::{
     ExecutableCommand,
-    cursor::Show,
+    cursor::{Hide, SetCursorStyle, Show},
     event::{
         self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -12,7 +12,7 @@ use fae_engine::Workspace;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -23,15 +23,16 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use tui_input::{
     Input, InputRequest,
     backend::crossterm::{EventHandler, to_input_request},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 type Tui = Terminal<CrosstermBackend<File>>;
+const INPUT_PLACEHOLDER: &str = "Type a message...";
 
 pub struct ChatUi {
     ws: Workspace,
@@ -104,6 +105,7 @@ impl ChatUi {
         let mut stream_active = false;
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
             None;
+        let mut pending_alt_prefix_until = None;
 
         loop {
             output_capture.drain_to_state(&mut state);
@@ -123,6 +125,16 @@ impl ChatUi {
                     };
                     if let Event::Key(key) = event {
                         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                            continue;
+                        }
+
+                        let now = Instant::now();
+                        let alt_prefix_active = pending_alt_prefix_until
+                            .take()
+                            .is_some_and(|deadline| now <= deadline);
+
+                        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                            pending_alt_prefix_until = Some(now + Duration::from_millis(100));
                             continue;
                         }
 
@@ -157,12 +169,15 @@ impl ChatUi {
                                 state.input.reset();
                                 state.status = "Ready".to_string();
                             }
-                            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            KeyCode::Enter
+                                if key.modifiers.contains(KeyModifiers::ALT)
+                                    || (alt_prefix_active && key.modifiers.is_empty()) =>
+                            {
                                 state.input.handle(InputRequest::InsertChar('\n'));
                             }
                             KeyCode::PageUp => state.scroll_up(),
                             KeyCode::PageDown => state.scroll_down(),
-                            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            KeyCode::Enter if key.modifiers.is_empty() => {
                                 let raw = state.input.value().to_string();
                                 let val = raw.trim();
                                 if let Some(command) = ChatCommand::parse(val) {
@@ -203,9 +218,7 @@ impl ChatUi {
                                     }
                                 }
                             }
-                            KeyCode::Enter => {
-                                state.input.handle(InputRequest::InsertChar('\n'));
-                            }
+                            KeyCode::Enter => {}
                             _ => {
                                 if to_input_request(&Event::Key(key)).is_some() {
                                     state.input.handle_event(&Event::Key(key));
@@ -252,7 +265,10 @@ impl ChatUi {
 
     fn render(&self, frame: &mut Frame<'_>, state: &mut ChatState) {
         let area = frame.area();
-        let input_height = Self::input_height(state.input.value(), area.width);
+        let input_height = Self::input_height(
+            &input_display_value(state.input.value(), state.input.cursor()),
+            area.width,
+        );
         let chunks = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(3),
@@ -318,8 +334,10 @@ impl ChatUi {
             }
         }
 
-        let height = wrapped_height(&lines, area.width as usize);
-        let max_scroll = height.saturating_sub(area.height as usize) as u16;
+        let height = wrapped_height(&lines, area.width);
+        let max_scroll = height
+            .saturating_sub(area.height as usize)
+            .min(u16::MAX as usize) as u16;
         if state.follow_tail {
             state.scroll = max_scroll;
         } else {
@@ -363,32 +381,32 @@ impl ChatUi {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ));
-        let inner = area.inner(Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
         let text = if state.input.value().is_empty() {
-            Text::from(Line::styled(
-                "Type a message...",
-                Style::default().fg(Color::DarkGray),
-            ))
+            Text::from(Line::from(vec![
+                Span::styled(
+                    "|",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(INPUT_PLACEHOLDER, Style::default().fg(Color::DarkGray)),
+            ]))
         } else {
-            Text::from(state.input.value().to_string())
+            Text::from(input_value_with_cursor(
+                state.input.value(),
+                state.input.cursor(),
+            ))
         };
         frame.render_widget(
             Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
             area,
         );
-        let (x, y) = input_cursor_position(state.input.value(), state.input.cursor(), inner);
-        frame.set_cursor_position((x, y));
     }
 
     fn render_help(&self, frame: &mut Frame<'_>, area: Rect) {
         let help = Line::from(vec![
-            Span::styled(" Ctrl+Enter ", Style::default().fg(Color::White)),
+            Span::styled(" Enter ", Style::default().fg(Color::White)),
             Span::styled("send", Style::default().fg(Color::DarkGray)),
-            Span::styled("  Enter ", Style::default().fg(Color::White)),
-            Span::styled("newline", Style::default().fg(Color::DarkGray)),
             Span::styled("  /reset ", Style::default().fg(Color::White)),
             Span::styled("reset", Style::default().fg(Color::DarkGray)),
             Span::styled("  Ctrl+C ", Style::default().fg(Color::White)),
@@ -469,8 +487,11 @@ impl TerminalGuard {
         enable_raw_mode()?;
         tty.execute(EnterAlternateScreen)?;
         tty.execute(PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         ))?;
+        tty.execute(SetCursorStyle::SteadyBar)?;
+        tty.execute(Hide)?;
         Ok((Self { tty }, terminal_file))
     }
 }
@@ -478,6 +499,7 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = self.tty.execute(PopKeyboardEnhancementFlags);
+        let _ = self.tty.execute(SetCursorStyle::DefaultUserShape);
         let _ = self.tty.execute(Show);
         let _ = self.tty.execute(LeaveAlternateScreen);
         let _ = self.tty.flush();
@@ -923,46 +945,56 @@ impl MessageRole {
     }
 }
 
-fn wrapped_height(lines: &[Line<'_>], width: usize) -> usize {
-    let width = width.max(1);
-    lines
-        .iter()
-        .map(|line| {
-            let line_width = line.width();
-            if line_width == 0 {
-                1
-            } else {
-                (line_width + width - 1) / width
-            }
-        })
-        .sum()
+fn wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
+    Paragraph::new(Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width)
 }
 
-fn input_cursor_position(value: &str, cursor: usize, area: Rect) -> (u16, u16) {
-    let width = area.width.max(1) as usize;
-    let mut x = 0usize;
-    let mut y = 0usize;
+fn input_display_value(value: &str, cursor: usize) -> String {
+    if value.is_empty() {
+        format!("|{INPUT_PLACEHOLDER}")
+    } else {
+        input_value_with_cursor(value, cursor)
+    }
+}
 
-    for ch in value.chars().take(cursor) {
-        if ch == '\n' {
-            x = 0;
-            y += 1;
-            continue;
-        }
+fn input_value_with_cursor(value: &str, cursor: usize) -> String {
+    let cursor = cursor.min(value.chars().count());
+    let mut rendered = String::with_capacity(value.len() + 1);
 
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
-        if x + ch_width > width {
-            x = 0;
-            y += 1;
+    for (idx, ch) in value.chars().enumerate() {
+        if idx == cursor {
+            rendered.push('|');
         }
-        x += ch_width;
+        rendered.push(ch);
+    }
+    if cursor == value.chars().count() {
+        rendered.push('|');
     }
 
-    let max_y = area.height.saturating_sub(1) as usize;
-    (
-        area.x.saturating_add(x.min(width.saturating_sub(1)) as u16),
-        area.y.saturating_add(y.min(max_y) as u16),
-    )
+    rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_height_uses_paragraph_word_wrapping() {
+        let lines = vec![Line::raw("aaaaa aaaaa aaaaa")];
+
+        assert_eq!(wrapped_height(&lines, 10), 3);
+    }
+
+    #[test]
+    fn input_value_with_cursor_inserts_stable_cursor_at_codepoint() {
+        assert_eq!(input_value_with_cursor("abc", 0), "|abc");
+        assert_eq!(input_value_with_cursor("abc", 2), "ab|c");
+        assert_eq!(input_value_with_cursor("abc", 3), "abc|");
+        assert_eq!(input_value_with_cursor("abc", 99), "abc|");
+        assert_eq!(input_value_with_cursor("a\nc", 2), "a\n|c");
+    }
 }
 
 fn compact_current_dir() -> String {
