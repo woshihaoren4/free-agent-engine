@@ -1,6 +1,6 @@
 use crossterm::{
     ExecutableCommand,
-    cursor::{Hide, SetCursorStyle, Show},
+    cursor::{SetCursorStyle, Show},
     event::{
         self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -12,7 +12,7 @@ use fae_engine::Workspace;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -29,10 +29,12 @@ use tui_input::{
     Input, InputRequest,
     backend::crossterm::{EventHandler, to_input_request},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 type Tui = Terminal<CrosstermBackend<File>>;
 const INPUT_PLACEHOLDER: &str = "Type a message...";
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(120);
+const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 pub struct ChatUi {
     ws: Workspace,
@@ -106,15 +108,25 @@ impl ChatUi {
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
             None;
         let mut pending_alt_prefix_until = None;
+        let mut needs_draw = true;
 
         loop {
-            output_capture.drain_to_state(&mut state);
-            if let Err(e) = terminal.draw(|frame| self.render(frame, &mut state)) {
-                state.push_error(format!("Failed to draw UI: {e:?}"));
-                return ChatRunOutcome::err(state, e);
+            if output_capture.drain_to_state(&mut state) {
+                needs_draw = true;
+            }
+            if needs_draw {
+                if let Err(e) = terminal.draw(|frame| self.render(frame, &mut state)) {
+                    state.push_error(format!("Failed to draw UI: {e:?}"));
+                    return ChatRunOutcome::err(state, e);
+                }
+                needs_draw = false;
             }
 
-            match event::poll(Duration::from_millis(if stream_active { 30 } else { 120 })) {
+            match event::poll(if stream_active {
+                STREAM_POLL_INTERVAL
+            } else {
+                IDLE_POLL_INTERVAL
+            }) {
                 Ok(true) => {
                     let event = match event::read() {
                         Ok(event) => event,
@@ -123,10 +135,14 @@ impl ChatUi {
                             return ChatRunOutcome::err(state, e);
                         }
                     };
+                    if matches!(&event, Event::Resize(_, _)) {
+                        needs_draw = true;
+                    }
                     if let Event::Key(key) = event {
                         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                             continue;
                         }
+                        needs_draw = true;
 
                         let now = Instant::now();
                         let alt_prefix_active = pending_alt_prefix_until
@@ -258,17 +274,17 @@ impl ChatUi {
                     state.status = "Ready".to_string();
                 }
                 state.spinner_tick = state.spinner_tick.wrapping_add(1);
+                needs_draw = true;
             }
-            output_capture.drain_to_state(&mut state);
+            if output_capture.drain_to_state(&mut state) {
+                needs_draw = true;
+            }
         }
     }
 
     fn render(&self, frame: &mut Frame<'_>, state: &mut ChatState) {
         let area = frame.area();
-        let input_height = Self::input_height(
-            &input_display_value(state.input.value(), state.input.cursor()),
-            area.width,
-        );
+        let input_height = Self::input_height(state.input.value(), area.width);
         let chunks = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(3),
@@ -381,26 +397,24 @@ impl ChatUi {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ));
+        let inner = area.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         let text = if state.input.value().is_empty() {
-            Text::from(Line::from(vec![
-                Span::styled(
-                    "|",
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(INPUT_PLACEHOLDER, Style::default().fg(Color::DarkGray)),
-            ]))
-        } else {
-            Text::from(input_value_with_cursor(
-                state.input.value(),
-                state.input.cursor(),
+            Text::from(Line::styled(
+                INPUT_PLACEHOLDER,
+                Style::default().fg(Color::DarkGray),
             ))
+        } else {
+            Text::from(state.input.value().to_string())
         };
         frame.render_widget(
             Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
             area,
         );
+        let (x, y) = input_cursor_position(state.input.value(), state.input.cursor(), inner);
+        frame.set_cursor_position((x, y));
     }
 
     fn render_help(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -491,7 +505,6 @@ impl TerminalGuard {
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
         ))?;
         tty.execute(SetCursorStyle::SteadyBar)?;
-        tty.execute(Hide)?;
         Ok((Self { tty }, terminal_file))
     }
 }
@@ -557,10 +570,13 @@ impl OutputCapture {
         })
     }
 
-    fn drain_to_state(&mut self, state: &mut ChatState) {
+    fn drain_to_state(&mut self, state: &mut ChatState) -> bool {
+        let mut drained = false;
         while let Ok(output) = self.rx.try_recv() {
             state.push_output(&output);
+            drained = true;
         }
+        drained
     }
 
     fn finish(mut self) -> Vec<CapturedOutput> {
@@ -951,29 +967,31 @@ fn wrapped_height(lines: &[Line<'_>], width: u16) -> usize {
         .line_count(width)
 }
 
-fn input_display_value(value: &str, cursor: usize) -> String {
-    if value.is_empty() {
-        format!("|{INPUT_PLACEHOLDER}")
-    } else {
-        input_value_with_cursor(value, cursor)
-    }
-}
+fn input_cursor_position(value: &str, cursor: usize, area: Rect) -> (u16, u16) {
+    let width = area.width.max(1) as usize;
+    let mut x = 0usize;
+    let mut y = 0usize;
 
-fn input_value_with_cursor(value: &str, cursor: usize) -> String {
-    let cursor = cursor.min(value.chars().count());
-    let mut rendered = String::with_capacity(value.len() + 1);
-
-    for (idx, ch) in value.chars().enumerate() {
-        if idx == cursor {
-            rendered.push('|');
+    for ch in value.chars().take(cursor) {
+        if ch == '\n' {
+            x = 0;
+            y += 1;
+            continue;
         }
-        rendered.push(ch);
-    }
-    if cursor == value.chars().count() {
-        rendered.push('|');
+
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if x + ch_width > width {
+            x = 0;
+            y += 1;
+        }
+        x += ch_width;
     }
 
-    rendered
+    let max_y = area.height.saturating_sub(1) as usize;
+    (
+        area.x.saturating_add(x.min(width.saturating_sub(1)) as u16),
+        area.y.saturating_add(y.min(max_y) as u16),
+    )
 }
 
 #[cfg(test)]
@@ -988,12 +1006,14 @@ mod tests {
     }
 
     #[test]
-    fn input_value_with_cursor_inserts_stable_cursor_at_codepoint() {
-        assert_eq!(input_value_with_cursor("abc", 0), "|abc");
-        assert_eq!(input_value_with_cursor("abc", 2), "ab|c");
-        assert_eq!(input_value_with_cursor("abc", 3), "abc|");
-        assert_eq!(input_value_with_cursor("abc", 99), "abc|");
-        assert_eq!(input_value_with_cursor("a\nc", 2), "a\n|c");
+    fn input_cursor_position_handles_wrapping_and_newlines() {
+        let area = Rect::new(10, 20, 4, 3);
+
+        assert_eq!(input_cursor_position("abc", 0, area), (10, 20));
+        assert_eq!(input_cursor_position("abc", 2, area), (12, 20));
+        assert_eq!(input_cursor_position("abcd", 4, area), (13, 20));
+        assert_eq!(input_cursor_position("abcde", 5, area), (11, 21));
+        assert_eq!(input_cursor_position("a\nc", 2, area), (10, 21));
     }
 }
 
