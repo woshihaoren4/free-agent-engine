@@ -1,6 +1,5 @@
 use crate::agent_runtime::AgentTaskStore;
 use crate::{IdenInfo, Tool};
-use chrono::Timelike;
 use fae_agent::{
     AgentInfo, AgentTask, AgentTaskStatus, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID, ToolResponse,
 };
@@ -46,9 +45,9 @@ impl Tool for AgentTaskTool {
             .unwrap_or(iden.get_agent_id().to_string());
         let session_id = iden.get(GLOBAL_KEY_SESSION_ID).unwrap_or("".to_string());
         let channel = self.chan.clone();
-        let mut task: AgentTaskStatus = serde_json::from_str(&args)
+        let task: AgentTaskStatus = serde_json::from_str(&args)
             .map_err(|e| anyhow::anyhow!("[AgentTaskTool] invalid arguments: {}", e))?;
-        let task_id = task.get_task_id().to_string();
+        let _task_id = task.get_task_id().to_string();
         let status = task.status().to_string();
         match task {
             AgentTaskStatus::Create(mut create) => {
@@ -105,7 +104,7 @@ impl Tool for AgentTaskTool {
                 }
                 //移除任务
                 let task = self.task_store.remove_task(result.task_id.as_str()).await;
-                let mut task = if let Some(mut t) = task {
+                let mut task = if let Some(t) = task {
                     t.set_result(result.content).set_status(status)
                 } else {
                     return Err(anyhow::anyhow!(
@@ -127,8 +126,8 @@ impl Tool for AgentTaskTool {
                 if result.task_id.is_empty() {
                     return Err(anyhow::anyhow!("[AgentTaskTool] failed.task_id is empty"));
                 }
-                let mut task = self.task_store.remove_task(result.task_id.as_str()).await;
-                let mut task = if let Some(mut t) = task {
+                let task = self.task_store.remove_task(result.task_id.as_str()).await;
+                let mut task = if let Some(t) = task {
                     t.set_result(result.content).set_status(status)
                 } else {
                     return Err(anyhow::anyhow!(

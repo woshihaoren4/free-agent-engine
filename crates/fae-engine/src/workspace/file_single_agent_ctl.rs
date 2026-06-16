@@ -1,6 +1,6 @@
-use crate::{AgentCtl, ErasedAgentConfig, RecallAgentRef};
+use crate::{AgentCtl, RecallAgentRef};
 use fae_agent::{
-    AgentConfig, AgentConfigFile, AgentEventHandleImpl, Error, FAE_WORKSPACE, FileChatMemory,
+    AgentConfig, AgentConfigFile, AgentEventHandleImpl, Error, FileChatMemory,
     FileSessionCtl,
 };
 use fae_agent::{AgentRef, Record, SingleAgent, SingleSessionMD};

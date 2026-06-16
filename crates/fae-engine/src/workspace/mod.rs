@@ -8,7 +8,7 @@ mod workspace_session;
 use fae_agent::{AgentConfig, AgentRef, Error};
 pub use file_single_agent_ctl::*;
 use std::any::Any;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::sync::Arc;
 use wd_tools::PFErr;
 pub use workspace::*;

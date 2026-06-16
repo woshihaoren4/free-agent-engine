@@ -1,5 +1,5 @@
 use crate::{SingleAgentCtlFromFile, Workspace};
-use fae_agent::{AgentConfig, AgentRef, SessionMD, SessionMetadata};
+use fae_agent::{AgentConfig, AgentRef, SessionMetadata};
 use wd_tools::PFErr;
 
 impl Workspace {

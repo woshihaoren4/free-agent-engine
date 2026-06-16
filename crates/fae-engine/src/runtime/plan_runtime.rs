@@ -408,7 +408,7 @@ impl Environment for PlanRuntime {
         };
         let pid = Self::generate_plan_sub_id(task.id.as_str(), task.agent_id.as_str());
 
-        let mut tasks = match plan.init().await? {
+        let tasks = match plan.init().await? {
             PlanningResult::End(opt) => {
                 // 任务完成，返回结果
                 return if let Some(result) = opt {

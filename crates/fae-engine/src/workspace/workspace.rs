@@ -1,6 +1,6 @@
-use crate::{AgentCtl, SingleAgentCtlFromFile};
+use crate::AgentCtl;
 use fae_agent::{
-    AgentConfig, AgentRef, AgentTaskStatus, Env, EnvEvent, Environment, Session, SessionMD,
+    AgentConfig, AgentTaskStatus, Env, EnvEvent, Environment,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};

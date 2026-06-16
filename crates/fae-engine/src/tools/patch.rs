@@ -44,7 +44,7 @@ impl Tool for ApplyPatch {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "A standard unified diff patch containing ---/+++ file headers and @@ hunks."
+                    "description": "A standard unified diff patch containing ---/+++ file headers and @@ hunks. Each hunk header must declare exact old/new line counts: context lines count toward both sides, '-' lines count toward the old side, and '+' lines count toward the new side. For example, a hunk with three old lines and three new lines must use @@ -start,3 +start,3 @@ or include enough context lines to match larger counts."
                 }
             },
             "required": ["patch"]
@@ -180,6 +180,17 @@ fn parse_hunk(lines: &[&str], start_index: usize) -> anyhow::Result<(Hunk, usize
     while index < lines.len() && (old_line_count < old_len || new_line_count < new_len) {
         let line = lines[index];
 
+        if line.starts_with("@@") {
+            return Err(incomplete_hunk_error(
+                header,
+                old_len,
+                new_len,
+                old_line_count,
+                new_line_count,
+                "before the next hunk header",
+            ));
+        }
+
         if line == r"\ No newline at end of file" {
             index += 1;
             continue;
@@ -209,26 +220,27 @@ fn parse_hunk(lines: &[&str], start_index: usize) -> anyhow::Result<(Hunk, usize
 
         if old_line_count > old_len || new_line_count > new_len {
             return Err(anyhow::anyhow!(
-                "hunk body has more lines than its header declares"
+                "hunk body line count exceeds header {}: header declares old={}, new={}, but body has old={}, new={} after line {:?}",
+                header,
+                old_len,
+                new_len,
+                old_line_count,
+                new_line_count,
+                line
             ));
         }
 
         index += 1;
     }
 
-    if old_line_count != old_len {
-        return Err(anyhow::anyhow!(
-            "hunk old line count mismatch: header says {}, body has {}",
+    if old_line_count != old_len || new_line_count != new_len {
+        return Err(incomplete_hunk_error(
+            header,
             old_len,
-            old_line_count
-        ));
-    }
-
-    if new_line_count != new_len {
-        return Err(anyhow::anyhow!(
-            "hunk new line count mismatch: header says {}, body has {}",
             new_len,
-            new_line_count
+            old_line_count,
+            new_line_count,
+            "before the end of the patch",
         ));
     }
 
@@ -239,6 +251,25 @@ fn parse_hunk(lines: &[&str], start_index: usize) -> anyhow::Result<(Hunk, usize
         },
         index,
     ))
+}
+
+fn incomplete_hunk_error(
+    header: &str,
+    old_len: usize,
+    new_len: usize,
+    old_line_count: usize,
+    new_line_count: usize,
+    boundary: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "hunk body line count does not match header {}: header declares old={}, new={}, but body has old={}, new={} {}",
+        header,
+        old_len,
+        new_len,
+        old_line_count,
+        new_line_count,
+        boundary
+    )
 }
 
 fn parse_hunk_header(header: &str) -> anyhow::Result<(usize, usize, usize)> {
@@ -522,6 +553,60 @@ mod tests {
         let patched = apply_hunks(&original, &patch[0].hunks).unwrap();
 
         assert_eq!(patched, lines(&["keep", "changed"]));
+    }
+
+    #[test]
+    fn rejects_hunk_with_missing_body_lines() {
+        let err = parse_patch(
+            r#"--- crates/fae-engine/src/engine.rs
++++ crates/fae-engine/src/engine.rs
+@@ -1,5 +1,5 @@
+ use crate::workspace::Workspace;
+-use fae_agent::{Agent, Env};
++use fae_agent::Env;
+ use std::collections::HashMap;
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "header declares old=5, new=5, but body has old=3, new=3 before the end of the patch"
+        ));
+    }
+
+    #[test]
+    fn rejects_hunk_with_next_hunk_header_before_declared_counts() {
+        let err = parse_patch(
+            r#"--- a/example.txt
++++ b/example.txt
+@@ -1,2 +1,2 @@
+ one
+@@ -5,1 +5,1 @@
+ five
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "header declares old=2, new=2, but body has old=1, new=1 before the next hunk header"
+        ));
+    }
+
+    #[test]
+    fn rejects_hunk_with_too_many_body_lines() {
+        let err = parse_patch(
+            r#"--- a/example.txt
++++ b/example.txt
+@@ -1,1 +1,2 @@
+ one
+ two
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "header declares old=1, new=2, but body has old=2, new=2 after line \" two\""
+        ));
     }
 
     fn lines(lines: &[&str]) -> Vec<String> {

@@ -1,18 +1,17 @@
 use crate::tools::scheduled_execution::SCHEDULED_EXECUTION_TOOL_NAME;
 use crate::tools::{ScheduledExecution, ScheduledTask};
 use crate::{IdenInfo, Tool};
-use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use cron::Schedule;
 use fae_agent::{
-    Context, Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem,
+    Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem,
     ThingSelect, TimedTask, ToolRequest, ToolResponse,
 };
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use wd_tools::PFErr;
 use wd_tools::channel::Channel;
 
