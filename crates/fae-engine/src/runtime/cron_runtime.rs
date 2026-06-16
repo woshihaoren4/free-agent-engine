@@ -136,7 +136,7 @@ impl Environment for CronRuntime {
         loop {
             let sleep_duration = self.get_next_job_expire_time().await;
             let sleep_fut = tokio::time::sleep(sleep_duration);
-            wd_log::log_info_ln!("[CronRuntime] sleep for {:?}s", sleep_duration);
+            // wd_log::log_info_ln!("[CronRuntime] sleep for {:?}s", sleep_duration);
             let recv_fut = self.channel.recv();
             let spawn_fut = self.spawn_channel.recv();
             let heap = self.heap.clone();

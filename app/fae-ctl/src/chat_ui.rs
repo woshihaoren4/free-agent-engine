@@ -1,7 +1,10 @@
 use crossterm::{
+    ExecutableCommand,
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
+    event::{
+        self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use fae_agent::{GLOBAL_KEY_PROJECT_DIR, MemoryEntry, ModelCallConfig, Record, SingleSessionMD};
@@ -14,8 +17,12 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::{FromRawFd, RawFd};
 use std::pin::Pin;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tui_input::{
@@ -24,7 +31,7 @@ use tui_input::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-type Tui = Terminal<CrosstermBackend<io::Stdout>>;
+type Tui = Terminal<CrosstermBackend<File>>;
 
 pub struct ChatUi {
     ws: Workspace,
@@ -43,124 +50,174 @@ impl ChatUi {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        let agent = self.ws.get_agent(&self.agent_name).await?.on_info().await;
-        self.model_name = agent.model();
-
-        let guard = TerminalGuard::enter()?;
-        let backend = CrosstermBackend::new(io::stdout());
+        let (guard, terminal_file) = TerminalGuard::enter()?;
+        let mut output_capture = OutputCapture::start()?;
+        let backend = CrosstermBackend::new(terminal_file);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
 
-        let res = self.run_app(&mut terminal).await;
+        let mut outcome = match self.ws.get_agent(&self.agent_name).await {
+            Ok(agent) => {
+                let agent = agent.on_info().await;
+                self.model_name = agent.model();
+                self.run_app(&mut terminal, &mut output_capture).await
+            }
+            Err(e) => {
+                let mut state = ChatState::default();
+                state.push_error(format!("Failed to load agent: {e:?}"));
+                ChatRunOutcome::err(state, e)
+            }
+        };
+        for output in output_capture.finish() {
+            outcome.state.push_output(&output);
+        }
 
         let _ = terminal.show_cursor();
         drop(terminal);
         drop(guard);
+        replay_scrollback(&outcome.state, &self.agent_name);
 
-        res
+        outcome.result
     }
 
-    async fn run_app(&mut self, terminal: &mut Tui) -> anyhow::Result<()> {
+    async fn run_app(
+        &mut self,
+        terminal: &mut Tui,
+        output_capture: &mut OutputCapture,
+    ) -> ChatRunOutcome {
         let mut state = ChatState::default();
         let session_config = Self::new_session_config();
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
-        let mut session = self
+        let mut session = match self
             .ws
             .session_call_stream::<_, Record, Record>(&self.agent_name, session_config)
-            .await?;
+            .await
+        {
+            Ok(session) => session,
+            Err(e) => {
+                state.push_error(format!("Failed to create session: {e:?}"));
+                return ChatRunOutcome::err(state, e);
+            }
+        };
 
         let mut stream_active = false;
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
             None;
 
         loop {
-            terminal.draw(|frame| self.render(frame, &mut state))?;
+            output_capture.drain_to_state(&mut state);
+            if let Err(e) = terminal.draw(|frame| self.render(frame, &mut state)) {
+                state.push_error(format!("Failed to draw UI: {e:?}"));
+                return ChatRunOutcome::err(state, e);
+            }
 
-            if event::poll(Duration::from_millis(if stream_active { 30 } else { 120 }))? {
-                if let Event::Key(key) = event::read()? {
-                    if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                        continue;
-                    }
+            match event::poll(Duration::from_millis(if stream_active { 30 } else { 120 })) {
+                Ok(true) => {
+                    let event = match event::read() {
+                        Ok(event) => event,
+                        Err(e) => {
+                            state.push_error(format!("Failed to read terminal event: {e:?}"));
+                            return ChatRunOutcome::err(state, e);
+                        }
+                    };
+                    if let Event::Key(key) = event {
+                        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                            continue;
+                        }
 
-                    match key.code {
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if !stream_active {
-                                return Ok(());
-                            }
-                            stream_active = false;
-                            current_stream = None;
-                            state.current_title.clear();
-                            state.push_system("Session aborted. Starting a new session.");
-                            let session_config = Self::new_session_config();
-                            session_id = session_config.id.clone();
-                            user_id = session_config.user_id.clone();
-                            session = self
-                                .ws
-                                .session_call_stream::<_, Record, Record>(
-                                    &self.agent_name,
-                                    session_config,
-                                )
-                                .await?;
-                            state.input.reset();
-                            state.status = "Ready".to_string();
-                        }
-                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            state.input.handle(InputRequest::InsertChar('\n'));
-                        }
-                        KeyCode::PageUp => state.scroll_up(),
-                        KeyCode::PageDown => state.scroll_down(),
-                        KeyCode::Enter => {
-                            let raw = state.input.value().to_string();
-                            let val = raw.trim();
-                            if val.starts_with("/exit") {
-                                return Ok(());
-                            } else if val.starts_with("/reset") {
+                        match key.code {
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if !stream_active {
+                                    return ChatRunOutcome::ok(state);
+                                }
                                 stream_active = false;
                                 current_stream = None;
-                                state.input.reset();
                                 state.current_title.clear();
-                                if let Err(e) = self
+                                state.push_system("Session aborted. Starting a new session.");
+                                let session_config = Self::new_session_config();
+                                session_id = session_config.id.clone();
+                                user_id = session_config.user_id.clone();
+                                session = match self
                                     .ws
-                                    .session_reset(&self.agent_name, &user_id, &session_id)
+                                    .session_call_stream::<_, Record, Record>(
+                                        &self.agent_name,
+                                        session_config,
+                                    )
                                     .await
                                 {
-                                    state.push_error(format!("Failed to reset session: {e:?}"));
-                                } else {
-                                    state.messages.clear();
-                                    state.push_system("Session reset successfully.");
-                                    state.status = "Ready".to_string();
-                                }
-                            } else if !val.is_empty() {
-                                if stream_active {
-                                    state.status =
-                                        "Assistant is still responding. Ctrl+C aborts it."
-                                            .to_string();
-                                } else {
-                                    let msg = raw.trim().to_string();
+                                    Ok(session) => session,
+                                    Err(e) => {
+                                        state.push_error(format!(
+                                            "Failed to create new session: {e:?}"
+                                        ));
+                                        return ChatRunOutcome::err(state, e);
+                                    }
+                                };
+                                state.input.reset();
+                                state.status = "Ready".to_string();
+                            }
+                            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                state.input.handle(InputRequest::InsertChar('\n'));
+                            }
+                            KeyCode::PageUp => state.scroll_up(),
+                            KeyCode::PageDown => state.scroll_down(),
+                            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                let raw = state.input.value().to_string();
+                                let val = raw.trim();
+                                if let Some(command) = ChatCommand::parse(val) {
                                     state.input.reset();
-                                    state.push_user(msg.clone());
-                                    match session.call_stream(Record::from_user_input(msg)).await {
-                                        Ok(s) => {
-                                            current_stream = Some(Pin::from(s));
-                                            stream_active = true;
-                                            state.current_title = "Waiting".to_string();
-                                            state.status = "Waiting".to_string();
-                                        }
-                                        Err(e) => {
-                                            state.push_error(format!("Failed to send chat: {e:?}"));
-                                            state.status = "Ready".to_string();
+                                    match self
+                                        .handle_command(command, &mut state, &user_id, &session_id)
+                                        .await
+                                    {
+                                        CommandAction::Continue => {}
+                                        CommandAction::Exit => return ChatRunOutcome::ok(state),
+                                    }
+                                } else if !val.is_empty() {
+                                    if stream_active {
+                                        state.status =
+                                            "Assistant is still responding. Ctrl+C aborts it."
+                                                .to_string();
+                                    } else {
+                                        let msg = raw.trim().to_string();
+                                        state.input.reset();
+                                        state.push_user(msg.clone());
+                                        match session
+                                            .call_stream(Record::from_user_input(msg))
+                                            .await
+                                        {
+                                            Ok(s) => {
+                                                current_stream = Some(Pin::from(s));
+                                                stream_active = true;
+                                                state.current_title = "Waiting".to_string();
+                                                state.status = "Waiting".to_string();
+                                            }
+                                            Err(e) => {
+                                                state.push_error(format!(
+                                                    "Failed to send chat: {e:?}"
+                                                ));
+                                                state.status = "Ready".to_string();
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        _ => {
-                            if to_input_request(&Event::Key(key)).is_some() {
-                                state.input.handle_event(&Event::Key(key));
+                            KeyCode::Enter => {
+                                state.input.handle(InputRequest::InsertChar('\n'));
+                            }
+                            _ => {
+                                if to_input_request(&Event::Key(key)).is_some() {
+                                    state.input.handle_event(&Event::Key(key));
+                                }
                             }
                         }
                     }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    state.push_error(format!("Failed to poll terminal event: {e:?}"));
+                    return ChatRunOutcome::err(state, e);
                 }
             }
 
@@ -189,6 +246,7 @@ impl ChatUi {
                 }
                 state.spinner_tick = state.spinner_tick.wrapping_add(1);
             }
+            output_capture.drain_to_state(&mut state);
         }
     }
 
@@ -327,9 +385,9 @@ impl ChatUi {
 
     fn render_help(&self, frame: &mut Frame<'_>, area: Rect) {
         let help = Line::from(vec![
-            Span::styled(" Enter ", Style::default().fg(Color::White)),
+            Span::styled(" Ctrl+Enter ", Style::default().fg(Color::White)),
             Span::styled("send", Style::default().fg(Color::DarkGray)),
-            Span::styled("  Ctrl+J ", Style::default().fg(Color::White)),
+            Span::styled("  Enter ", Style::default().fg(Color::White)),
             Span::styled("newline", Style::default().fg(Color::DarkGray)),
             Span::styled("  /reset ", Style::default().fg(Color::White)),
             Span::styled("reset", Style::default().fg(Color::DarkGray)),
@@ -354,23 +412,261 @@ impl ChatUi {
     fn new_session_config() -> SingleSessionMD {
         SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".")
     }
+
+    async fn handle_command(
+        &self,
+        command: ChatCommand,
+        state: &mut ChatState,
+        user_id: &str,
+        session_id: &str,
+    ) -> CommandAction {
+        match command {
+            ChatCommand::Exit => CommandAction::Exit,
+            ChatCommand::Reset => {
+                match self
+                    .ws
+                    .session_reset(&self.agent_name, user_id, session_id)
+                    .await
+                {
+                    Ok(()) => state.push_system("Session reset successfully."),
+                    Err(e) => state.push_error(format!("Failed to reset session: {e:?}")),
+                }
+                CommandAction::Continue
+            }
+        }
+    }
 }
 
-struct TerminalGuard;
+#[derive(Clone, Copy)]
+enum ChatCommand {
+    Exit,
+    Reset,
+}
+
+impl ChatCommand {
+    fn parse(input: &str) -> Option<Self> {
+        match input.split_whitespace().next()? {
+            "/exit" => Some(Self::Exit),
+            "/reset" => Some(Self::Reset),
+            _ => None,
+        }
+    }
+}
+
+enum CommandAction {
+    Continue,
+    Exit,
+}
+
+struct TerminalGuard {
+    tty: File,
+}
 
 impl TerminalGuard {
-    fn enter() -> io::Result<Self> {
+    fn enter() -> io::Result<(Self, File)> {
+        let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+        let terminal_file = tty.try_clone()?;
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
-        Ok(Self)
+        tty.execute(EnterAlternateScreen)?;
+        tty.execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+        Ok((Self { tty }, terminal_file))
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+        let _ = self.tty.execute(PopKeyboardEnhancementFlags);
+        let _ = self.tty.execute(Show);
+        let _ = self.tty.execute(LeaveAlternateScreen);
+        let _ = self.tty.flush();
         let _ = disable_raw_mode();
     }
+}
+
+struct ChatRunOutcome {
+    result: anyhow::Result<()>,
+    state: ChatState,
+}
+
+impl ChatRunOutcome {
+    fn ok(state: ChatState) -> Self {
+        Self {
+            result: Ok(()),
+            state,
+        }
+    }
+
+    fn err(state: ChatState, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            result: Err(error.into()),
+            state,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CapturedOutput {
+    stream: CapturedStream,
+    content: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapturedStream {
+    Stdout,
+    Stderr,
+}
+
+struct OutputCapture {
+    rx: Receiver<CapturedOutput>,
+    fd_capture: Option<FdCapture>,
+    readers: Vec<JoinHandle<()>>,
+}
+
+impl OutputCapture {
+    fn start() -> io::Result<Self> {
+        let (tx, rx) = mpsc::channel();
+        let (fd_capture, readers) = FdCapture::start(tx)?;
+        Ok(Self {
+            rx,
+            fd_capture: Some(fd_capture),
+            readers,
+        })
+    }
+
+    fn drain_to_state(&mut self, state: &mut ChatState) {
+        while let Ok(output) = self.rx.try_recv() {
+            state.push_output(&output);
+        }
+    }
+
+    fn finish(mut self) -> Vec<CapturedOutput> {
+        self.restore();
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        let mut remaining = Vec::new();
+        while let Ok(output) = self.rx.try_recv() {
+            remaining.push(output);
+        }
+        remaining
+    }
+
+    fn restore(&mut self) {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        if let Some(mut fd_capture) = self.fd_capture.take() {
+            fd_capture.restore();
+        }
+    }
+}
+
+impl Drop for OutputCapture {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+struct FdCapture {
+    stdout_fd: Option<RawFd>,
+    stderr_fd: Option<RawFd>,
+}
+
+impl FdCapture {
+    fn start(tx: Sender<CapturedOutput>) -> io::Result<(Self, Vec<JoinHandle<()>>)> {
+        let stdout_fd = dup_fd(libc::STDOUT_FILENO)?;
+        let stderr_fd = dup_fd(libc::STDERR_FILENO)?;
+        let stdout_pipe = make_pipe()?;
+        let stderr_pipe = make_pipe()?;
+
+        dup2_fd(stdout_pipe[1], libc::STDOUT_FILENO)?;
+        dup2_fd(stderr_pipe[1], libc::STDERR_FILENO)?;
+        close_fd(stdout_pipe[1]);
+        close_fd(stderr_pipe[1]);
+
+        let readers = vec![
+            spawn_reader(stdout_pipe[0], CapturedStream::Stdout, tx.clone()),
+            spawn_reader(stderr_pipe[0], CapturedStream::Stderr, tx),
+        ];
+
+        Ok((
+            Self {
+                stdout_fd: Some(stdout_fd),
+                stderr_fd: Some(stderr_fd),
+            },
+            readers,
+        ))
+    }
+
+    fn restore(&mut self) {
+        if let Some(fd) = self.stdout_fd.take() {
+            let _ = dup2_fd(fd, libc::STDOUT_FILENO);
+            close_fd(fd);
+        }
+        if let Some(fd) = self.stderr_fd.take() {
+            let _ = dup2_fd(fd, libc::STDERR_FILENO);
+            close_fd(fd);
+        }
+    }
+}
+
+impl Drop for FdCapture {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+fn spawn_reader(fd: RawFd, stream: CapturedStream, tx: Sender<CapturedOutput>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let mut buffer = [0_u8; 4096];
+
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let content = String::from_utf8_lossy(&buffer[..n]).to_string();
+                    if tx.send(CapturedOutput { stream, content }).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn make_pipe() -> io::Result<[RawFd; 2]> {
+    let mut fds = [0; 2];
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fds)
+    }
+}
+
+fn dup_fd(fd: RawFd) -> io::Result<RawFd> {
+    let new_fd = unsafe { libc::dup(fd) };
+    if new_fd == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(new_fd)
+    }
+}
+
+fn dup2_fd(from: RawFd, to: RawFd) -> io::Result<()> {
+    let rc = unsafe { libc::dup2(from, to) };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn close_fd(fd: RawFd) {
+    let _ = unsafe { libc::close(fd) };
 }
 
 struct ChatState {
@@ -424,6 +720,37 @@ impl ChatState {
             title: "Error".to_string(),
             agent_id: String::new(),
             content: content.into(),
+        });
+        self.follow_tail = true;
+    }
+
+    fn push_output(&mut self, output: &CapturedOutput) {
+        if output.content.is_empty() {
+            return;
+        }
+
+        let role = match output.stream {
+            CapturedStream::Stdout => MessageRole::Stdout,
+            CapturedStream::Stderr => MessageRole::Stderr,
+        };
+        let title = match output.stream {
+            CapturedStream::Stdout => "LOG",
+            CapturedStream::Stderr => "ERR",
+        };
+
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == role {
+                last.content.push_str(&output.content);
+                self.follow_tail = true;
+                return;
+            }
+        }
+
+        self.messages.push(ChatMessage {
+            role,
+            title: title.to_string(),
+            agent_id: String::new(),
+            content: output.content.clone(),
         });
         self.follow_tail = true;
     }
@@ -482,23 +809,37 @@ struct ChatMessage {
 }
 
 impl ChatMessage {
+    fn label(&self, fallback_agent: &str) -> String {
+        match self.role {
+            MessageRole::User => "You".to_string(),
+            MessageRole::Assistant | MessageRole::Thought | MessageRole::Tool => {
+                self.agent_header_label(fallback_agent)
+            }
+            MessageRole::Stdout => "STDOUT".to_string(),
+            MessageRole::Stderr => "STDERR".to_string(),
+            MessageRole::System => "SYSTEM".to_string(),
+            MessageRole::Error => "ERROR".to_string(),
+        }
+    }
+
+    fn agent_header_label(&self, fallback_agent: &str) -> String {
+        let agent_id = if self.agent_id.is_empty() {
+            fallback_agent
+        } else {
+            &self.agent_id
+        };
+
+        if self.title.is_empty() {
+            agent_id.to_string()
+        } else {
+            format!("[{}] {}", agent_id, self.title)
+        }
+    }
+
     fn render_lines(&self, fallback_agent: &str) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        let (label, color) = match self.role {
-            MessageRole::User => ("You".to_string(), Color::Cyan),
-            MessageRole::Assistant => {
-                let agent = if self.agent_id.is_empty() {
-                    fallback_agent
-                } else {
-                    &self.agent_id
-                };
-                (agent.to_string(), Color::Green)
-            }
-            MessageRole::Thought => ("thinking".to_string(), Color::DarkGray),
-            MessageRole::Tool => (self.title.clone(), Color::Yellow),
-            MessageRole::System => ("system".to_string(), Color::Blue),
-            MessageRole::Error => ("error".to_string(), Color::Red),
-        };
+        let label = self.label(fallback_agent);
+        let color = self.role.label_color();
 
         lines.push(Line::from(vec![
             Span::styled(
@@ -529,6 +870,8 @@ enum MessageRole {
     Assistant,
     Thought,
     Tool,
+    Stdout,
+    Stderr,
     System,
     Error,
 }
@@ -551,7 +894,7 @@ impl MessageRole {
                     && previous_title.starts_with("ToolOut") == next_title.starts_with("ToolOut")
             }
             Self::Assistant | Self::Thought => previous_title == next_title,
-            Self::User | Self::System | Self::Error => false,
+            Self::User | Self::Stdout | Self::Stderr | Self::System | Self::Error => false,
         }
     }
 
@@ -559,8 +902,23 @@ impl MessageRole {
         match self {
             Self::Thought => Style::default().fg(Color::DarkGray),
             Self::Tool => Style::default().fg(Color::Yellow),
+            Self::Stdout => Style::default().fg(Color::Magenta),
+            Self::Stderr => Style::default().fg(Color::Red),
             Self::Error => Style::default().fg(Color::Red),
             _ => Style::default().fg(Color::White),
+        }
+    }
+
+    fn label_color(self) -> Color {
+        match self {
+            Self::User => Color::Green,
+            Self::Assistant => Color::Green,
+            Self::Thought => Color::Green,
+            Self::Tool => Color::Green,
+            Self::Stdout => Color::Magenta,
+            Self::Stderr => Color::Red,
+            Self::System => Color::Blue,
+            Self::Error => Color::Red,
         }
     }
 }
@@ -618,4 +976,17 @@ fn compact_current_dir() -> String {
             }
         })
         .unwrap_or_else(|| ".".to_string())
+}
+
+fn replay_scrollback(state: &ChatState, fallback_agent: &str) {
+    let mut stdout = io::stdout();
+
+    for message in &state.messages {
+        let _ = writeln!(stdout, "› {}", message.label(fallback_agent));
+        for line in message.content.split('\n') {
+            let _ = writeln!(stdout, "  {line}");
+        }
+        let _ = writeln!(stdout);
+    }
+    let _ = stdout.flush();
 }
