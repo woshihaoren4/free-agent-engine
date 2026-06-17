@@ -28,7 +28,7 @@ impl Tool for ReadFile {
                 },
                 "with_line_numbers": {
                     "type": "boolean",
-                    "description": "Whether to include line numbers in the returned file content.It is recommended to set this to true when reading code files.",
+                    "description": "Add line numbers。When reading structured content such as code and configuration, try to set it to true.",
                     "default": false
                 }
             },

@@ -44,7 +44,7 @@ impl Tool for ApplyPatch {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "A standard unified diff patch containing ---/+++ file headers and @@ hunks. Each hunk header must declare exact old/new line counts: context lines count toward both sides, '-' lines count toward the old side, and '+' lines count toward the new side. For example, a hunk with three old lines and three new lines must use @@ -start,3 +start,3 @@ or include enough context lines to match larger counts."
+                    "description": "A standard unified diff patch containing ---/+++ file headers and @@ hunks. A hunk header has the form @@ -old_start,old_count +new_start,new_count @@. old_start is the 1-based line number in the original file where the hunk begins; old_count is the number of original-file lines covered by the hunk body, counting context lines and '-' removed lines. new_start is the 1-based line number in the patched file where the hunk begins; new_count is the number of patched-file lines covered by the hunk body, counting context lines and '+' added lines. If a count is omitted, it defaults to 1. Use -0,0 or +0,0 for empty sides such as new or deleted files. The hunk body must exactly match these counts: context lines count toward both sides, '-' lines count only toward old_count, and '+' lines count only toward new_count."
                 }
             },
             "required": ["patch"]
