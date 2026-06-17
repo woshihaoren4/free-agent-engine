@@ -123,7 +123,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "rand 0.9.2",
- "reqwest 0.13.3",
+ "reqwest",
  "secrecy",
  "serde",
  "serde_json",
@@ -875,7 +875,7 @@ dependencies = [
  "dirs",
  "fae-agent",
  "fae-engine",
- "reqwest 0.13.3",
+ "reqwest",
  "tokio",
  "tokio-stream",
  "tui-input",
@@ -916,7 +916,7 @@ dependencies = [
  "chrono",
  "cron",
  "fae-agent",
- "reqwest 0.13.3",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2548,46 +2548,6 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "reqwest"
-version = "0.12.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "encoding_rs",
- "futures-core",
- "h2",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-tls",
- "hyper-util",
- "js-sys",
- "log",
- "mime",
- "native-tls",
- "percent-encoding",
- "pin-project-lite",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper",
- "tokio",
- "tokio-native-tls",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "reqwest"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
@@ -3863,7 +3823,6 @@ dependencies = [
  "pin-project-lite",
  "rand 0.9.2",
  "regex",
- "reqwest 0.12.28",
  "rust-crypto",
  "rustc-serialize",
  "tokio",
