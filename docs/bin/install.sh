@@ -76,12 +76,19 @@ if [[ -n "${local_bin}" && -f "${local_bin}" ]]; then
   cp "${local_bin}" "${tmp_bin}"
 else
   url="${BASE_URL}/${platform}/${BIN_NAME}"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${url}" -o "${tmp_bin}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${tmp_bin}" "${url}"
-  else
-    die "curl or wget is required to download ${url}"
+  downloaded=0
+  if command -v wget >/dev/null 2>&1; then
+    if wget -qO "${tmp_bin}" "${url}"; then
+      downloaded=1
+    fi
+  fi
+  if [[ "${downloaded}" -ne 1 ]] && command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "${url}" -o "${tmp_bin}"; then
+      downloaded=1
+    fi
+  fi
+  if [[ "${downloaded}" -ne 1 ]]; then
+    die "failed to download ${url} with wget or curl"
   fi
 fi
 

@@ -11,7 +11,7 @@ FAE，中文风筝。 是一个用 Rust 编写的agent开发框架。它提供�
 fae引擎内置了一个实战案例，即fae的cli，你可以快速安装并体验它：
 
 ```bash
-curl -fsSL https://woshihaoren4.github.io/free-agent-engine/bin/install.sh | bash
+curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-engine/bin/install.sh | bash
 ```
 设置模型和参数
 
