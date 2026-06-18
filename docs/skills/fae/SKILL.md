@@ -268,15 +268,8 @@ The default engine registers these built-in tools on channel `default`.
 Default `AgentConfigData` enables these tools:
 
 ```text
-execute_command
 read_file
-write_file
-apply_patch
-send_http_request
-execute_python
 todo_write
-ark_web_search
-scheduled_execution
 agent_exec_task
 ```
 
