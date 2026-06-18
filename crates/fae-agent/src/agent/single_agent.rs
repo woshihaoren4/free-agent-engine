@@ -396,6 +396,9 @@ where
         Ok(())
     }
     pub async fn load_sub_agents(&mut self) -> anyhow::Result<()> {
+        if self.agent_config.sub_agents().is_empty() {
+            return Ok(());
+        }
         let agents = self.agent_config.sub_agents();
         let mut info = "\n---\n## Sub-agents:\nYou can add an agent to the `sub_agent` field in your configuration file. Example field format: [\"agent_a\", \"agent_b\"].\nEach subagent is an expert in a specific field. If you need to handle tasks in the corresponding field, you must initiate a call to them through `agent_exec_task`.".to_string();
         info.push_str("\n<sub_agent_list>\n>");
@@ -415,6 +418,9 @@ where
         Ok(())
     }
     pub async fn load_skills(&mut self) -> anyhow::Result<()> {
+        if self.agent_config.skills().is_empty() {
+            return Ok(());
+        }
         let mut info = format!(
             "\n---\n## Skills (mandatory)\nYou can find and install your skill in its directory. $SKILL_DIR=${}/skills",
             FAE_HOME
@@ -441,6 +447,9 @@ where
         Ok(())
     }
     pub async fn load_mcp(&mut self) -> anyhow::Result<()> {
+        if self.agent_config.mcp_servers().is_empty() {
+            return Ok(());
+        }
         let mcp_servers = self.agent_config.mcp_servers();
         for mcp_server in mcp_servers {
             let things = self
@@ -760,85 +769,6 @@ where
         Arc::new(self.session_config.clone())
     }
 
-    async fn on_session_call_stream(
-        &self,
-        env: Env,
-        info: &mut S,
-        input: M,
-        output: SenderMessageStream<M>,
-    ) -> anyhow::Result<SingleAgentPlan<S, M>> {
-        // session 没有则创建一个
-        if self
-            .session_config
-            .load_ext(&info.user_id(), info.id())
-            .await?
-            .is_none()
-        {
-            self.session_config.create_ext(info.clone()).await?;
-        }
-        let agent_id = self.agent_id.clone();
-
-        let memory = self.memory.clone();
-        let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
-            env,
-            agent_id,
-            info.clone(),
-            self.agent_config.clone(),
-            memory,
-            input,
-        );
-        plan.set_output(output);
-        if let Some(map) = info.extend() {
-            plan.extend_context(map);
-        }
-        if let Some(tips) = info.additional_tips() {
-            plan.additional_session_tips(tips);
-        }
-        Ok(SingleAgentPlan::SessionCallStream(plan))
-    }
-
-    async fn on_timed(&self, env: Env, task: TimedTask) -> anyhow::Result<()> {
-        let user_input = format!(
-            "When a user's scheduled task expires, you must execute it.\nImportant: Users will not receive your output; you must send it to them via notification.\nTask Details：\n{}",
-            task.task_content
-        );
-        let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
-        let input = if let Some(msg) = msgs.pop() {
-            msg
-        } else {
-            return anyhow::anyhow!("[SingleAgent:on_timed] Failed to create input message").err();
-        };
-        // session必须存在，如果删了，则任务没有意义
-        let info = if let Some(s) = self
-            .session_config
-            .load_ext(&task.user_id, &task.session_id)
-            .await?
-        {
-            s
-        } else {
-            return anyhow::anyhow!("[SingleAgent:on_timed] Session not found").err();
-        };
-        let memory = self.memory.clone();
-        let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
-            env.clone(),
-            task.agent_id.clone(),
-            info.clone(),
-            self.agent_config.clone(),
-            memory,
-            input,
-        );
-        if let Some(map) = info.extend() {
-            plan.extend_context(map);
-        }
-        if let Some(tips) = info.additional_tips() {
-            plan.additional_session_tips(tips);
-        }
-        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
-        let task =
-            Task::new(plan.get_context(), plan.id(), task.agent_id, TaskType::Plan).set_args(plan);
-        env.spawn(vec![task]).await
-    }
-
     async fn on_agent_task(&self, env: Env, mut task: AgentTask) -> anyhow::Result<()> {
         //先尝试解析渠道
         let output = task.try_ext_into::<SenderMessageStream<M>>();
@@ -927,6 +857,43 @@ where
         env.spawn(vec![task]).await
     }
 
+    async fn on_session_call_stream(
+        &self,
+        env: Env,
+        info: &mut S,
+        input: M,
+        output: SenderMessageStream<M>,
+    ) -> anyhow::Result<SingleAgentPlan<S, M>> {
+        // session 没有则创建一个
+        if self
+            .session_config
+            .load_ext(&info.user_id(), info.id())
+            .await?
+            .is_none()
+        {
+            self.session_config.create_ext(info.clone()).await?;
+        }
+        let agent_id = self.agent_id.clone();
+
+        let memory = self.memory.clone();
+        let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
+            env,
+            agent_id,
+            info.clone(),
+            self.agent_config.clone(),
+            memory,
+            input,
+        );
+        plan.set_output(output);
+        if let Some(map) = info.extend() {
+            plan.extend_context(map);
+        }
+        if let Some(tips) = info.additional_tips() {
+            plan.additional_session_tips(tips);
+        }
+        Ok(SingleAgentPlan::SessionCallStream(plan))
+    }
+
     async fn on_task_result_callback(
         &self,
         env: Env,
@@ -941,6 +908,48 @@ where
             );
         }
         Ok(())
+    }
+
+    async fn on_timed(&self, env: Env, task: TimedTask) -> anyhow::Result<()> {
+        let user_input = format!(
+            "When a user's scheduled task expires, you must execute it.\nImportant: Users will not receive your output; you must send it to them via notification.\nTask Details：\n{}",
+            task.task_content
+        );
+        let mut msgs = M::from_openai_msg(ChatMsg::with_user(user_input));
+        let input = if let Some(msg) = msgs.pop() {
+            msg
+        } else {
+            return anyhow::anyhow!("[SingleAgent:on_timed] Failed to create input message").err();
+        };
+        // session必须存在，如果删了，则任务没有意义
+        let info = if let Some(s) = self
+            .session_config
+            .load_ext(&task.user_id, &task.session_id)
+            .await?
+        {
+            s
+        } else {
+            return anyhow::anyhow!("[SingleAgent:on_timed] Session not found").err();
+        };
+        let memory = self.memory.clone();
+        let mut plan = SingleAgentPlanSessionCallStream::<S, M>::new(
+            env.clone(),
+            task.agent_id.clone(),
+            info.clone(),
+            self.agent_config.clone(),
+            memory,
+            input,
+        );
+        if let Some(map) = info.extend() {
+            plan.extend_context(map);
+        }
+        if let Some(tips) = info.additional_tips() {
+            plan.additional_session_tips(tips);
+        }
+        let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
+        let task =
+            Task::new(plan.get_context(), plan.id(), task.agent_id, TaskType::Plan).set_args(plan);
+        env.spawn(vec![task]).await
     }
 
     async fn exit(&self) {

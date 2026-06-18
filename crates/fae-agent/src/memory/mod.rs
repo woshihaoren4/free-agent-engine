@@ -22,7 +22,7 @@ pub trait Memory: Sync {
     ///设置用户记忆,append:是否追加
     async fn set_user_info(&self, user_id: &str, info: String, append: bool) -> anyhow::Result<()>;
 
-    /// 记忆信息，对应到system prompt
+    /// memory元数据
     async fn metadata(&self, user_id: &str, session_id: &str) -> anyhow::Result<String>;
 
     /// 加载/获取记忆
