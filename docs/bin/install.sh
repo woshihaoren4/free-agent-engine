@@ -33,31 +33,38 @@ path_has() {
 }
 
 install_dir="${INSTALL_DIR:-}"
-if [[ -z "${install_dir}" ]]; then
-  for candidate in /usr/local/bin /opt/homebrew/bin "${HOME}/.local/bin" "${HOME}/bin"; do
-    if path_has "${candidate}" && [[ -d "${candidate}" && -w "${candidate}" ]]; then
-      install_dir="${candidate}"
-      break
-    fi
-  done
-fi
+install_candidates=()
 
-if [[ -z "${install_dir}" ]]; then
+add_install_candidate() {
+  local candidate="$1"
+  local existing
+  [[ -n "${candidate}" ]] || return 0
+  if [[ "${#install_candidates[@]}" -gt 0 ]]; then
+    for existing in "${install_candidates[@]}"; do
+      [[ "${existing}" != "${candidate}" ]] || return 0
+    done
+  fi
+  install_candidates+=("${candidate}")
+}
+
+if [[ -n "${install_dir}" ]]; then
+  add_install_candidate "${install_dir}"
+else
+  # Prefer system-wide locations first. The installer can use sudo later if needed.
+  add_install_candidate "/usr/local/bin"
+  add_install_candidate "/usr/bin"
+  if [[ "${platform}" == "mac" ]] && { [[ -d "/opt/homebrew/bin" ]] || path_has "/opt/homebrew/bin"; }; then
+    add_install_candidate "/opt/homebrew/bin"
+  fi
+  add_install_candidate "${HOME}/.local/bin"
+  add_install_candidate "${HOME}/bin"
+
   IFS=":" read -r -a path_dirs <<< "${PATH:-}"
   for candidate in "${path_dirs[@]}"; do
     if [[ -n "${candidate}" && -d "${candidate}" && -w "${candidate}" ]]; then
-      install_dir="${candidate}"
-      break
+      add_install_candidate "${candidate}"
     fi
   done
-fi
-
-if [[ -z "${install_dir}" ]]; then
-  if path_has "/usr/local/bin"; then
-    install_dir="/usr/local/bin"
-  else
-    install_dir="${HOME}/.local/bin"
-  fi
 fi
 
 tmp_dir="$(mktemp -d)"
@@ -92,16 +99,36 @@ else
   fi
 fi
 
-target="${install_dir}/${BIN_NAME}"
-if [[ -d "${install_dir}" && -w "${install_dir}" ]]; then
-  install -m 755 "${tmp_bin}" "${target}"
-elif mkdir -p "${install_dir}" 2>/dev/null && [[ -w "${install_dir}" ]]; then
-  install -m 755 "${tmp_bin}" "${target}"
-elif command -v sudo >/dev/null 2>&1; then
-  sudo mkdir -p "${install_dir}"
-  sudo install -m 755 "${tmp_bin}" "${target}"
-else
-  die "cannot write to ${install_dir}; set INSTALL_DIR to a writable directory in PATH"
+try_install() {
+  local candidate="$1"
+  local target="${candidate}/${BIN_NAME}"
+
+  if [[ -d "${candidate}" && -w "${candidate}" ]]; then
+    install -m 755 "${tmp_bin}" "${target}"
+  elif mkdir -p "${candidate}" 2>/dev/null && [[ -w "${candidate}" ]]; then
+    install -m 755 "${tmp_bin}" "${target}"
+  elif command -v sudo >/dev/null 2>&1; then
+    if sudo mkdir -p "${candidate}" && sudo install -m 755 "${tmp_bin}" "${target}"; then
+      return 0
+    fi
+    return 1
+  else
+    return 1
+  fi
+}
+
+installed=0
+for candidate in "${install_candidates[@]}"; do
+  target="${candidate}/${BIN_NAME}"
+  if try_install "${candidate}"; then
+    install_dir="${candidate}"
+    installed=1
+    break
+  fi
+done
+
+if [[ "${installed}" -ne 1 ]]; then
+  die "cannot install ${BIN_NAME}; set INSTALL_DIR to a writable directory in PATH"
 fi
 
 echo "Installed ${BIN_NAME} to ${target}"
