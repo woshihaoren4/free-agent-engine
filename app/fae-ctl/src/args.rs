@@ -15,6 +15,17 @@ pub struct AgentArgs {
     pub history: bool,
 }
 
+impl Default for AgentArgs {
+    fn default() -> Self {
+        Self {
+            id: Some(DEFAULT_AGENT_ID.to_string()),
+            user: Some(DEFAULT_USER_ID.to_string()),
+            chat: true,
+            history: false,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
     /// init workspace agent and default config ...
@@ -32,7 +43,7 @@ pub(crate) enum Commands {
 #[command(about = "Free Agent Engine Control Line Tool")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
     //指定操作空间
     #[arg(long, default_value = "main", help = "workspace")]
     pub ws: String,

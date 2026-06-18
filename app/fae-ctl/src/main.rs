@@ -11,14 +11,17 @@ async fn main() {
     let cli = args::Cli::parse();
     let ws = cli.ws;
     match cli.command {
-        args::Commands::Init => {
+        Some(args::Commands::Init) => {
             init_project::InitProject::init(ws).await;
         }
-        args::Commands::Agent(args) => {
+        Some(args::Commands::Agent(args)) => {
             agents::Agents::exec(ws, args).await;
         }
-        args::Commands::Uninstall => {
+        Some(args::Commands::Uninstall) => {
             uninstall::Uninstall {}.exec(ws);
+        }
+        None => {
+             agents::Agents::exec(ws, args::AgentArgs::default()).await;
         }
     }
 }
