@@ -1,6 +1,6 @@
 use crossterm::{
     cursor::{MoveToColumn, SetCursorStyle},
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers},
     queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
@@ -10,7 +10,7 @@ use fae_engine::Workspace;
 use std::io::{self, Write};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
-use tui_input::{Input, backend::crossterm::EventHandler};
+use tui_input::{Input, InputRequest, backend::crossterm::EventHandler};
 
 pub struct ChatUi {
     ws: Workspace,
@@ -25,7 +25,7 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let session = Self;
-        if let Err(err) = Self::set_cursor_style(SetCursorStyle::SteadyBar) {
+        if let Err(err) = Self::configure_terminal(SetCursorStyle::SteadyBar, true) {
             drop(session);
             return Err(err);
         }
@@ -33,16 +33,20 @@ impl TerminalSession {
         Ok(session)
     }
 
-    fn set_cursor_style(style: SetCursorStyle) -> io::Result<()> {
+    fn configure_terminal(style: SetCursorStyle, bracketed_paste: bool) -> io::Result<()> {
         let mut stdout = io::stdout();
-        queue!(stdout, style)?;
+        if bracketed_paste {
+            queue!(stdout, style, EnableBracketedPaste)?;
+        } else {
+            queue!(stdout, style, DisableBracketedPaste)?;
+        }
         stdout.flush()
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = Self::set_cursor_style(SetCursorStyle::DefaultUserShape);
+        let _ = Self::configure_terminal(SetCursorStyle::DefaultUserShape, false);
         let _ = disable_raw_mode();
     }
 }
@@ -174,10 +178,7 @@ impl ChatUi {
                             let val = val.trim();
                             let is_header = user_input.is_empty();
                             Self::print_user_message(val, is_header)?;
-                            if !user_input.is_empty() {
-                                user_input.push('\n');
-                            }
-                            user_input.push_str(val);
+                            Self::append_user_input(&mut user_input, val);
                             input.reset();
                             clear_line()?;
                         }
@@ -209,15 +210,14 @@ impl ChatUi {
                                     print_text(&format!("\n{}{}{}\n\n", dashes, text, dashes))?;
                                 }
                                 input.reset();
-                            } else if !val.is_empty() {
-                                let is_header = user_input.is_empty();
-                                Self::print_user_message(val, is_header)?;
-                                if !user_input.is_empty() {
-                                    user_input.push('\n');
+                            } else if !val.is_empty() || !user_input.is_empty() {
+                                if !val.is_empty() {
+                                    let is_header = user_input.is_empty();
+                                    Self::print_user_message(val, is_header)?;
+                                    Self::append_user_input(&mut user_input, val);
+                                    input.reset();
+                                    clear_line()?;
                                 }
-                                user_input.push_str(val);
-                                input.reset();
-                                clear_line()?;
                                 if !stream_active {
                                     let msg = Record::from_user_input(user_input.as_str());
                                     match session.call_stream(msg).await {
@@ -238,6 +238,10 @@ impl ChatUi {
                             input.handle_event(&Event::Key(key));
                         }
                     },
+                    Event::Paste(pasted) => {
+                        Self::insert_paste(&mut input, &mut user_input, &pasted)?;
+                        clear_line()?;
+                    }
                     _ => {}
                 }
             }
@@ -301,6 +305,34 @@ impl ChatUi {
                 }
             }
         }
+    }
+
+    fn append_user_input(user_input: &mut String, val: &str) {
+        if !user_input.is_empty() {
+            user_input.push('\n');
+        }
+        user_input.push_str(val);
+    }
+
+    fn insert_paste(input: &mut Input, user_input: &mut String, pasted: &str) -> io::Result<()> {
+        let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
+        let mut lines = pasted.split('\n').peekable();
+
+        while let Some(line) = lines.next() {
+            for c in line.chars() {
+                input.handle(InputRequest::InsertChar(c));
+            }
+
+            if lines.peek().is_some() {
+                let val = input.value().to_string();
+                let is_header = user_input.is_empty();
+                Self::print_user_message(&val, is_header)?;
+                Self::append_user_input(user_input, &val);
+                input.reset();
+            }
+        }
+
+        Ok(())
     }
 
     fn print_welcome_banner(&self) -> io::Result<()> {
