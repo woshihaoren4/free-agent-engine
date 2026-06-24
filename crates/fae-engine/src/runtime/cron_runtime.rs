@@ -76,7 +76,7 @@ impl CronRuntime {
                 task.id.clone(),
                 task.agent_id.clone(),
                 task.user_id.clone(),
-                task.ctx.clone(),
+                task.ctx,
             );
             return match tool.call(iden, req.arguments).await {
                 Ok(resp) => Ok(TaskResult::success(task.id, task.agent_id).set_data(resp)),

@@ -7,35 +7,47 @@ pub struct Hook;
 #[derive(Debug, Default)]
 pub struct Trigger;
 
+#[derive(Debug, Default,Clone)]
+pub struct AgentCallSessionOver{
+    pub have_sub_task:bool
+}
+impl AgentCallSessionOver {
+    pub fn set_have_sub_task(&mut self) {
+        self.have_sub_task = true;
+    }
+    pub fn get_have_sub_task(&self) -> bool {
+        self.have_sub_task
+    }
+}
+
 impl Hook {
     pub fn agent_call_session_over<F>(
         agent_id: &str,
         session_id: &str,
-        handle: impl FnOnce(&mut wd_event::Context, Box<dyn Any + Sync + Send + 'static>) -> F
+        handle: impl FnOnce(&mut wd_event::Context, &mut AgentCallSessionOver) -> F
         + Send
         + Sync
         + 'static,
     ) where
-        F: Future<Output = anyhow::Result<()>> + Send,
+        F: for<'a> Future<Output = anyhow::Result<()>> + Send,
     {
         let key = format!("agent_call_session_over_{}:{}", agent_id, session_id);
         wd_event::register_event_once(key, handle)
     }
 }
 impl Trigger {
-    pub fn agent_call_session_over<M: Message + Sync + Send + 'static>(
+    pub async fn agent_call_session_over(
         agent_id: &str,
         session_id: &str,
-        output: SenderMessageStream<M>,
-    ) {
+        over_info: AgentCallSessionOver,
+    ) -> anyhow::Result<AgentCallSessionOver>{
+        let info = over_info.clone();
         let key = format!("agent_call_session_over_{}:{}", agent_id, session_id);
-        let input: Box<dyn Any + Sync + Send + 'static> = Box::new(output);
-        wd_event::launch_fn(key, input, |mut ctx| {
-            if let Some(out) = ctx.try_into_inner::<Box<dyn Any + Sync + Send + 'static>>() {
-                if let Ok(out) = out.downcast::<SenderMessageStream<M>>() {
-                    out.close();
-                }
-            }
-        });
+        let mut ctx = wd_event::invoke(key, over_info).await?;
+        if let Some(out) = ctx.try_into_inner::<AgentCallSessionOver>() {
+            Ok(out)
+        } else {
+            Ok(info)
+        }
     }
 }

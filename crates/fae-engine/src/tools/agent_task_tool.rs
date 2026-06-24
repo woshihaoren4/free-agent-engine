@@ -39,7 +39,7 @@ impl Tool for AgentTaskTool {
         AgentTaskStatus::arguments()
     }
 
-    async fn call(&self, iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
+    async fn call(&self, mut iden: IdenInfo, args: String) -> anyhow::Result<ToolResponse> {
         let agent_id = iden
             .get(GLOBAL_KEY_AGENT_ID)
             .unwrap_or(iden.get_agent_id().to_string());
@@ -76,14 +76,19 @@ impl Tool for AgentTaskTool {
                     .set_content(create.content);
                 task.update_timestamp();
                 self.task_store.push_task(task.clone()).await;
+                if let Some(s) = iden.ctx.get_output(){
+                    task.set_ext(s);
+                }
                 //挂钩子，等当前agent执行完成，则开始执行任务
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
-                    |_ctx, output| async move {
-                        task.set_ext(output);
-                        channel.send(task).await?;
-                        Ok(())
+                     |ctx, over| {
+                        over.set_have_sub_task();
+                         async move {
+                             channel.send(task).await?;
+                             Ok(())
+                         }
                     },
                 );
             }
@@ -116,14 +121,18 @@ impl Tool for AgentTaskTool {
                         result.task_id
                     ));
                 };
+                if let Some(s) = iden.ctx.get_output(){
+                    task.set_ext(s);
+                }
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
-                    |_ctx, output| async move {
-                        task.set_ext(output);
+                    |ctx, over| {
+                        over.set_have_sub_task();
+                        async move {
                         channel.send(task).await?;
                         Ok(())
-                    },
+                    }},
                 );
             }
             AgentTaskStatus::Failed(result) => {
@@ -141,14 +150,18 @@ impl Tool for AgentTaskTool {
                         result.task_id
                     ));
                 };
+                if let Some(s) = iden.ctx.get_output(){
+                    task.set_ext(s);
+                }
                 fae_agent::Hook::agent_call_session_over(
                     &agent_id,
                     &session_id,
-                    |_ctx, output| async move {
-                        task.set_ext(output);
+                    |ctx, over| {
+                        over.set_have_sub_task();
+                        async move {
                         channel.send(task).await?;
                         Ok(())
-                    },
+                    }},
                 );
             }
         }

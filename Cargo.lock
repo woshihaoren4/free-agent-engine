@@ -3776,9 +3776,9 @@ dependencies = [
 
 [[package]]
 name = "wd_event"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "519a381dd8440f76e349253d7557a227339b4238fb1b6448cca5a8336c8f6d97"
+checksum = "b91d775eed482f4aad6ca6c7b802e5d991e8404e5777236b66c56f8ce09f5e51"
 dependencies = [
  "anyhow",
  "async-trait",

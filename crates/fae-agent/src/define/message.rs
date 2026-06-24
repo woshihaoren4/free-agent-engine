@@ -106,6 +106,15 @@ impl<T: Send + Sync + 'static + Message> SenderMessageStream<T> {
     }
 }
 
+impl<T> Clone for SenderMessageStream<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            inner: PhantomData,
+        }
+    }
+}
+
 // ------------------- 单次 message 输出 OutMsgOnce -------------------
 
 #[derive(Debug)]

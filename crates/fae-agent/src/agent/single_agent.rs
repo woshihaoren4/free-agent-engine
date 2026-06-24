@@ -1,13 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{
-    AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME,
-    GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan,
-    PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType,
-    ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
-    define_planning_group,
-};
+use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger, define_planning_group, AgentCallSessionOver};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -165,9 +159,19 @@ where
         }
         Ok(())
     }
-    pub fn close(&mut self) {
+    pub async fn close(&mut self) {
+        let over_result = Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(),AgentCallSessionOver::default()).await;
         if let Some(output) = self.output.take() {
-            Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(), output);
+            match over_result {
+                Ok(info) => {
+                    if !info.get_have_sub_task() {
+                        output.close();
+                    }
+                }
+                Err(e) => {
+                    wd_log::log_error_ln!("agent_call_session_over failed, error: {:?}", e);
+                }
+            }
         } else {
             if !self.output_content.is_empty() {
                 let content = self.output_content.replace("\n", "\r\n");
@@ -538,7 +542,8 @@ where
             self.parse_mcp_info(tool_name)?
         };
         let tool_req = ToolRequest::new(name, arguments);
-        let mut task = Task::with_content(self.context.clone())
+        let ctx = self.output.clone();
+        let mut task = Task::with_content(self.context.clone().set_output(Box::new(ctx)))
             .set_agent_id(self.agent_id.clone())
             .set_user_id(self.session_md.user_id().to_string())
             .set_type(TaskType::Tool)
@@ -676,7 +681,7 @@ where
                     .await?;
             }
         }
-        self.close();
+        self.close().await;
         return Ok(PlanningResult::End(None));
     }
 }
@@ -723,7 +728,7 @@ where
             self.agent_id.as_str(),
             self.debug().await
         );
-        self.close();
+        self.close().await;
     }
     fn get_context(&self) -> Context {
         self.context.clone()
@@ -771,7 +776,7 @@ where
 
     async fn on_agent_task(&self, env: Env, mut task: AgentTask) -> anyhow::Result<()> {
         //先尝试解析渠道
-        let output = task.try_ext_into::<SenderMessageStream<M>>();
+        let output = task.try_ext_into::<Option<SenderMessageStream<M>>>().unwrap_or_default();
         let mut user_id = "".to_string();
         let mut session_id = "".to_string();
         //解析返回值
