@@ -1,9 +1,7 @@
+use std::any::Any;
 use crate::tools::{AGENT_TASK_TOOL_NAME, AgentTaskTool};
 use crate::{IdenInfo, Tool};
-use fae_agent::{
-    AgentTask, AgentTaskStatus, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing,
-    ThingItem, ThingSelect, ToolRequest, ToolResponse,
-};
+use fae_agent::{AgentTask, AgentTaskStatus, AgentTasks, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -17,14 +15,14 @@ const AGENT_TASK_RUNTIME_ID: &str = "AGENT_TASK_RUNTIME_ID";
 pub trait AgentTaskStore: Debug {
     async fn push_task(&self, task: AgentTask);
     async fn update_status_executing(&self, task_id: &str) -> anyhow::Result<()>;
-    async fn remove_task(&self, task_id: &str) -> Option<AgentTask>;
+    async fn complete_task(&self, task_id: &str,status:String,result:String,ext:Option<Box<dyn Any+Send+Sync+'static>>) -> anyhow::Result<AgentTasks>;
 }
 
 #[derive(Debug)]
 pub struct AgentRuntime {
     pub task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
     pub task_tool: AgentTaskTool,
-    pub channel: Channel<AgentTask>,
+    pub channel: Channel<AgentTasks>,
     pub task_result_channel: Channel<TaskResult>,
     parent: Option<Env>,
 }
@@ -99,12 +97,12 @@ impl Environment for AgentRuntime {
             tokio::select! {
                 res = recv => {
                     let task = res?;
-                    match task.get_status() {
+                    match task.first_task_status() {
                         AgentTaskStatus::CREATE => {
                             return Ok(EnvEvent::Agent(task));
                         }
                         AgentTaskStatus::COMPLETED | AgentTaskStatus::FAILED => {
-                            let task = TaskResult::success(task.get_task_id(), task.get_author_id()).set_data(task);
+                            let task = TaskResult::success(task.first_task_id(), task.first_task_author_id()).set_data(task);
                             return Ok(EnvEvent::TaskResult(task));
                         }
                         _ => {
@@ -183,22 +181,32 @@ impl Environment for AgentRuntime {
 
 // -------------- AgentTaskStore 的内存实现 --------------
 #[derive(Debug)]
+struct AgentTaskStoreMap{
+    tasks:HashMap<String, AgentTask>,
+    session:HashMap<String,Vec<String>>,
+}
+#[derive(Debug)]
 pub struct DefaultAgentTaskStore {
-    pub map: RwLock<HashMap<String, AgentTask>>,
+    pub map: RwLock<AgentTaskStoreMap>,
 }
 
 #[async_trait::async_trait]
 impl AgentTaskStore for DefaultAgentTaskStore {
     async fn push_task(&self, task: AgentTask) {
-        self.map
+        let mut map = self.map
             .write()
-            .await
-            .insert(task.get_task_id().to_string(), task);
+            .await;
+        if let Some(tasks) = map.session.get_mut(task.get_author_session_id()) {
+            tasks.push(task.get_task_id().to_string());
+        } else {
+            map.session.insert(task.get_author_session_id().to_string(), vec![task.get_task_id().to_string()]);
+        }
+        map.tasks.insert(task.get_task_id().to_string(), task);
     }
 
     async fn update_status_executing(&self, task_id: &str) -> anyhow::Result<()> {
         let mut map = self.map.write().await;
-        if let Some(task) = map.get_mut(task_id) {
+        if let Some(task) = map.tasks.get_mut(task_id) {
             task.status = AgentTaskStatus::EXECUTING.to_string();
             task.update_timestamp();
         } else {
@@ -207,15 +215,54 @@ impl AgentTaskStore for DefaultAgentTaskStore {
         Ok(())
     }
 
-    async fn remove_task(&self, task_id: &str) -> Option<AgentTask> {
-        self.map.write().await.remove(task_id)
+    async fn complete_task(&self, task_id: &str, status: String, result: String,ext:Option<Box<dyn Any+Send+Sync+'static>>) -> anyhow::Result<AgentTasks> {
+        let mut map = self.map.write().await;
+        let mut session_id = String::new();
+        if let Some(task) = map.tasks.get_mut(task_id) {
+            task.status = status;
+            task.result = result;
+            task.update_timestamp();
+            if let Some(e) = ext {
+                task.set_ext(e);
+            }
+            session_id = task.get_author_session_id().to_string();
+        }else{
+            return anyhow::anyhow!("[TaskStore]::complete_task task not found: {}", task_id).err();
+        }
+        let ids = if let Some(s) = map.session.get(&session_id) {
+            s
+        } else {
+            return anyhow::anyhow!("[TaskStore]::complete_task session not found: {}", session_id).err();
+        };
+        for i in ids {
+            if let Some(t) = map.tasks.get(i) {
+                if !t.status_is_complete() {
+                    return Ok(AgentTasks::default())
+                }
+            }else{
+                return anyhow::anyhow!("[TaskStore]::complete_task task not found: {}", i).err();
+            }
+        }
+        let ids = map.session.remove(&session_id).unwrap();
+        //全部任务均已完成
+        let mut agentasks = AgentTasks::default();
+        for i in ids {
+            if let Some(t) = map.tasks.remove(i.as_str()) {
+                agentasks.push(t);
+            }
+        }
+        Ok(agentasks)
+
     }
 }
 
 impl Default for DefaultAgentTaskStore {
     fn default() -> Self {
         Self {
-            map: RwLock::new(HashMap::new()),
+            map: RwLock::new(AgentTaskStoreMap{
+                tasks: HashMap::default(),
+                session: HashMap::default(),
+            }),
         }
     }
 }

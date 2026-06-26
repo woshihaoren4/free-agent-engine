@@ -1,8 +1,6 @@
 use crate::agent_runtime::AgentTaskStore;
 use crate::{IdenInfo, Tool};
-use fae_agent::{
-    AgentInfo, AgentTask, AgentTaskStatus, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID, ToolResponse,
-};
+use fae_agent::{AgentInfo, AgentTask, AgentTaskStatus, GLOBAL_KEY_AGENT_ID, GLOBAL_KEY_SESSION_ID, ToolResponse, AgentTasks};
 use serde_json::Value;
 use std::sync::Arc;
 use wd_tools::channel::Channel;
@@ -11,13 +9,13 @@ pub const AGENT_TASK_TOOL_NAME: &str = "agent_exec_task";
 
 #[derive(Debug)]
 pub struct AgentTaskTool {
-    chan: Channel<AgentTask>,
+    chan: Channel<AgentTasks>,
     pub task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
 }
 
 impl AgentTaskTool {
     pub fn new(
-        chan: Channel<AgentTask>,
+        chan: Channel<AgentTasks>,
         task_store: Arc<dyn AgentTaskStore + Send + Sync + 'static>,
     ) -> Self {
         Self { chan, task_store }
@@ -86,7 +84,7 @@ impl Tool for AgentTaskTool {
                      |ctx, over| {
                         over.set_have_sub_task();
                          async move {
-                             channel.send(task).await?;
+                             channel.send(task.into()).await?;
                              Ok(())
                          }
                     },
@@ -112,28 +110,21 @@ impl Tool for AgentTaskTool {
                     ));
                 }
                 //移除任务
-                let task = self.task_store.remove_task(result.task_id.as_str()).await;
-                let mut task = if let Some(t) = task {
-                    t.set_result(result.content).set_status(status)
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "[AgentTaskTool] completed task[{}] buf not found .",
-                        result.task_id
-                    ));
-                };
-                if let Some(s) = iden.ctx.get_output(){
-                    task.set_ext(s);
+                let ext = iden.ctx.get_output();
+                let tasks = self.task_store.complete_task(result.task_id.as_str(),status,result.content,ext).await?;
+                if !tasks.is_empty(){
+                    fae_agent::Hook::agent_call_session_over(
+                        &agent_id,
+                        &session_id,
+                        |ctx, over| {
+                            over.set_have_sub_task();
+                            async move {
+                                channel.send(tasks).await?;
+                                Ok(())
+                            }},
+                    );
                 }
-                fae_agent::Hook::agent_call_session_over(
-                    &agent_id,
-                    &session_id,
-                    |ctx, over| {
-                        over.set_have_sub_task();
-                        async move {
-                        channel.send(task).await?;
-                        Ok(())
-                    }},
-                );
+
             }
             AgentTaskStatus::Failed(result) => {
                 result_content.push_str("\nThe results have been sent to the task publisher; you can end your task now.");
@@ -141,28 +132,19 @@ impl Tool for AgentTaskTool {
                 if result.task_id.is_empty() {
                     return Err(anyhow::anyhow!("[AgentTaskTool] failed.task_id is empty"));
                 }
-                let task = self.task_store.remove_task(result.task_id.as_str()).await;
-                let mut task = if let Some(t) = task {
-                    t.set_result(result.content).set_status(status)
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "[AgentTaskTool] failed task[{}] buf not found .",
-                        result.task_id
-                    ));
-                };
-                if let Some(s) = iden.ctx.get_output(){
-                    task.set_ext(s);
+                let tasks = self.task_store.complete_task(result.task_id.as_str(),status,result.content,iden.ctx.get_output()).await?;
+                if !tasks.is_empty(){
+                    fae_agent::Hook::agent_call_session_over(
+                        &agent_id,
+                        &session_id,
+                        |ctx, over| {
+                            over.set_have_sub_task();
+                            async move {
+                                channel.send(tasks).await?;
+                                Ok(())
+                            }},
+                    );
                 }
-                fae_agent::Hook::agent_call_session_over(
-                    &agent_id,
-                    &session_id,
-                    |ctx, over| {
-                        over.set_have_sub_task();
-                        async move {
-                        channel.send(task).await?;
-                        Ok(())
-                    }},
-                );
             }
         }
 

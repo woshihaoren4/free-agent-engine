@@ -1,7 +1,7 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, AgentTask, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger, define_planning_group, AgentCallSessionOver};
+use crate::{AgentConfig, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger, define_planning_group, AgentCallSessionOver, AgentTasks};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -774,37 +774,46 @@ where
         Arc::new(self.session_config.clone())
     }
 
-    async fn on_agent_task(&self, env: Env, mut task: AgentTask) -> anyhow::Result<()> {
+    async fn on_agent_task(&self, env: Env, mut tasks: AgentTasks) -> anyhow::Result<()> {
         //先尝试解析渠道
-        let output = task.try_ext_into::<Option<SenderMessageStream<M>>>().unwrap_or_default();
+        let mut output: Option<SenderMessageStream<M>> = None;
+        for i in tasks.0.iter_mut() {
+            if let Some(Some(s)) = i.try_ext_into::<Option<SenderMessageStream<M>>>(){
+                output = Some(s);
+                break;
+            }
+        }
         let mut user_id = "".to_string();
         let mut session_id = "".to_string();
         //解析返回值
-        let user_input = match task.get_status() {
+        let user_input = match tasks.first_task_status() {
             AgentTaskStatus::CREATE => {
-                user_id = task.executor.user_id;
-                session_id = task.executor.session_id;
-                format!(
-                    "You receive a task from another agent, which you must complete and update the task status upon completion.\n-Task ID：{}\n-Task Details：\n{}",
-                    task.task_id, task.content
-                )
+                user_id = tasks.first_task_executor_user_id().to_string();
+                session_id = tasks.first_task_executor_session_id().to_string();
+                let mut input = "You receive a task from another agent, which you must complete and update the task status upon completion.".to_string();
+                for i in tasks.0.iter() {
+                    input.push_str(format!("\n-Task ID:{} Task Details：{}", i.task_id, i.content).as_str());
+                }
+                input
             }
             AgentTaskStatus::EXECUTING => {
-                wd_log::log_info_ln!("[SingleAgent:on_agent_task] Executing task: {:?}", task);
+                wd_log::log_info_ln!("[SingleAgent:on_agent_task] Executing tasks: {:?}", tasks);
                 return Ok(());
             }
             AgentTaskStatus::COMPLETED | AgentTaskStatus::FAILED => {
-                user_id = task.author.user_id;
-                session_id = task.author.session_id;
-                format!(
-                    "The task you posted has been completed. \nTask Details: {}\n---\nExecutor: {}\n Task Status: {}\n Result:\n{}",
-                    task.content, task.executor.agent_id, task.status, task.result
-                )
+                user_id = tasks.first_task_author_user_id().to_string();
+                session_id = tasks.first_task_author_session_id().to_string();
+                let mut input = "The task you posted has been completed. \n<Tasks>".to_string();
+                for i in tasks.0.iter(){
+                    input.push_str(format!("\n<Item><TaskID>{}</TaskID><Content>{}</Content><Status>{}</Status><Result>{}</Result></Item>", i.task_id, i.content, i.status, i.result).as_str());
+                }
+                input.push_str("\n</Tasks>");
+                input
             }
             _ => {
                 return anyhow::anyhow!(
-                    "[SingleAgent:on_agent_task] Received an unsupported agent task status {:?}",
-                    task
+                    "[SingleAgent:on_agent_task] Received an unsupported agent tasks status {:?}",
+                    tasks
                 )
                 .err();
             }
@@ -904,7 +913,7 @@ where
         env: Env,
         mut result: TaskResult,
     ) -> anyhow::Result<()> {
-        if let Some(s) = result.into_inner::<AgentTask>() {
+        if let Some(s) = result.into_inner::<AgentTasks>() {
             return self.on_agent_task(env, s).await;
         } else {
             wd_log::log_info_ln!(

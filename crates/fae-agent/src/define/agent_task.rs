@@ -167,22 +167,22 @@ impl AgentTask {
     pub fn get_author_id(&self) -> &str {
         &self.author.agent_id
     }
+    pub fn get_author_session_id(&self) -> &str {
+        &self.author.session_id
+    }
     pub fn get_executor_id(&self) -> &str {
         &self.executor.agent_id
     }
-    pub fn get_agent_id(&self) -> &str {
-        if self.status == AgentTaskStatus::CREATE {
-            &self.executor.agent_id
-        } else {
-            &self.author.agent_id
-        }
-    }
+
     pub fn set_status(mut self, status: String) -> Self {
         self.status = status;
         self
     }
     pub fn get_status(&self) -> &str {
         self.status.as_str()
+    }
+    pub fn status_is_complete(&self) -> bool {
+        self.status == AgentTaskStatus::COMPLETED || self.status == AgentTaskStatus::FAILED
     }
     pub fn set_content(mut self, content: String) -> Self {
         self.content = content;
@@ -227,5 +227,89 @@ impl Clone for AgentTask {
             update_timestamp: self.update_timestamp,
             extend: None,
         }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct AgentTasks(pub(crate) Vec<AgentTask>);
+impl AgentTasks {
+    pub fn push(&mut self, task: AgentTask) {
+        self.0.push(task);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn first_task_status(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().status.as_str()
+        }
+    }
+    pub fn first_task_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().task_id.as_str()
+        }
+    }
+    pub fn first_task_author_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().author.agent_id.as_str()
+        }
+    }
+    pub fn first_task_executor_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().executor.agent_id.as_str()
+        }
+    }
+    pub fn first_task_executor_user_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().executor.user_id.as_str()
+        }
+    }
+    pub fn first_task_author_user_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().author.user_id.as_str()
+        }
+    }
+    pub fn first_task_author_session_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().author.session_id.as_str()
+        }
+    }
+    pub fn first_task_executor_session_id(&self) -> &str {
+        if self.is_empty() {
+            ""
+        }else{
+            self.0.first().unwrap().executor.session_id.as_str()
+        }
+    }
+    pub fn get_agent_id(&self) -> &str {
+        if self.first_task_status() == AgentTaskStatus::CREATE {
+            self.first_task_executor_id()
+        } else {
+            self.first_task_author_id()
+        }
+    }
+}
+impl From<Vec<AgentTask>> for AgentTasks {
+    fn from(v: Vec<AgentTask>) -> Self {
+        Self(v)
+    }
+}
+impl From<AgentTask> for AgentTasks {
+    fn from(v: AgentTask) -> Self {
+        Self(vec![v])
     }
 }

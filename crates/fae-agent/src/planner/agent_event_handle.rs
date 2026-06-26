@@ -1,8 +1,5 @@
 use crate::define::{OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{
-    Agent, AgentConfig, AgentTask, Command, Env, EnvEvent, Memory, Message, Planning, Session,
-    SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
-};
+use crate::{Agent, AgentConfig, AgentTasks, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -28,7 +25,7 @@ where
 
     async fn on_none(&self) {}
     // 另一个agent给的任务
-    async fn on_agent_task(&self, _env: Env, _atask: AgentTask) -> anyhow::Result<()> {
+    async fn on_agent_task(&self, _env: Env, _tasks: AgentTasks) -> anyhow::Result<()> {
         anyhow::anyhow!("[AgentEventExt::{}] not support on_agent_task", self.id(),).err()
     }
     /// 处理会话调用事件
@@ -195,7 +192,7 @@ where
             }
             EnvEvent::Heartbeat(s) => self.agent_event_ext.on_heartbeat(env, s).await,
             EnvEvent::Timed(task) => self.agent_event_ext.on_timed(env, task).await,
-            EnvEvent::Agent(atask) => self.agent_event_ext.on_agent_task(env, atask).await,
+            EnvEvent::Agent(tasks) => self.agent_event_ext.on_agent_task(env, tasks).await,
         }
     }
 

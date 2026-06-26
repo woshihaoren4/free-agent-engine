@@ -1,4 +1,4 @@
-use crate::{AgentTask, AgentTaskStatus, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
+use crate::{AgentTaskStatus, AgentTasks, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
 use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ pub enum EnvEvent {
     // 心跳
     Heartbeat(String),
     // agent 事件
-    Agent(AgentTask),
+    Agent(AgentTasks),
     // /// 键值对事件，携带键和值
     // KV(String, Value),
     // /// 自定义事件，携带自定义信息
