@@ -82,7 +82,7 @@ impl Tool for AgentTaskTool {
                     &agent_id,
                     &session_id,
                      |ctx, over| {
-                        over.set_have_sub_task();
+                        over.add_sub_task();
                          async move {
                              channel.send(task.into()).await?;
                              Ok(())
@@ -117,7 +117,7 @@ impl Tool for AgentTaskTool {
                         &agent_id,
                         &session_id,
                         |ctx, over| {
-                            over.set_have_sub_task();
+                            over.add_sub_task();
                             async move {
                                 channel.send(tasks).await?;
                                 Ok(())
@@ -138,7 +138,7 @@ impl Tool for AgentTaskTool {
                         &agent_id,
                         &session_id,
                         |ctx, over| {
-                            over.set_have_sub_task();
+                            over.add_sub_task();
                             async move {
                                 channel.send(tasks).await?;
                                 Ok(())

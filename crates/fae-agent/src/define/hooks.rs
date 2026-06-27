@@ -9,14 +9,14 @@ pub struct Trigger;
 
 #[derive(Debug, Default,Clone)]
 pub struct AgentCallSessionOver{
-    pub have_sub_task:bool
+    pub sub_task_count:usize,
 }
 impl AgentCallSessionOver {
-    pub fn set_have_sub_task(&mut self) {
-        self.have_sub_task = true;
+    pub fn add_sub_task(&mut self) {
+        self.sub_task_count += 1;
     }
     pub fn get_have_sub_task(&self) -> bool {
-        self.have_sub_task
+        self.sub_task_count > 0
     }
 }
 
@@ -49,5 +49,38 @@ impl Trigger {
         } else {
             Ok(info)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_call_session_over_runs_two_hooks_on_single_trigger() {
+        let agent_id = "123";
+        let session_id = "456";
+
+        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over|{
+            over.add_sub_task();
+            async {
+                Ok(())
+            }
+        });
+
+        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over|{
+            over.add_sub_task();
+            async {
+                Ok(())
+            }
+        });
+
+        let over_info =
+            Trigger::agent_call_session_over(agent_id, session_id, AgentCallSessionOver::default())
+                .await
+                .unwrap();
+
+        assert!(over_info.get_have_sub_task());
+        assert_eq!(over_info.sub_task_count, 2);
     }
 }
