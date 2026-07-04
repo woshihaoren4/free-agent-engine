@@ -7,6 +7,7 @@ use crossterm::{
 };
 use fae_agent::{GLOBAL_KEY_PROJECT_DIR, MemoryEntry, ModelCallConfig, Record, SingleSessionMD};
 use fae_engine::Workspace;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
@@ -16,6 +17,128 @@ pub struct ChatUi {
     ws: Workspace,
     agent_id: String,
     model_name: ModelCallConfig,
+}
+
+#[derive(Default)]
+struct RecordOutputCache {
+    current_titles: HashMap<String, String>,
+    pending: Vec<PendingRecordOutput>,
+}
+
+struct PendingRecordOutput {
+    agent_id: String,
+    title: String,
+    content: String,
+}
+
+impl RecordOutputCache {
+    fn push<F>(
+        &mut self,
+        record: &Record,
+        current_output_agent_id: &mut String,
+        current_output_title: &mut String,
+        print_text: &F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        let agent_id = record.agent_id.clone();
+        let title = record.title();
+
+        if self
+            .current_titles
+            .get(&agent_id)
+            .is_some_and(|current_title| current_title != &title)
+        {
+            self.flush_agent(
+                &agent_id,
+                current_output_agent_id,
+                current_output_title,
+                print_text,
+            )?;
+        }
+
+        self.current_titles.insert(agent_id.clone(), title.clone());
+
+        let content = record.content();
+        if content.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.agent_id == agent_id && pending.title == title)
+        {
+            pending.content.push_str(content);
+        } else {
+            self.pending.push(PendingRecordOutput {
+                agent_id,
+                title,
+                content: content.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn flush_agent<F>(
+        &mut self,
+        agent_id: &str,
+        current_output_agent_id: &mut String,
+        current_output_title: &mut String,
+        print_text: &F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        let mut index = 0;
+        while index < self.pending.len() {
+            if self.pending[index].agent_id == agent_id {
+                let pending = self.pending.remove(index);
+                ChatUi::print_record_output(
+                    &pending.agent_id,
+                    &pending.title,
+                    &pending.content,
+                    current_output_agent_id,
+                    current_output_title,
+                    print_text,
+                )?;
+            } else {
+                index += 1;
+            }
+        }
+        self.current_titles.remove(agent_id);
+        Ok(())
+    }
+
+    fn flush_all<F>(
+        &mut self,
+        current_output_agent_id: &mut String,
+        current_output_title: &mut String,
+        print_text: &F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        for pending in self.pending.drain(..) {
+            ChatUi::print_record_output(
+                &pending.agent_id,
+                &pending.title,
+                &pending.content,
+                current_output_agent_id,
+                current_output_title,
+                print_text,
+            )?;
+        }
+        self.current_titles.clear();
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.current_titles.clear();
+        self.pending.clear();
+    }
 }
 
 struct TerminalSession;
@@ -118,6 +241,9 @@ impl ChatUi {
         let mut stream_active = false;
         let mut current_stream: Option<Pin<Box<dyn tokio_stream::Stream<Item = Record> + Send>>> =
             None;
+        let mut pending_outputs = RecordOutputCache::default();
+        let mut current_output_agent_id = String::new();
+        let mut current_output_title = String::new();
         let mut current_title = String::new();
         let mut spinner_tick: usize = 0;
         let mut user_input = String::new();
@@ -144,6 +270,9 @@ impl ChatUi {
                             if stream_active {
                                 stream_active = false;
                                 current_stream = None;
+                                pending_outputs.clear();
+                                current_output_agent_id.clear();
+                                current_output_title.clear();
                                 clear_line()?;
                                 print_text("\n[Session aborted. Starting a new session...]\n\n")?;
                                 let session_config = SingleSessionMD::default();
@@ -191,6 +320,9 @@ impl ChatUi {
                                 if stream_active {
                                     stream_active = false;
                                     current_stream = None;
+                                    pending_outputs.clear();
+                                    current_output_agent_id.clear();
+                                    current_output_title.clear();
                                 }
                                 clear_line()?;
                                 if let Err(e) = self
@@ -222,6 +354,9 @@ impl ChatUi {
                                     let msg = Record::from_user_input(user_input.as_str());
                                     match session.call_stream(msg).await {
                                         Ok(s) => {
+                                            pending_outputs.clear();
+                                            current_output_agent_id.clear();
+                                            current_output_title.clear();
                                             current_stream = Some(Pin::from(s));
                                             stream_active = true;
                                             current_title = "Waiting".to_string();
@@ -253,42 +388,34 @@ impl ChatUi {
                         record_opt = st.next() => {
                             match record_opt {
                                 Some(record) => {
-                                    let t = record.title();
-                                    if current_title != t {
-                                        current_title = t.clone();
-                                        let title_suffix = if current_title.is_empty() || current_title == "Waiting" {
-                                            String::new()
-                                        } else {
-                                            format!(" [{}]", current_title)
-                                        };
-                                        Self::print_agent_header(
-                                            &record.agent_id,
-                                            &title_suffix,
+                                    current_title = record.title();
+                                    if record.agent_id == self.agent_id {
+                                        pending_outputs.flush_all(
+                                            &mut current_output_agent_id,
+                                            &mut current_output_title,
+                                            &print_text,
+                                        )?;
+                                        Self::print_record(
+                                            &record,
+                                            &mut current_output_agent_id,
+                                            &mut current_output_title,
+                                            &print_text,
+                                        )?;
+                                    } else {
+                                        pending_outputs.push(
+                                            &record,
+                                            &mut current_output_agent_id,
+                                            &mut current_output_title,
                                             &print_text,
                                         )?;
                                     }
-                                    let content = record.content();
-                                    if !content.is_empty() {
-                                        if current_title == "Thinking" {
-                                            let mut stdout = io::stdout();
-                                            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
-                                            stdout.flush()?;
-                                            print_text(content)?;
-                                            queue!(stdout, ResetColor)?;
-                                            stdout.flush()?;
-                                        } else if current_title.starts_with("CallTool") || current_title.starts_with("ToolOut") {
-                                            let mut stdout = io::stdout();
-                                            queue!(stdout, SetForegroundColor(Color::Yellow))?;
-                                            stdout.flush()?;
-                                            print_text(content)?;
-                                            queue!(stdout, ResetColor)?;
-                                            stdout.flush()?;
-                                        } else {
-                                            print_text(content)?;
-                                        }
-                                    }
                                 }
                                 None => {
+                                    pending_outputs.flush_all(
+                                        &mut current_output_agent_id,
+                                        &mut current_output_title,
+                                        &print_text,
+                                    )?;
                                     stream_active = false;
                                     current_stream = None;
                                     print_text("\n\n")?;
@@ -399,6 +526,79 @@ impl ChatUi {
             Print("\r\n"),
         )?;
         stdout.flush()
+    }
+
+    fn print_record<F>(
+        record: &Record,
+        current_output_agent_id: &mut String,
+        current_output_title: &mut String,
+        print_text: &F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        let title = record.title();
+        Self::print_record_output(
+            &record.agent_id,
+            &title,
+            record.content(),
+            current_output_agent_id,
+            current_output_title,
+            print_text,
+        )
+    }
+
+    fn print_record_output<F>(
+        agent_id: &str,
+        title: &str,
+        content: &str,
+        current_output_agent_id: &mut String,
+        current_output_title: &mut String,
+        print_text: &F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&str) -> io::Result<()>,
+    {
+        if current_output_agent_id != agent_id || current_output_title != title {
+            current_output_agent_id.clear();
+            current_output_agent_id.push_str(agent_id);
+            current_output_title.clear();
+            current_output_title.push_str(title);
+
+            let title_suffix =
+                if current_output_title.is_empty() || current_output_title == "Waiting" {
+                    String::new()
+                } else {
+                    format!(" [{}]", current_output_title)
+                };
+            Self::print_agent_header(agent_id, &title_suffix, print_text)?;
+        }
+
+        if content.is_empty() {
+            return Ok(());
+        }
+
+        if current_output_title == "Thinking" {
+            let mut stdout = io::stdout();
+            queue!(stdout, SetForegroundColor(Color::DarkGrey))?;
+            stdout.flush()?;
+            print_text(content)?;
+            queue!(stdout, ResetColor)?;
+            stdout.flush()?;
+        } else if current_output_title.starts_with("CallTool")
+            || current_output_title.starts_with("ToolOut")
+        {
+            let mut stdout = io::stdout();
+            queue!(stdout, SetForegroundColor(Color::Yellow))?;
+            stdout.flush()?;
+            print_text(content)?;
+            queue!(stdout, ResetColor)?;
+            stdout.flush()?;
+        } else {
+            print_text(content)?;
+        }
+
+        Ok(())
     }
 
     fn print_agent_header<F>(agent_id: &str, title_suffix: &str, print_text: &F) -> io::Result<()>
