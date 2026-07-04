@@ -388,8 +388,8 @@ impl ChatUi {
                         record_opt = st.next() => {
                             match record_opt {
                                 Some(record) => {
-                                    current_title = record.title();
                                     if record.agent_id == self.agent_id {
+                                        current_title = record.title();
                                         pending_outputs.flush_all(
                                             &mut current_output_agent_id,
                                             &mut current_output_title,
