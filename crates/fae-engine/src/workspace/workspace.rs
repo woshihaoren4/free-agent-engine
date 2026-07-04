@@ -1,7 +1,5 @@
 use crate::AgentCtl;
-use fae_agent::{
-    AgentConfig, AgentTaskStatus, Env, EnvEvent, Environment,
-};
+use fae_agent::{AgentConfig, AgentTaskStatus, Env, EnvEvent, Environment};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 

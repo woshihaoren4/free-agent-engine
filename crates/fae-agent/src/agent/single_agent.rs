@@ -1,7 +1,13 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
 use crate::planner::{AgentEventHandle, Planning};
-use crate::{AgentConfig, AgentTaskStatus, ChatMsg, Context, Env, FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType, ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger, define_planning_group, AgentCallSessionOver, AgentTasks};
+use crate::{
+    AgentCallSessionOver, AgentConfig, AgentTaskStatus, AgentTasks, ChatMsg, Context, Env,
+    FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan,
+    PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType,
+    ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
+    define_planning_group,
+};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
     ChatCompletionRequestUserMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
@@ -160,7 +166,12 @@ where
         Ok(())
     }
     pub async fn close(&mut self) {
-        let over_result = Trigger::agent_call_session_over(self.agent_id.as_str(), self.session_md.id(),AgentCallSessionOver::default()).await;
+        let over_result = Trigger::agent_call_session_over(
+            self.agent_id.as_str(),
+            self.session_md.id(),
+            AgentCallSessionOver::default(),
+        )
+        .await;
         if let Some(output) = self.output.take() {
             match over_result {
                 Ok(info) => {
@@ -778,7 +789,7 @@ where
         //先尝试解析渠道
         let mut output: Option<SenderMessageStream<M>> = None;
         for i in tasks.0.iter_mut() {
-            if let Some(Some(s)) = i.try_ext_into::<Option<SenderMessageStream<M>>>(){
+            if let Some(Some(s)) = i.try_ext_into::<Option<SenderMessageStream<M>>>() {
                 output = Some(s);
                 break;
             }
@@ -792,7 +803,9 @@ where
                 session_id = tasks.first_task_executor_session_id().to_string();
                 let mut input = "You receive a task from another agent, which you must complete and update the task status upon completion.".to_string();
                 for i in tasks.0.iter() {
-                    input.push_str(format!("\n-Task ID:{} Task Details：{}", i.task_id, i.content).as_str());
+                    input.push_str(
+                        format!("\n-Task ID:{} Task Details：{}", i.task_id, i.content).as_str(),
+                    );
                 }
                 input
             }
@@ -804,7 +817,7 @@ where
                 user_id = tasks.first_task_author_user_id().to_string();
                 session_id = tasks.first_task_author_session_id().to_string();
                 let mut input = "The task you posted has been completed. \n<Tasks>".to_string();
-                for i in tasks.0.iter(){
+                for i in tasks.0.iter() {
                     input.push_str(format!("\n<Item><TaskID>{}</TaskID><Content>{}</Content><Status>{}</Status><Result>{}</Result></Item>", i.task_id, i.content, i.status, i.result).as_str());
                 }
                 input.push_str("\n</Tasks>");

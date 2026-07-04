@@ -225,7 +225,13 @@ impl Tool for ExecuteCommand {
             };
 
             if status.success() {
-                if let Err(e) = chan.success_completed_push(format!("stdout: {}\nstderr: {}", stdout_output, stderr_output)).await {
+                if let Err(e) = chan
+                    .success_completed_push(format!(
+                        "stdout: {}\nstderr: {}",
+                        stdout_output, stderr_output
+                    ))
+                    .await
+                {
                     wd_log::log_error_ln!("Failed to send stdout output: {:?}", e);
                 }
             } else {

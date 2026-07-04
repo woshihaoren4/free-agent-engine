@@ -1,5 +1,8 @@
 use crate::define::{OutMsgOnce, ReceiverMessageStream, SenderMessageStream};
-use crate::{Agent, AgentConfig, AgentTasks, Command, Env, EnvEvent, Memory, Message, Planning, Session, SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask};
+use crate::{
+    Agent, AgentConfig, AgentTasks, Command, Env, EnvEvent, Memory, Message, Planning, Session,
+    SessionCtl, SessionEventLayer, SessionMD, SessionMetadata, TaskResult, TimedTask,
+};
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::Arc;

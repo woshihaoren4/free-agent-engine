@@ -1,7 +1,10 @@
-use std::any::Any;
 use crate::tools::{AGENT_TASK_TOOL_NAME, AgentTaskTool};
 use crate::{IdenInfo, Tool};
-use fae_agent::{AgentTask, AgentTaskStatus, AgentTasks, Env, EnvEvent, Environment, Select, TaskResult, TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
+use fae_agent::{
+    AgentTask, AgentTaskStatus, AgentTasks, Env, EnvEvent, Environment, Select, TaskResult,
+    TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse,
+};
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -15,7 +18,13 @@ const AGENT_TASK_RUNTIME_ID: &str = "AGENT_TASK_RUNTIME_ID";
 pub trait AgentTaskStore: Debug {
     async fn push_task(&self, task: AgentTask);
     async fn update_status_executing(&self, task_id: &str) -> anyhow::Result<()>;
-    async fn complete_task(&self, task_id: &str,status:String,result:String,ext:Option<Box<dyn Any+Send+Sync+'static>>) -> anyhow::Result<AgentTasks>;
+    async fn complete_task(
+        &self,
+        task_id: &str,
+        status: String,
+        result: String,
+        ext: Option<Box<dyn Any + Send + Sync + 'static>>,
+    ) -> anyhow::Result<AgentTasks>;
 }
 
 #[derive(Debug)]
@@ -181,9 +190,9 @@ impl Environment for AgentRuntime {
 
 // -------------- AgentTaskStore 的内存实现 --------------
 #[derive(Debug)]
-struct AgentTaskStoreMap{
-    tasks:HashMap<String, AgentTask>,
-    session:HashMap<String,Vec<String>>,
+struct AgentTaskStoreMap {
+    tasks: HashMap<String, AgentTask>,
+    session: HashMap<String, Vec<String>>,
 }
 #[derive(Debug)]
 pub struct DefaultAgentTaskStore {
@@ -193,13 +202,14 @@ pub struct DefaultAgentTaskStore {
 #[async_trait::async_trait]
 impl AgentTaskStore for DefaultAgentTaskStore {
     async fn push_task(&self, task: AgentTask) {
-        let mut map = self.map
-            .write()
-            .await;
+        let mut map = self.map.write().await;
         if let Some(tasks) = map.session.get_mut(task.get_author_session_id()) {
             tasks.push(task.get_task_id().to_string());
         } else {
-            map.session.insert(task.get_author_session_id().to_string(), vec![task.get_task_id().to_string()]);
+            map.session.insert(
+                task.get_author_session_id().to_string(),
+                vec![task.get_task_id().to_string()],
+            );
         }
         map.tasks.insert(task.get_task_id().to_string(), task);
     }
@@ -215,7 +225,13 @@ impl AgentTaskStore for DefaultAgentTaskStore {
         Ok(())
     }
 
-    async fn complete_task(&self, task_id: &str, status: String, result: String,ext:Option<Box<dyn Any+Send+Sync+'static>>) -> anyhow::Result<AgentTasks> {
+    async fn complete_task(
+        &self,
+        task_id: &str,
+        status: String,
+        result: String,
+        ext: Option<Box<dyn Any + Send + Sync + 'static>>,
+    ) -> anyhow::Result<AgentTasks> {
         let mut map = self.map.write().await;
         let mut session_id = String::new();
         if let Some(task) = map.tasks.get_mut(task_id) {
@@ -226,20 +242,24 @@ impl AgentTaskStore for DefaultAgentTaskStore {
                 task.set_ext(e);
             }
             session_id = task.get_author_session_id().to_string();
-        }else{
+        } else {
             return anyhow::anyhow!("[TaskStore]::complete_task task not found: {}", task_id).err();
         }
         let ids = if let Some(s) = map.session.get(&session_id) {
             s
         } else {
-            return anyhow::anyhow!("[TaskStore]::complete_task session not found: {}", session_id).err();
+            return anyhow::anyhow!(
+                "[TaskStore]::complete_task session not found: {}",
+                session_id
+            )
+            .err();
         };
         for i in ids {
             if let Some(t) = map.tasks.get(i) {
                 if !t.status_is_complete() {
-                    return Ok(AgentTasks::default())
+                    return Ok(AgentTasks::default());
                 }
-            }else{
+            } else {
                 return anyhow::anyhow!("[TaskStore]::complete_task task not found: {}", i).err();
             }
         }
@@ -252,14 +272,13 @@ impl AgentTaskStore for DefaultAgentTaskStore {
             }
         }
         Ok(agentasks)
-
     }
 }
 
 impl Default for DefaultAgentTaskStore {
     fn default() -> Self {
         Self {
-            map: RwLock::new(AgentTaskStoreMap{
+            map: RwLock::new(AgentTaskStoreMap {
                 tasks: HashMap::default(),
                 session: HashMap::default(),
             }),

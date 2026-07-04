@@ -7,9 +7,9 @@ pub struct Hook;
 #[derive(Debug, Default)]
 pub struct Trigger;
 
-#[derive(Debug, Default,Clone)]
-pub struct AgentCallSessionOver{
-    pub sub_task_count:usize,
+#[derive(Debug, Default, Clone)]
+pub struct AgentCallSessionOver {
+    pub sub_task_count: usize,
 }
 impl AgentCallSessionOver {
     pub fn add_sub_task(&mut self) {
@@ -40,7 +40,7 @@ impl Trigger {
         agent_id: &str,
         session_id: &str,
         over_info: AgentCallSessionOver,
-    ) -> anyhow::Result<AgentCallSessionOver>{
+    ) -> anyhow::Result<AgentCallSessionOver> {
         let info = over_info.clone();
         let key = format!("agent_call_session_over_{}:{}", agent_id, session_id);
         let mut ctx = wd_event::invoke(key, over_info).await?;
@@ -61,18 +61,14 @@ mod tests {
         let agent_id = "123";
         let session_id = "456";
 
-        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over|{
+        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over| {
             over.add_sub_task();
-            async {
-                Ok(())
-            }
+            async { Ok(()) }
         });
 
-        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over|{
+        Hook::agent_call_session_over(agent_id, session_id, |_ctx, over| {
             over.add_sub_task();
-            async {
-                Ok(())
-            }
+            async { Ok(()) }
         });
 
         let over_info =

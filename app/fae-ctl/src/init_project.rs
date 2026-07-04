@@ -46,7 +46,7 @@ const DEFAULT_AGENTS: &[AgentTemplate] = &[
             "scheduled_execution",
             "agent_exec_task",
             "apply_patch",
-            "execute_command"
+            "execute_command",
         ],
         skills: &["weather", "fae"],
         sub_agents: &["fae-aicoding", "fae-claw", "fae-aitest"],

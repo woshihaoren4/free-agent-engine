@@ -242,56 +242,56 @@ impl AgentTasks {
     pub fn first_task_status(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().status.as_str()
         }
     }
     pub fn first_task_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().task_id.as_str()
         }
     }
     pub fn first_task_author_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().author.agent_id.as_str()
         }
     }
     pub fn first_task_executor_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().executor.agent_id.as_str()
         }
     }
     pub fn first_task_executor_user_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().executor.user_id.as_str()
         }
     }
     pub fn first_task_author_user_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().author.user_id.as_str()
         }
     }
     pub fn first_task_author_session_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().author.session_id.as_str()
         }
     }
     pub fn first_task_executor_session_id(&self) -> &str {
         if self.is_empty() {
             ""
-        }else{
+        } else {
             self.0.first().unwrap().executor.session_id.as_str()
         }
     }
