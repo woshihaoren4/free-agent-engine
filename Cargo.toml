@@ -12,7 +12,7 @@ members = ["crates/fae-agent", "crates/fae-engine", "examples", "crates/async-op
 [workspace.dependencies]
 wd_log = "0.4.0"
 wd_tools = { version = "0.14.10", features = ["b64", "md5", "point-free", "hex", "ptr", "snowflake","uid","time","sync","fs","pool","chan","coll","ctx","mutex","regex_simple","global","random"],registry = "crates-io" }
-wd_event = {version = "0.8.3",registry = "crates-io"}
+wd_event = {version = "0.8.4",registry = "crates-io"}
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.50", features = ["full"] }

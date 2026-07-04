@@ -14,7 +14,7 @@ use tui_input::{Input, InputRequest, backend::crossterm::EventHandler};
 
 pub struct ChatUi {
     ws: Workspace,
-    agent_name: String,
+    agent_id: String,
     model_name: ModelCallConfig,
 }
 
@@ -52,11 +52,11 @@ impl Drop for TerminalSession {
 }
 
 impl ChatUi {
-    pub fn new(ws: Workspace, agent_name: String) -> Self {
+    pub fn new(ws: Workspace, agent_id: String) -> Self {
         let model_name = ModelCallConfig::default();
         Self {
             ws,
-            agent_name,
+            agent_id,
             model_name,
         }
     }
@@ -64,7 +64,7 @@ impl ChatUi {
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let terminal_session = TerminalSession::enter()?;
 
-        let agent = self.ws.get_agent(&self.agent_name).await?.on_info().await;
+        let agent = self.ws.get_agent(&self.agent_id).await?.on_info().await;
 
         self.model_name = agent.model();
 
@@ -104,7 +104,7 @@ impl ChatUi {
         let mut user_id = session_config.user_id.clone();
         let mut session = match self
             .ws
-            .session_call_stream::<_, Record, Record>(&self.agent_name, session_config)
+            .session_call_stream::<_, Record, Record>(&self.agent_id, session_config)
             .await
         {
             Ok(s) => s,
@@ -152,7 +152,7 @@ impl ChatUi {
                                 session = match self
                                     .ws
                                     .session_call_stream::<_, Record, Record>(
-                                        &self.agent_name,
+                                        &self.agent_id,
                                         session_config,
                                     )
                                     .await
@@ -195,7 +195,7 @@ impl ChatUi {
                                 clear_line()?;
                                 if let Err(e) = self
                                     .ws
-                                    .session_reset(&self.agent_name, &user_id, &session_id)
+                                    .session_reset(&self.agent_id, &user_id, &session_id)
                                     .await
                                 {
                                     print_text(&format!("Failed to reset session: {:?}\n", e))?;
@@ -355,7 +355,7 @@ impl ChatUi {
         let title = format!(">_ Free Agent Engine CLI (v{})", version);
         let model_line = format!(
             "agent: {}    model: {}",
-            &self.agent_name, &self.model_name.model
+            &self.agent_id, &self.model_name.model
         );
         let dir_line = format!("directory: {}", directory);
 
