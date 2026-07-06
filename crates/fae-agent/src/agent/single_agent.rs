@@ -1,6 +1,6 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
-use crate::planner::{AgentEventHandle, Planning};
+use crate::planner::{SingleAgentHandle, Planning};
 use crate::{
     AgentCallSessionOver, AgentConfig, AgentTaskStatus, AgentTasks, ChatMsg, Context, Env,
     FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan,
@@ -760,7 +760,7 @@ define_planning_group!(
 );
 
 #[async_trait::async_trait]
-impl<S, M> AgentEventHandle<S, M, M, SingleAgentPlan<S, M>> for SingleAgent<S, M>
+impl<S, M> SingleAgentHandle<S, M, M, SingleAgentPlan<S, M>> for SingleAgent<S, M>
 where
     S: SessionMetadata + Default + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     M: MemoryEntry + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,

@@ -2,7 +2,7 @@ use crate::define::{
     ChannelReceiverImplStream, Message, OutMsgOnce, ReceiverMessageStream, SenderMessageStream,
 };
 use crate::{
-    AgentEventHandle, Context, EndPlanTaskArgs, Env, Msg, Planning, Session, SessionMD,
+    SingleAgentHandle, Context, EndPlanTaskArgs, Env, Msg, Planning, Session, SessionMD,
     SessionMetadata, Task, TaskType,
 };
 use std::sync::Arc;
@@ -15,7 +15,7 @@ pub struct SessionEventLayer<S, In, Out, P> {
     env: Env,
     plan_id: Option<String>,
     meta: S,
-    event_handle: Arc<dyn AgentEventHandle<S, In, Out, P> + Send + 'static>,
+    event_handle: Arc<dyn SingleAgentHandle<S, In, Out, P> + Send + 'static>,
 }
 
 impl<S: 'static, In, Out, P> SessionEventLayer<S, In, Out, P>
@@ -28,7 +28,7 @@ where
     pub fn new(
         env: Env,
         session_info: SessionMD,
-        event_handle: Arc<dyn AgentEventHandle<S, In, Out, P> + Send + 'static>,
+        event_handle: Arc<dyn SingleAgentHandle<S, In, Out, P> + Send + 'static>,
     ) -> anyhow::Result<Self> {
         let meta = if let Ok(s) = session_info.into_inner() {
             s

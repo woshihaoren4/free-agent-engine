@@ -9,7 +9,7 @@ use std::sync::Arc;
 use wd_tools::PFErr;
 
 #[async_trait::async_trait]
-pub trait AgentEventHandle<S, In, Out, P>: Debug + Sync
+pub trait SingleAgentHandle<S, In, Out, P>: Debug + Sync
 where
     S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static,
@@ -155,7 +155,7 @@ impl<E, S, In, Out, P> AgentEventHandleImpl<E, S, In, Out, P> {
 #[async_trait::async_trait]
 impl<E, S, In, Out, P> Agent for AgentEventHandleImpl<E, S, In, Out, P>
 where
-    E: AgentEventHandle<S, In, Out, P> + Send + 'static,
+    E: SingleAgentHandle<S, In, Out, P> + Send + 'static,
     S: SessionMetadata + Send + Sync + 'static,
     In: Send + Sync + 'static + Message,
     Out: Send + Sync + 'static + Message,

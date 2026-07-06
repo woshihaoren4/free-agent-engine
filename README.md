@@ -72,9 +72,10 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ## TODO
-- agent 任务的并行分发
-- 多计划执行
-- workflow
-- hook规范化
-- 多session通信改造
-- 消息规范化
+
+- [x] agent 任务的并行分发
+- [ ] 多计划执行
+- [ ] workflow
+- [ ] hook规范化
+- [ ] 多session通信改造
+- [ ] 消息规范化
