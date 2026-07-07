@@ -898,6 +898,8 @@ where
             .await?
             .is_none()
         {
+            let mut info = info.clone();
+            info.set_name(input.content().chars().take(10).collect::<String>());
             self.session_config.create_ext(info.clone()).await?;
         }
         let agent_id = self.agent_id.clone();

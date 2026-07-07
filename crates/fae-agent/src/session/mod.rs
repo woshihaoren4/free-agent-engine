@@ -60,6 +60,7 @@ pub trait Session: Sync {
 
 pub trait SessionMetadata: Debug {
     fn id(&self) -> &str;
+    fn set_name(&mut self, name: String);
     fn user_id(&self) -> &str;
     /// 会话提示词
     fn additional_tips(&self) -> Option<String> {

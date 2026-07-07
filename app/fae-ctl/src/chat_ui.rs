@@ -16,6 +16,7 @@ use tui_input::{Input, InputRequest, backend::crossterm::EventHandler};
 pub struct ChatUi {
     ws: Workspace,
     agent_id: String,
+    session_id: Option<String>,
     model_name: ModelCallConfig,
 }
 
@@ -175,11 +176,12 @@ impl Drop for TerminalSession {
 }
 
 impl ChatUi {
-    pub fn new(ws: Workspace, agent_id: String) -> Self {
+    pub fn new(ws: Workspace, agent_id: String, session_id: Option<String>) -> Self {
         let model_name = ModelCallConfig::default();
         Self {
             ws,
             agent_id,
+            session_id,
             model_name,
         }
     }
@@ -222,7 +224,10 @@ impl ChatUi {
             stdout.flush()
         };
 
-        let session_config = SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".");
+        let mut session_config = SingleSessionMD::default().set(GLOBAL_KEY_PROJECT_DIR, ".");
+        if let Some(session_id) = self.session_id.as_ref() {
+            session_config = session_config.set_id(session_id);
+        }
         let mut session_id = session_config.id.clone();
         let mut user_id = session_config.user_id.clone();
         let mut session = match self

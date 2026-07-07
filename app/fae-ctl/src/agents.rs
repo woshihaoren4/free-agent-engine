@@ -16,8 +16,13 @@ impl Agents {
     pub async fn exit(&self) {
         self.engine.exit().await;
     }
-    pub async fn chat(&self, agent_name: &str) {
-        let mut ui = crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string());
+    pub async fn chat(&self, agent_name: &str, args: AgentArgs) {
+        let session_id = if args.new_session {
+            Some(wd_tools::uuid::v4())
+        }else{
+            args.session_id
+        };
+        let mut ui = crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string(),session_id);   
         if let Err(e) = ui.run().await {
             eprintln!("UI error: {:?}", e);
         }
@@ -52,15 +57,34 @@ impl Agents {
             println!("  - {}: {}", session.get_id(), session.get_name());
         }
     }
+    pub async fn session_history(&self, agent_id: &str, user_id: &str) {
+        let history = self
+            .ws
+            .session_history::<SingleSessionMD>(agent_id, user_id, 100)
+            .await;
+        let list = match history {
+            Ok(history) => history,
+            Err(e) => {
+                eprintln!("Failed to get session history: {:?}", e);
+                return;
+            }
+        };
+        println!("Session history:");
+        for session in list {
+            println!("  - {}: {}", session.get_id(), session.get_name());
+        }
+    }
     pub async fn exec(wd: String, args: AgentArgs) {
         let this = Self::new(&wd).await;
-        let agent = args.id.unwrap_or(DEFAULT_AGENT_ID.to_string());
-        let user_id = args.user.unwrap_or(DEFAULT_USER_ID.to_string());
-        if args.history {
+        let agent = args.id.clone().unwrap_or(DEFAULT_AGENT_ID.to_string());
+        let user_id = args.user.clone().unwrap_or(DEFAULT_USER_ID.to_string());
+        if args.session_history{
+            this.session_history(&agent, &user_id).await;
+        } else if args.history {
             this.chat_history(&agent, &user_id).await;
         } else if args.chat {
-            this.chat(&agent).await;
-        } else {
+            this.chat(&agent,args).await;
+        } else {    
             this.agents_list().await;
         }
         this.exit().await;

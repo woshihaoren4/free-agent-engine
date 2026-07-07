@@ -77,7 +77,9 @@ impl SessionMetadata for SingleSessionMD {
     fn user_id(&self) -> &str {
         self.user_id.as_str()
     }
-
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
     fn additional_tips(&self) -> Option<String> {
         if self.additional_tips.is_empty() {
             Some(Self::default_tips())
