@@ -11,6 +11,8 @@ pub struct AgentArgs {
     pub user: Option<String>,
     #[arg(short, long, default_value_t = false, help = "start chat with agent")]
     pub chat: bool,
+    #[arg(long, default_value_t = false, help = "start plain stdin/stdout chat for editor integrations")]
+    pub stdio: bool,
     #[arg(alias = "hs", long, help = "show chat history")]
     pub history: bool,
     #[arg(alias = "ss", long, help = "show session history")]
@@ -27,6 +29,7 @@ impl Default for AgentArgs {
             id: Some(DEFAULT_AGENT_ID.to_string()),
             user: Some(DEFAULT_USER_ID.to_string()),
             chat: true,
+            stdio: false,
             history: false,
             session_history: false,
             new_session: false,
