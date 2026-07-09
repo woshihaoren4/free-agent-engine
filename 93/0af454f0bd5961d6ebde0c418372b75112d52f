@@ -1,0 +1,67 @@
+app/fae-vscode-plugin/src/extension.ts
+  h_d86fd13eb2c37d 12-17,20-21,23,25,32,35-36,38,41,47,64-69,71-74,76-77,80-81,83-84,86-91,97,105-106,185-192
+app/fae-vscode-plugin/package.json
+  s_026641a2b716c0::t_de6bec1ab1501b 15 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a4f471edbc1b957acd8f586","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":15}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "930af454f0bd5961d6ebde0c418372b75112d52f",
+  "prompts": {},
+  "humans": {
+    "h_d86fd13eb2c37d": {
+      "author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "sessions": {
+    "s_026641a2b716c0": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a4f0b02030380d6e96bad11",
+        "model": "gpt-5.5__dev"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {
+    "app/fae-vscode-plugin/package.json": [
+      {
+        "hash": "s_026641a2b716c0::t_de6bec1ab1501b",
+        "line_ranges": [
+          {
+            "Single": 15
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a4f471edbc1b957acd8f586",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 15
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "s_026641a2b716c0": {
+      "tool": "trae",
+      "conversation_id": "6a4f0b02030380d6e96bad11",
+      "session_id": "6a4f0b02030380d6e96bad11",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_026641a2b716c0::t_de6bec1ab1501b": {
+      "tool": "trae",
+      "conversation_id": "6a4f0b02030380d6e96bad11",
+      "session_id": "6a4f0b02030380d6e96bad11",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
