@@ -62,9 +62,15 @@ impl Agents {
             if input == "/exit" {
                 break;
             }
-
+            let mut title = String::new();
             let mut stream = Pin::from(session.call_stream(Record::from_user_input(input)).await?);
             while let Some(record) = stream.next().await {
+                let t = record.title();
+                if !t.is_empty() && t != "Waiting" && title != t {
+                    title = t;
+                    println!("\n---> {} <---", title);
+                    stdout.flush()?;
+                }
                 let content = record.content();
                 if !content.is_empty() {
                     print!("{}", content);
@@ -74,7 +80,6 @@ impl Agents {
             println!();
             stdout.flush()?;
         }
-
         Ok(())
     }
     pub async fn agents_list(&self) {

@@ -231,11 +231,6 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
       white-space: nowrap;
     }
 
-    .actions {
-      display: flex;
-      gap: 4px;
-    }
-
     button {
       border: 0;
       border-radius: 5px;
@@ -300,6 +295,46 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
       background: color-mix(in srgb, var(--vscode-button-background) 18%, transparent);
     }
 
+    .message.agent {
+      margin-bottom: 8px;
+      padding: 2px 0 8px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }
+
+    .message.agent .role {
+      display: none;
+    }
+
+    .message.agent.collapsible .body {
+      line-height: 1.45;
+    }
+
+    .message.agent.collapsible.collapsed .body {
+      max-height: calc(var(--vscode-font-size) * 1.45 * 3);
+      overflow: hidden;
+    }
+
+    .message.agent .collapse-toggle {
+      display: none;
+      margin-top: 6px;
+      padding: 0;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      font-size: 11px;
+    }
+
+    .message.agent .collapse-toggle:hover {
+      color: var(--vscode-textLink-activeForeground);
+      background: transparent;
+      text-decoration: underline;
+    }
+
+    .message.agent.collapsible.has-overflow .collapse-toggle {
+      display: inline-flex;
+    }
+
     .message.error {
       border-color: var(--vscode-inputValidation-errorBorder);
       background: var(--vscode-inputValidation-errorBackground);
@@ -312,6 +347,33 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.04em;
+    }
+
+    .agent-divider {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 16px 0 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .agent-divider::before,
+    .agent-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--vscode-editorWidget-border);
+    }
+
+    .agent-divider span {
+      max-width: 70%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .status {
@@ -373,11 +435,6 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
         <strong>FAE Chat</strong>
         <span id="config">Loading configuration...</span>
       </div>
-      <div class="actions">
-        <button class="icon-button" id="new" title="New Conversation"><span class="codicon codicon-add"></span></button>
-        <button class="icon-button" id="terminal" title="Open in Terminal"><span class="codicon codicon-terminal"></span></button>
-        <button class="icon-button" id="settings" title="Settings"><span class="codicon codicon-settings-gear"></span></button>
-      </div>
     </header>
     <section class="messages" id="messages">
       <div class="empty" id="empty">
@@ -405,10 +462,8 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
     const prompt = document.getElementById('prompt');
     const form = document.getElementById('form');
     let currentAgentMessage;
-
-    document.getElementById('new').addEventListener('click', () => vscode.postMessage({ type: 'newConversation' }));
-    document.getElementById('settings').addEventListener('click', () => vscode.postMessage({ type: 'openSettings' }));
-    document.getElementById('terminal').addEventListener('click', () => vscode.postMessage({ type: 'openTerminal' }));
+    let justStartedAgentSection = false;
+    let currentAgentSectionTitle = '';
 
     form.addEventListener('submit', event => {
       event.preventDefault();
@@ -428,12 +483,16 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
         config.textContent = message.workspace + '/' + message.agentId + ' · ' + message.cwd;
       } else if (message.type === 'userMessage') {
         currentAgentMessage = undefined;
+        justStartedAgentSection = false;
+        currentAgentSectionTitle = '';
         addMessage('You', message.text, 'user');
       } else if (message.type === 'agentChunk') {
         appendAgentChunk(message.text);
         status.textContent = '';
       } else if (message.type === 'agentError') {
         currentAgentMessage = undefined;
+        justStartedAgentSection = false;
+        currentAgentSectionTitle = '';
         addMessage('Error', message.text, 'error');
         status.textContent = '';
       } else if (message.type === 'status') {
@@ -457,12 +516,56 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
 
     function appendAgentChunk(text) {
       hideEmpty();
+      const markerPattern = /--->\\s*([^<\\n]+?)\\s*<---/g;
+      let cursor = 0;
+      let match;
+
+      while ((match = markerPattern.exec(text)) !== null) {
+        appendAgentText(text.slice(cursor, match.index));
+        startAgentSection(match[1].trim());
+        cursor = markerPattern.lastIndex;
+      }
+
+      appendAgentText(text.slice(cursor));
+      scrollToBottom();
+    }
+
+    function startAgentSection(title) {
+      const divider = document.createElement('div');
+      divider.className = 'agent-divider';
+      const label = document.createElement('span');
+      label.textContent = title || 'Agent';
+      divider.appendChild(label);
+      messages.appendChild(divider);
+      currentAgentMessage = addMessage('FAE', '', 'agent');
+      currentAgentSectionTitle = title || '';
+      if (!isOutputtingSection(currentAgentSectionTitle)) {
+        makeCollapsible(currentAgentMessage);
+      }
+      justStartedAgentSection = true;
+    }
+
+    function appendAgentText(text) {
+      if (!text) {
+        return;
+      }
+
+      if (justStartedAgentSection) {
+        text = text.replace(/^\\n/, '');
+        justStartedAgentSection = false;
+      }
+
+      if (!text) {
+        return;
+      }
+
       if (!currentAgentMessage) {
         currentAgentMessage = addMessage('FAE', '', 'agent');
       }
+
       const body = currentAgentMessage.querySelector('.body');
-      body.textContent = body.textContent ? body.textContent + '\\n' + text : text;
-      scrollToBottom();
+      body.textContent += text;
+      updateCollapseToggle(currentAgentMessage);
     }
 
     function addMessage(role, text, kind) {
@@ -481,8 +584,47 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
       return article;
     }
 
+    function makeCollapsible(article) {
+      article.classList.add('collapsible', 'collapsed');
+
+      const toggle = document.createElement('button');
+      toggle.className = 'collapse-toggle';
+      toggle.type = 'button';
+      toggle.textContent = '展开';
+      toggle.addEventListener('click', () => {
+        const collapsed = article.classList.toggle('collapsed');
+        toggle.textContent = collapsed ? '展开' : '收起';
+        scrollToBottom();
+      });
+      article.appendChild(toggle);
+      updateCollapseToggle(article);
+    }
+
+    function updateCollapseToggle(article) {
+      if (!article || !article.classList.contains('collapsible')) {
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        const body = article.querySelector('.body');
+        if (!body) {
+          return;
+        }
+
+        const lineHeight = parseFloat(getComputedStyle(body).lineHeight) || 18;
+        const maxCollapsedHeight = lineHeight * 3;
+        article.classList.toggle('has-overflow', body.scrollHeight > maxCollapsedHeight + 1);
+      });
+    }
+
+    function isOutputtingSection(title) {
+      return title.trim().toLowerCase() === 'outputting';
+    }
+
     function resetMessages() {
       currentAgentMessage = undefined;
+      justStartedAgentSection = false;
+      currentAgentSectionTitle = '';
       messages.replaceChildren(empty);
       empty.style.display = 'grid';
       status.textContent = 'Started a new FAE conversation.';
