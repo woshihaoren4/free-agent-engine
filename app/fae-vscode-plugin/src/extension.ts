@@ -9,40 +9,42 @@ type WebviewMessage =
   | { type: 'openTerminal' };
 
 export function activate(context: vscode.ExtensionContext): void {
-  const provider = new FaeChatViewProvider(context.extensionUri);
+  const chat = new FaeChatPanel(context.extensionUri);
+  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.text = '$(comment-discussion) FAE';
+  statusBarItem.tooltip = 'Open FAE Chat';
+  statusBarItem.command = 'fae.openChat';
+  statusBarItem.show();
 
   context.subscriptions.push(
-    provider,
-    vscode.window.registerWebviewViewProvider(FaeChatViewProvider.viewType, provider, {
-      webviewOptions: {
-        retainContextWhenHidden: true
-      }
-    }),
+    chat,
+    statusBarItem,
     vscode.commands.registerCommand('fae.openChat', async () => {
-      await vscode.commands.executeCommand('workbench.view.extension.fae');
+      chat.open();
     }),
-    vscode.commands.registerCommand('fae.newConversation', () => provider.newConversation()),
+    vscode.commands.registerCommand('fae.newConversation', () => chat.newConversation()),
     vscode.commands.registerCommand('fae.openSettings', () => openFaeSettings()),
     vscode.commands.registerCommand('fae.openInTerminal', () => openFaeInTerminal(false))
   );
 }
 
 export function deactivate(): void {
-  // Sessions are owned by the webview provider and disposed through subscriptions.
+  // Sessions are owned by the chat panel and disposed through subscriptions.
 }
 
-class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
-  static readonly viewType = 'fae.chatView';
+class FaeChatPanel implements vscode.Disposable {
+  static readonly viewType = 'fae.chatPanel';
 
-  private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
   private readonly session = new FaeCliSession();
   private disposables: vscode.Disposable[] = [];
+  private panelDisposables: vscode.Disposable[] = [];
   private conversationStarted = false;
 
   constructor(private readonly extensionUri: vscode.Uri) {
     this.disposables.push(
       this.session.onEvent(event => {
-        if (!this.view) {
+        if (!this.panel) {
           return;
         }
 
@@ -59,23 +61,40 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
     );
   }
 
-  resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
+  open(): void {
+    if (this.panel) {
+      this.panel.reveal(vscode.ViewColumn.Beside);
+      this.postConfig();
+      return;
+    }
 
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [this.extensionUri]
-    };
-    webviewView.webview.html = this.getHtml(webviewView.webview);
+    this.panel = vscode.window.createWebviewPanel(
+      FaeChatPanel.viewType,
+      'FAE Chat',
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [this.extensionUri]
+      }
+    );
+    this.panel.webview.html = this.getHtml(this.panel.webview);
 
-    this.disposables.push(
-      webviewView.webview.onDidReceiveMessage((message: WebviewMessage) => {
+    this.panelDisposables.push(
+      this.panel.webview.onDidReceiveMessage((message: WebviewMessage) => {
         void this.handleMessage(message);
+      }),
+      this.panel.onDidDispose(() => {
+        this.panel = undefined;
+        this.conversationStarted = false;
+        this.session.dispose();
+        this.disposePanelDisposables();
       })
     );
   }
 
   newConversation(): void {
+    this.open();
     this.conversationStarted = false;
     this.post({ type: 'reset' });
     this.startSession(true);
@@ -83,6 +102,8 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
 
   dispose(): void {
     this.session.dispose();
+    this.disposePanelDisposables();
+    this.panel?.dispose();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
@@ -161,7 +182,14 @@ class FaeChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposab
   }
 
   private post(message: Record<string, unknown>): void {
-    void this.view?.webview.postMessage(message);
+    void this.panel?.webview.postMessage(message);
+  }
+
+  private disposePanelDisposables(): void {
+    for (const disposable of this.panelDisposables) {
+      disposable.dispose();
+    }
+    this.panelDisposables = [];
   }
 
   private getHtml(webview: vscode.Webview): string {

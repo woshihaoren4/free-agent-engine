@@ -12,7 +12,7 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:fae.chatView",
+    "onStartupFinished",
     "onCommand:fae.openChat",
     "onCommand:fae.newConversation",
     "onCommand:fae.openSettings",
@@ -45,43 +45,6 @@
         "icon": "$(terminal)"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "fae",
-          "title": "FAE",
-          "icon": "resources/fae.svg"
-        }
-      ]
-    },
-    "views": {
-      "fae": [
-        {
-          "id": "fae.chatView",
-          "name": "Chat",
-          "type": "webview"
-        }
-      ]
-    },
-    "menus": {
-      "view/title": [
-        {
-          "command": "fae.newConversation",
-          "when": "view == fae.chatView",
-          "group": "navigation@1"
-        },
-        {
-          "command": "fae.openSettings",
-          "when": "view == fae.chatView",
-          "group": "navigation@2"
-        },
-        {
-          "command": "fae.openInTerminal",
-          "when": "view == fae.chatView",
-          "group": "navigation@3"
-        }
-      ]
-    },
     "configuration": {
       "title": "FAE",
       "properties": {
