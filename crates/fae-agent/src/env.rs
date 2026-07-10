@@ -1,4 +1,4 @@
-use crate::{AgentTaskStatus, AgentTasks, McpToolRequest, SkillHeader, Task, TaskResult, TaskType};
+use crate::{AgentTaskStatus, AgentTasks, McpToolRequest, SkillHeader, Task, TaskResult, TaskReq, TkTy};
 use serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ pub enum ThingSelect {
     /// 环境变量
     Env(String),
     /// 任务执行器：任务类型,渠道
-    Executor(TaskType, String),
+    Executor(TkTy, String),
     /// plan 执行计划，PlanID,AgentID
     Plan(String, String),
     /// tools 工具: 渠道，工具名称

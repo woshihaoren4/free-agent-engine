@@ -2,10 +2,7 @@ use fae_agent::error::{
     TASK_ERROR_CODE_PLAN_ABORT, TASK_ERROR_CODE_PLAN_ABORT_EXTERNAL,
     TASK_ERROR_CODE_PLAN_ABORT_USER,
 };
-use fae_agent::{
-    EndPlanTaskArgs, Env, EnvEvent, Environment, GLOBAL_KEY_AGENT_ID, Planning, PlanningResult,
-    Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect,
-};
+use fae_agent::{EndPlanTaskArgs, Env, EnvEvent, Environment, GLOBAL_KEY_AGENT_ID, Planning, PlanningResult, Select, Task, TaskResult, TaskReq, Thing, ThingItem, ThingSelect, TkTy, PlanTaskArgs};
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -330,41 +327,40 @@ impl Environment for PlanRuntime {
             .err();
         }
         //先过滤检查
-        let mut plans = vec![];
         let mut ptasks = vec![];
-        for t in tasks {
-            if t.r#type == TaskType::Plan
+        let mut ps = vec![];
+        for mut t in tasks {
+            if t.get_type() == TkTy::Plan
                 && (t.get_exec_channel().is_empty()
                     || t.get_exec_channel() == DEFAULT_PLAN_RUNTIME_EXEC_CHANNEL)
             {
-                plans.push(t);
+                if let TaskReq::Plan(plan) = t.remove_req() {
+                    match plan {
+                        PlanTaskArgs::Planning(mut p) => {
+                            let plan_result = p.init().await?;
+                            ps.push((
+                                PlanCtl {
+                                    plan:p,
+                                    task: t,
+                                    notify: None,
+                                    result: None,
+                                },
+                                plan_result,
+                            ));
+                        }
+                        PlanTaskArgs::Abort(abort_plan) => {
+                            self.abort_plan_by_id(abort_plan.plan_id, abort_plan.agent_id, abort_plan.reason)
+                                .await?;
+                        }
+                    }
+                }else{
+                    return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", t).err();
+                }
             } else {
                 ptasks.push(t);
             }
         }
-        let mut ps = vec![];
-        for mut task in plans {
-            let mut plan = if let Some(s) = task.into_inner::<Box<dyn Planning + Send + 'static>>()
-            {
-                s
-            } else if let Some(abort_plan) = task.into_inner::<EndPlanTaskArgs>() {
-                self.abort_plan_by_id(abort_plan.plan_id, abort_plan.agent_id, abort_plan.reason)
-                    .await?;
-                continue;
-            } else {
-                return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", task).err();
-            };
-            let plan_result = plan.init().await?;
-            ps.push((
-                PlanCtl {
-                    plan,
-                    task,
-                    notify: None,
-                    result: None,
-                },
-                plan_result,
-            ));
-        }
+
         //先执行父任务
         if !ptasks.is_empty() {
             if let Some(ref s) = self.parent {
@@ -386,7 +382,8 @@ impl Environment for PlanRuntime {
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
-        if task.r#type != TaskType::Plan {
+        if task.get_type() != TkTy::Plan || (!task.get_exec_channel().is_empty()
+            && task.get_exec_channel() != DEFAULT_PLAN_RUNTIME_EXEC_CHANNEL){
             if let Some(ref p) = self.parent {
                 return p.execute(task).await;
             } else {
@@ -397,15 +394,18 @@ impl Environment for PlanRuntime {
                 .err();
             }
         }
-        let mut plan = if let Some(s) = task.into_inner::<Box<dyn Planning + Send + 'static>>() {
-            s
-        } else if let Some(abort_plan) = task.into_inner::<EndPlanTaskArgs>() {
-            self.abort_plan_by_id(abort_plan.plan_id, abort_plan.agent_id, abort_plan.reason)
-                .await?;
-            return Ok(TaskResult::success(task.id, task.agent_id));
-        } else {
-            return anyhow::anyhow!("[PlanRuntime:spawn] this is not a plan: {:?}", task).err();
+        let mut plan = match task.remove_req() {
+            TaskReq::Plan(plan) => match plan {
+                PlanTaskArgs::Planning(plan) => plan,
+                PlanTaskArgs::Abort(abort_plan) => {
+                    self.abort_plan_by_id(abort_plan.plan_id, abort_plan.agent_id, abort_plan.reason)
+                        .await?;
+                    return Ok(TaskResult::success(task.id, task.agent_id));
+                }
+            },
+            _ => return anyhow::anyhow!("[PlanRuntime:execute] this is not a plan: {:?}", task).err(),
         };
+
         let pid = Self::generate_plan_sub_id(task.id.as_str(), task.agent_id.as_str());
 
         let tasks = match plan.init().await? {

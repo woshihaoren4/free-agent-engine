@@ -11,13 +11,17 @@ pub struct AgentArgs {
     pub user: Option<String>,
     #[arg(short, long, default_value_t = false, help = "start chat with agent")]
     pub chat: bool,
-    #[arg(long, default_value_t = false, help = "start plain stdin/stdout chat for editor integrations")]
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "start plain stdin/stdout chat for editor integrations"
+    )]
     pub stdio: bool,
     #[arg(alias = "hs", long, help = "show chat history")]
     pub history: bool,
     #[arg(alias = "ss", long, help = "show session history")]
     pub session_history: bool,
-    #[arg(short, long,help="session id, default is main_session_id_1")]
+    #[arg(short, long, help = "session id, default is main_session_id_1")]
     pub session_id: Option<String>,
     #[arg(alias = "new", long, help = "create new session")]
     pub new_session: bool,

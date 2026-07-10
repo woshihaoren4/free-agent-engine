@@ -1,4 +1,2 @@
 #[async_trait::async_trait]
-pub trait Workflow {
-
-}
+pub trait Workflow {}

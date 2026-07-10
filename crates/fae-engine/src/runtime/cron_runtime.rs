@@ -3,10 +3,7 @@ use crate::tools::{ScheduledExecution, ScheduledTask};
 use crate::{IdenInfo, Tool};
 use chrono::{DateTime, Local};
 use cron::Schedule;
-use fae_agent::{
-    Env, EnvEvent, Environment, Select, Task, TaskResult, TaskType, Thing, ThingItem, ThingSelect,
-    TimedTask, ToolRequest, ToolResponse,
-};
+use fae_agent::{Env, EnvEvent, Environment, Select, Task, TaskResult, TaskReq, Thing, ThingItem, ThingSelect, TimedTask, ToolRequest, ToolResponse, TkTy};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::str::FromStr;
@@ -91,7 +88,7 @@ impl CronRuntime {
         }
     }
     pub fn is_scheduled_tool_task(task: &Task) -> bool {
-        task.get_type() == &TaskType::Tool
+        task.get_type() == TkTy::Tool
             && task.exec_channel == "default"
             && task.deref_args::<ToolRequest, bool>(|x| {
                 if let Some(r) = x {
@@ -217,7 +214,7 @@ impl Environment for CronRuntime {
 
     async fn spawn(&self, tasks: Vec<Task>) -> anyhow::Result<()> {
         let (ts, ptasks): (Vec<_>, Vec<_>) = tasks.into_iter().partition(|t| {
-            t.get_type() == &TaskType::Tool
+            t.get_type() == TkTy::Tool
                 && t.exec_channel == "default"
                 && Self::is_scheduled_tool_task(t)
         });
@@ -241,7 +238,7 @@ impl Environment for CronRuntime {
     }
 
     async fn execute(&self, task: Task) -> anyhow::Result<TaskResult> {
-        if task.get_type() == &TaskType::Tool
+        if task.get_type() == TkTy::Tool
             && task.exec_channel == "default"
             && Self::is_scheduled_tool_task(&task)
         {

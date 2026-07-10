@@ -1,8 +1,12 @@
-use crate::{Context, Env};
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::{Context, EndPlanTaskArgs, Env, Planning, ToolRequest};
+use async_openai::types::chat::CreateChatCompletionRequest;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
+use std::any::TypeId;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::hash::{Hash, Hasher};
 
 pub const GLOBAL_KEY_AGENT_ID: &str = "AGENT_ID";
 pub const GLOBAL_KEY_PLAN_ID: &str = "PLAN_ID";
@@ -11,10 +15,37 @@ pub const GLOBAL_KEY_WORKSPACE: &str = "WORKSPACE";
 pub const GLOBAL_KEY_PROJECT: &str = "PROJECT";
 pub const GLOBAL_KEY_PROJECT_DIR: &str = "PROJECT_DIR";
 
-/// 任务类型，表示智能体需要执行的任务
-#[derive(Default, Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskType {
+pub type RawTaskArgs = Box<dyn Any + Send + Sync + 'static>;
+
+#[derive(Debug)]
+pub enum PlanTaskArgs {
+    Planning(Box<dyn Planning + Send + 'static>),
+    Abort(EndPlanTaskArgs),
+}
+
+impl From<Box<dyn Planning + Send + 'static>> for PlanTaskArgs {
+    fn from(value: Box<dyn Planning + Send + 'static>) -> Self {
+        Self::Planning(value)
+    }
+}
+
+impl From<EndPlanTaskArgs> for PlanTaskArgs {
+    fn from(value: EndPlanTaskArgs) -> Self {
+        Self::Abort(value)
+    }
+}
+
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AgentRequest{
+    pub agent_id: String,
+    pub input: String,
+    pub session_id: String,
+    pub user_id: String,
+}
+
+#[derive(Default, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, Clone)]
+pub enum TkTy {
     /// 无任务
     #[default]
     None,
@@ -41,88 +72,157 @@ pub enum TaskType {
     /// 任意类型
     Any(String),
 }
-impl<'de> Deserialize<'de> for TaskType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(TaskType::from(s.as_str()))
-    }
-}
-impl From<&str> for TaskType {
-    fn from(s: &str) -> Self {
-        match s {
-            "none" => TaskType::None,
-            "model" | "module" => TaskType::Model,
-            "plan" => TaskType::Plan,
-            "tools" => TaskType::Tool,
-            "agent" => TaskType::Agent,
-            "skill" => TaskType::Skill,
-            "mcp" => TaskType::Mcp,
-            "custom" => TaskType::Custom,
-            "output" => TaskType::Output,
-            "error" => TaskType::Error,
-            "over" => TaskType::Over,
-            other => TaskType::Any(other.to_string()),
-        }
-    }
-}
-impl Display for TaskType {
+impl Display for TkTy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            TaskType::None => "none",
-            TaskType::Model => "model",
-            TaskType::Plan => "plan",
-            TaskType::Tool => "tools",
-            TaskType::Agent => "agent",
-            TaskType::Skill => "skill",
-            TaskType::Mcp => "mcp",
-            TaskType::Custom => "custom",
-            TaskType::Output => "output",
-            TaskType::Error => "error",
-            TaskType::Over => "over",
-            TaskType::Any(s) => s.as_str(),
+            TkTy::None => "none",
+            TkTy::Model => "model",
+            TkTy::Plan => "plan",
+            TkTy::Tool => "tools",
+            TkTy::Agent => "agent",
+            TkTy::Skill => "skill",
+            TkTy::Mcp => "mcp",
+            TkTy::Custom => "custom",
+            TkTy::Output => "output",
+            TkTy::Error => "error",
+            TkTy::Over => "over",
+            TkTy::Any(s) => s    .as_str(),
         };
         write!(f, "{}", s)
     }
 }
+/// 任务类型，表示智能体需要执行的任务
+#[derive(Debug)]
+pub enum TaskReq {
+    /// 无任务
+    None,
+    /// 执行模型
+    Model(CreateChatCompletionRequest),
+    /// 执行一个计划
+    Plan(PlanTaskArgs),
+    /// 执行工具
+    Tool(ToolRequest),
+    /// 执行智能体
+    Agent(AgentRequest),
+    /// 执行技能
+    Skill,
+    /// 执行MCP服务器
+    Mcp(ToolRequest),
+    /// 执行自定义任务
+    Custom(RawTaskArgs),
+    /// 输出结果
+    Output,
+    /// 错误信息
+    Error,
+    /// 任务完成
+    Over,
+    /// 任意类型
+    Any(String, Option<RawTaskArgs>),
+}
+impl Default for TaskReq {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TaskReq {
+    pub fn model(args: impl Into<CreateChatCompletionRequest>) -> Self {
+        Self::Model(args.into())
+    }
+    pub fn plan(args: impl Into<PlanTaskArgs>) -> Self {
+        Self::Plan(args.into())
+    }
+    pub fn tool(args: ToolRequest) -> Self {
+        Self::Tool(args)
+    }
+    pub fn mcp(args: ToolRequest) -> Self {
+        Self::Mcp(args)
+    }
+    fn kind(&self) -> TkTy {
+        match self {
+            TaskReq::None => TkTy::None,
+            TaskReq::Model(_) => TkTy::Model,
+            TaskReq::Plan(_) => TkTy::Plan,
+            TaskReq::Tool(_) => TkTy::Tool,
+            TaskReq::Agent(_) => TkTy::Agent,
+            TaskReq::Skill => TkTy::Skill,
+            TaskReq::Mcp(_) => TkTy::Mcp,
+            TaskReq::Custom(_) => TkTy::Custom,
+            TaskReq::Output => TkTy::Output,
+            TaskReq::Error => TkTy::Error,
+            TaskReq::Over => TkTy::Over,
+            TaskReq::Any(s, _) => TkTy::Any(s.into()),
+        }
+    }
+}
+impl PartialEq for TaskReq {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TaskReq::Any(a, _), TaskReq::Any(b, _)) => a == b,
+            _ => self.kind() == other.kind(),
+        }
+    }
+}
+impl Eq for TaskReq {}
+impl PartialOrd for TaskReq {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TaskReq {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (TaskReq::Any(a, _), TaskReq::Any(b, _)) => a.cmp(b),
+            _ => self.kind().cmp(&other.kind()),
+        }
+    }
+}
+impl Hash for TaskReq {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.kind().hash(state);
+        if let TaskReq::Any(s, _) = self {
+            s.hash(state);
+        }
+    }
+}
+
+
 
 /// 任务类型，表示智能体需要执行的任务
 #[derive(Debug)]
 pub struct Task {
     pub id: String,
     pub agent_id: String,
-    pub r#type: TaskType,
+    pub req: TaskReq,
     pub exec_channel: String,
     pub user_id: String,
     pub ctx: Context,
-    pub args: Option<Box<dyn Any + Send + Sync + 'static>>,
+    pub ext: Option<Box<dyn Any + Sync + Send + 'static>>,
 }
 impl Task {
     pub fn none() -> Self {
-        Self::new(Context::new(Env::none()), "", "", TaskType::None)
+        Self::new(Context::new(Env::none()), "", "", TaskReq::None)
     }
     pub fn new<I: Into<String>, A: Into<String>>(
         ctx: Context,
         id: I,
         agent_id: A,
-        r#type: TaskType,
+        req: TaskReq,
     ) -> Self {
         let id = id.into();
         let agent_id = agent_id.into();
         Self {
             id,
             agent_id,
-            r#type,
+            req,
             ctx,
-            args: None,
             user_id: "".into(),
             exec_channel: "default".into(),
+            ext: None,
         }
     }
     pub fn with_content(ctx: Context) -> Self {
-        Self::new(ctx, wd_tools::uuid::v4(), "", TaskType::None)
+        Self::new(ctx, wd_tools::uuid::v4(), "", TaskReq::None)
     }
     pub fn set_id<T: Into<String>>(mut self, id: T) -> Self {
         self.id = id.into();
@@ -137,12 +237,15 @@ impl Task {
     pub fn get_exec_channel(&self) -> &str {
         self.exec_channel.as_str()
     }
-    pub fn set_type<T: Into<TaskType>>(mut self, t: T) -> Self {
-        self.r#type = t.into();
+    pub fn set_type<T: Into<TaskReq>>(mut self, t: T) -> Self {
+        self.req = t.into();
         self
     }
-    pub fn get_type(&self) -> &TaskType {
-        &self.r#type
+    pub fn get_type(&self) -> TkTy {
+        self.req.kind()
+    }
+    pub fn remove_req(&mut self)->TaskReq {
+        std::mem::replace(&mut self.req, TaskReq::None)
     }
     pub fn set_exec_channel<T: Into<String>>(mut self, t: T) -> Self {
         self.exec_channel = t.into();
@@ -180,28 +283,22 @@ impl Task {
         self.ctx.get(key)
     }
     pub fn set_args_raw(mut self, args: Box<dyn Any + Send + Sync + 'static>) -> Self {
-        self.args = Some(args);
+        self.ext = Some(args);self
+    }
+    pub fn set_ext<T: Any + Send + Sync + 'static>(mut self, ext: T) -> Self {
+        self.ext = Some(Box::new(ext));
         self
     }
-    pub fn set_args<T: Any + Send + Sync + 'static>(self, args: T) -> Self {
-        self.set_args_raw(Box::new(args))
-    }
     pub fn assert<T: Any>(&self) -> bool {
-        if let Some(ref args) = self.args {
-            args.downcast_ref::<T>().is_some()
-        } else {
-            false
-        }
+        self.ext
+            .as_ref()
+            .map(|args| args.downcast_ref::<T>().is_some())
+            .unwrap_or(false)
     }
-    pub fn into_inner<T: Any>(&mut self) -> Option<T> {
-        if let Some(args) = self.args.take() {
-            match args.downcast::<T>() {
-                Ok(t) => Some(*t),
-                Err(e) => {
-                    self.args = Some(e);
-                    None
-                }
-            }
+    pub fn into_inner<T: Any + Send + Sync + 'static>(&mut self) -> Option<T> {
+        if self.assert::<T>() {
+            let t = self.ext.take().unwrap().downcast::<T>().unwrap();
+            Some(*t)
         } else {
             None
         }
@@ -210,20 +307,18 @@ impl Task {
         &mut self,
         handle: impl FnOnce(Option<&mut T>) -> Out,
     ) -> Out {
-        if let Some(ref mut args) = self.args {
-            let opt = (**args).downcast_mut::<T>();
-            handle(opt)
-        } else {
-            handle(None)
-        }
+        let opt = self
+            .ext
+            .as_mut()
+            .and_then(|args| args.downcast_mut::<T>());
+        handle(opt)
     }
     pub fn deref_args<T: Any, Out>(&self, handle: impl FnOnce(Option<&T>) -> Out) -> Out {
-        if let Some(ref args) = self.args {
-            let opt = (**args).downcast_ref::<T>();
-            handle(opt)
-        } else {
-            handle(None)
-        }
+        let opt = self
+            .ext
+            .as_ref()
+            .and_then(|args| args.downcast_ref::<T>());
+        handle(opt)
     }
 }
 

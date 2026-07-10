@@ -1,4 +1,4 @@
-use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, TaskType, ThingSelect};
+use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, TkTy, ThingSelect};
 use fae_engine::AgentsEngine;
 
 #[tokio::main]
@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
         .get_env()
         .query(
             ThingSelect::Executor(
-                TaskType::Model,
+                TkTy::Model,
                 EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL.into(),
             )
             .into(),

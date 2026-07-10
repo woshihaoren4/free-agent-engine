@@ -25,7 +25,8 @@ impl Agents {
         } else {
             args.session_id
         };
-        let mut ui = crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string(), session_id);
+        let mut ui =
+            crate::chat_ui::ChatUi::new(self.ws.clone(), agent_name.to_string(), session_id);
         if let Err(e) = ui.run().await {
             eprintln!("UI error: {:?}", e);
         }
@@ -143,7 +144,7 @@ impl Agents {
             }
         } else if args.chat {
             this.chat(&agent, args).await;
-        } else {    
+        } else {
             this.agents_list().await;
         }
         this.exit().await;

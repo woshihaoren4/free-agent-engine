@@ -7,15 +7,15 @@ use crate::{
     AgentRuntime, CronRuntime, McpExecutor, ModelOpenAIApiExecutor, SingleAgentCtlFromFile,
     SkillsExecutor, ToolExecutor, ToolSetImplMap, WorkspaceBuilder, WorkspaceRuntime,
 };
-use fae_agent::{Environment, TaskType};
+use fae_agent::{Environment, TkTy};
 
 impl AgentsEngine {
     pub async fn default() -> Self {
         let mut engine = AgentsEngine::new(
             ExecRuntime::new()
-                .register_executor(TaskType::Model, ModelOpenAIApiExecutor::default())
+                .register_executor(TkTy::Model, ModelOpenAIApiExecutor::default())
                 .register_executor_ext(
-                    TaskType::Tool,
+                    TkTy::Tool,
                     ToolExecutor::from(
                         ToolSetImplMap::new()
                             .add_tool(crate::tools::ExecuteCommand::default())
@@ -29,8 +29,8 @@ impl AgentsEngine {
                             .add_tool(crate::tools::ArkWebSearch::default()),
                     ),
                 )
-                .register_executor(TaskType::Skill, SkillsExecutor::default())
-                .register_executor(TaskType::Mcp, McpExecutor::default())
+                .register_executor(TkTy::Skill, SkillsExecutor::default())
+                .register_executor(TkTy::Mcp, McpExecutor::default())
                 .into_self(),
         )
         .assemble_runtime(CronRuntime::new())

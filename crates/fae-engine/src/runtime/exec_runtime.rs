@@ -1,7 +1,4 @@
-use fae_agent::{
-    Env, EnvEvent, Environment, Executor, Select, Task, TaskExecutorExt, TaskExecutorExtImpl,
-    TaskResult, TaskType, Thing, ThingItem, ThingSelect,
-};
+use fae_agent::{Env, EnvEvent, Environment, Executor, Select, Task, TaskExecutorExt, TaskExecutorExtImpl, TaskResult, TaskReq, Thing, ThingItem, ThingSelect, TkTy};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -28,12 +25,12 @@ impl ExecRuntime {
             executors: HashMap::new(),
         }
     }
-    pub fn generate_executor_key(&self, task_type: &TaskType, channel: &str) -> String {
+    pub fn generate_executor_key(&self, task_type: &TkTy, channel: &str) -> String {
         format!("{}-{}", task_type, channel)
     }
     pub fn raw_register_executor(
         &mut self,
-        task_type: TaskType,
+        task_type: TkTy,
         executor: Arc<dyn Executor + Send + 'static>,
     ) {
         let channel = executor.channel();
@@ -42,20 +39,19 @@ impl ExecRuntime {
     }
     pub fn register_executor<T: Executor + Send + 'static>(
         &mut self,
-        task_type: TaskType,
+        task_type: TkTy,
         executor: T,
     ) -> &mut Self {
         self.raw_register_executor(task_type, Arc::new(executor));
         self
     }
-    pub fn register_executor_ext<T, In, Out>(
+    pub fn register_executor_ext<T, Out>(
         &mut self,
-        task_type: TaskType,
+        task_type: TkTy,
         task_exec_ext: T,
     ) -> &mut Self
     where
-        T: TaskExecutorExt<In, Out> + Send + 'static,
-        In: Debug + Send + Sync + 'static,
+        T: TaskExecutorExt<Out> + Send + 'static,
         Out: Debug + Any + Send + Sync + 'static,
     {
         let executor = TaskExecutorExtImpl::new(task_exec_ext);
@@ -63,11 +59,11 @@ impl ExecRuntime {
     }
     pub fn get_executor(
         &self,
-        task_type: &TaskType,
+        task_type: TkTy,
         channel: &str,
     ) -> Option<Arc<dyn Executor + Send>> {
         self.executors
-            .get(&self.generate_executor_key(task_type, channel))
+            .get(&self.generate_executor_key(&task_type, channel))
             .cloned()
     }
     pub async fn exec(executor: Arc<dyn Executor + Send>, task: Task) -> TaskResult {
@@ -137,7 +133,7 @@ impl Environment for ExecRuntime {
         if let ThingSelect::Executor(ref task_type, ref channel) = select.select {
             if let Some(e) = self
                 .executors
-                .get(&self.generate_executor_key(&task_type, channel))
+                .get(&self.generate_executor_key(task_type, channel))
             {
                 return Ok(vec![
                     Thing::new(self.id().to_string())
@@ -150,7 +146,7 @@ impl Environment for ExecRuntime {
         if let ThingSelect::Tool(ref channel, ref _tool_name) = select.select {
             if let Some(e) = self
                 .executors
-                .get(&self.generate_executor_key(&TaskType::Tool, channel))
+                .get(&self.generate_executor_key(&TkTy::Tool, channel))
             {
                 return e.query(select).await;
             }
@@ -159,7 +155,7 @@ impl Environment for ExecRuntime {
         if let ThingSelect::Skill(ref channel, ref _name, ref _dir) = select.select {
             if let Some(e) = self
                 .executors
-                .get(&self.generate_executor_key(&TaskType::Skill, channel))
+                .get(&self.generate_executor_key(&TkTy::Skill, channel))
             {
                 return e.query(select).await;
             }
@@ -168,7 +164,7 @@ impl Environment for ExecRuntime {
         if let ThingSelect::Mcp(ref channel, ref _name) = select.select {
             if let Some(e) = self
                 .executors
-                .get(&self.generate_executor_key(&TaskType::Mcp, channel))
+                .get(&self.generate_executor_key(&TkTy::Mcp, channel))
             {
                 return e.query(select).await;
             }
@@ -192,7 +188,7 @@ impl Environment for ExecRuntime {
             if list.is_empty() {
                 return anyhow::anyhow!(
                     "[TaskRuntime:spawn]task executor not found: {:?}",
-                    i.r#type
+                    i.req
                 )
                 .err();
             }
@@ -219,7 +215,7 @@ impl Environment for ExecRuntime {
                 //如果父环境也没有，就报错
                 return anyhow::anyhow!(
                     "[TaskRuntime:spawn] task executor not found: {:?}",
-                    task.r#type
+                    task.req
                 )
                 .err();
             }
@@ -239,7 +235,7 @@ impl Environment for ExecRuntime {
             //如果父环境也没有，就报错
             return anyhow::anyhow!(
                 "[TaskRuntime:execute] task executor not found: {:?}",
-                task.r#type
+                task.req
             )
             .err();
         }

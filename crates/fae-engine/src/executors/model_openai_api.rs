@@ -3,7 +3,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
 };
-use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, Executor, Task, TaskResult};
+use fae_agent::{EXECUTOR_OPENAI_COMPATIBLE_API_CHANNEL, Executor, Task, TaskResult, TaskReq};
 use wd_tools::PFErr;
 
 pub const DEFAULT_OPENAI_MODEL_DESC: &str = "OpenAI API Executor";
@@ -77,21 +77,32 @@ impl Executor for ModelOpenAIApiExecutor {
     }
 
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
+        if let TaskReq::Model(req) = task.remove_req() {
+            let result = TaskResult::success(task.id, task.agent_id);
+            return if req.stream.map_or_else(|| false, |s| s) {
+                // 流式请求
+                let stream = self.chat_stream(req).await?;
+                Ok(result.set_data(stream))
+            } else {
+                let resp = self.chat(req).await?;
+                Ok(result.set_data(resp))
+            }
+        }
         if task.assert::<ModelOpenAIApiExecutorTaskConfig<CreateChatCompletionRequest>>() {
-            if let Some(req) =
+            return if let Some(req) =
                 task.into_inner::<ModelOpenAIApiExecutorTaskConfig<CreateChatCompletionRequest>>()
             {
                 let result = TaskResult::success(task.id, task.agent_id);
-                return if req.streaming {
+                if req.streaming {
                     let stream = self.chat_stream(req.req).await?;
                     Ok(result.set_data(stream))
                 } else {
                     let resp = self.chat(req.req).await?;
                     Ok(result.set_data(resp))
-                };
+                }
             } else {
-                return anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!")
-                    .err();
+                anyhow::anyhow!("[ModelOpenAIApiExecutor:execute] parse args failed!")
+                    .err()
             }
         } else if task.assert::<CreateChatCompletionRequest>() {
             if let Some(req) = task.into_inner::<CreateChatCompletionRequest>() {
@@ -132,7 +143,7 @@ mod tests {
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     };
-    use fae_agent::{Context, Env, TaskType};
+    use fae_agent::{Context, Env, TaskReq};
     use tokio_stream::StreamExt;
 
     #[tokio::test]
@@ -154,8 +165,12 @@ mod tests {
             .build()
             .expect("build request failed!");
 
-        let task =
-            Task::new(Context::new(Env::none()), "1", "claw", TaskType::Model).set_args(request);
+        let task = Task::new(
+            Context::new(Env::none()),
+            "1",
+            "claw",
+            TaskReq::model(request),
+        );
 
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
@@ -190,9 +205,13 @@ mod tests {
             ])
             .build()
             .expect("build request failed!");
-        let request = ModelOpenAIApiExecutor::build_stream_chat_request(request);
-        let task =
-            Task::new(Context::new(Env::none()), "1", "claw", TaskType::Model).set_args(request);
+        // let request = ModelOpenAIApiExecutor::build_stream_chat_request(request);
+        let task = Task::new(
+            Context::new(Env::none()),
+            "1",
+            "claw",
+            TaskReq::Model(request),
+        );
         let mut result = executor.execute(task).await.expect("execute failed!");
         let mut answer = result
             .into_inner::<ChatCompletionResponseStream>()

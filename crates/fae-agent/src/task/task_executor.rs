@@ -1,5 +1,5 @@
-use crate::{Context, Select, Task, TaskResult, Thing};
-use std::any::Any;
+use crate::{Context, Select, Task, TaskReq, TaskResult, Thing};
+use std::any::{Any};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
@@ -16,7 +16,7 @@ pub trait Executor: Debug + Sync {
 }
 
 #[async_trait::async_trait]
-pub trait TaskExecutorExt<In, Out>: Debug + Sync {
+pub trait TaskExecutorExt<Out>: Debug + Sync {
     fn desc(&self) -> String;
     fn channel(&self) -> String {
         "default".to_string()
@@ -27,7 +27,8 @@ pub trait TaskExecutorExt<In, Out>: Debug + Sync {
         task_id: String,
         agent_id: String,
         user_id: String,
-        input: In,
+        input: TaskReq,
+        ext: Option<Box<dyn Any + Send + Sync + 'static>>,
     ) -> anyhow::Result<Out>;
     async fn query(&self, _select: Select) -> anyhow::Result<Vec<Thing>> {
         Ok(vec![])
@@ -35,27 +36,24 @@ pub trait TaskExecutorExt<In, Out>: Debug + Sync {
 }
 
 #[derive(Debug)]
-pub struct TaskExecutorExtImpl<T, In, Out> {
+pub struct TaskExecutorExtImpl<T,  Out> {
     executor: T,
-    _in: PhantomData<In>,
     _out: PhantomData<Out>,
 }
 
-impl<T, In, Out> TaskExecutorExtImpl<T, In, Out> {
+impl<T,  Out> TaskExecutorExtImpl<T, Out> {
     pub fn new(executor: T) -> Self {
         Self {
             executor,
-            _in: PhantomData,
             _out: PhantomData,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<T, In, Out> Executor for TaskExecutorExtImpl<T, In, Out>
+impl<T, Out> Executor for TaskExecutorExtImpl<T, Out>
 where
-    T: TaskExecutorExt<In, Out>,
-    In: Debug + Send + Sync + 'static,
+    T: TaskExecutorExt<Out>,
     Out: Debug + Any + Send + Sync,
 {
     fn desc(&self) -> String {
@@ -66,14 +64,6 @@ where
         self.executor.channel()
     }
     async fn execute(&self, mut task: Task) -> anyhow::Result<TaskResult> {
-        let input = if let Some(s) = task.into_inner::<In>() {
-            s
-        } else {
-            return Err(anyhow::anyhow!(
-                "[TaskExecutorExtImpl] task input type error. expect: {:?}",
-                task
-            ))?;
-        };
         let output = self
             .executor
             .exec(
@@ -81,7 +71,8 @@ where
                 task.id.clone(),
                 task.agent_id.clone(),
                 task.user_id,
-                input,
+                task.req,
+                task.ext,
             )
             .await?;
         if (&output as &dyn Any).downcast_ref::<TaskResult>().is_some() {

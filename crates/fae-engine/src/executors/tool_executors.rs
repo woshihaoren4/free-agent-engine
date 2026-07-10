@@ -1,8 +1,6 @@
+use std::any::Any;
 use async_trait::async_trait;
-use fae_agent::{
-    Context, Error, Select, TaskExecutorExt, Thing, ThingItem, ThingSelect, ToolRequest,
-    ToolResponse,
-};
+use fae_agent::{Context, Error, Select, TaskExecutorExt, TaskReq, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -96,7 +94,7 @@ pub struct ToolExecutor {
 }
 
 #[async_trait::async_trait]
-impl TaskExecutorExt<ToolRequest, ToolResponse> for ToolExecutor {
+impl TaskExecutorExt<ToolResponse> for ToolExecutor {
     fn desc(&self) -> String {
         "default tools executor".to_string()
     }
@@ -110,8 +108,16 @@ impl TaskExecutorExt<ToolRequest, ToolResponse> for ToolExecutor {
         task_id: String,
         agent_id: String,
         user_id: String,
-        req: ToolRequest,
+        req: TaskReq,
+        _ext: Option<Box<dyn Any + Send + Sync + 'static>>,
     ) -> anyhow::Result<ToolResponse> {
+        let req = match req {
+            TaskReq::Tool(t) => t,
+            TaskReq::Mcp(t) => t,
+            _=>{
+                return Err(anyhow::anyhow!("req is not tool or mcp"));
+            }
+        };
         let tool = self.load_tool(req.get_tool_name()).await?;
         let result = tool
             .call(

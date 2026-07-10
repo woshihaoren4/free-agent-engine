@@ -1,10 +1,10 @@
 use crate::define::SenderMessageStream;
 use crate::memory::MemoryMessageExt;
-use crate::planner::{SingleAgentHandle, Planning};
+use crate::planner::{Planning, SingleAgentHandle};
 use crate::{
     AgentCallSessionOver, AgentConfig, AgentTaskStatus, AgentTasks, ChatMsg, Context, Env,
     FAE_HOME, GLOBAL_KEY_SESSION_ID, McpToolRequest, McpToolResult, Memory, MemoryEntry, NonePlan,
-    PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskType,
+    PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, Task, TaskResult, TaskReq,
     ThingItem, ThingSelect, TimedTask, ToolOut, ToolRequest, ToolRespItem, ToolResponse, Trigger,
     define_planning_group,
 };
@@ -390,9 +390,8 @@ where
             self.context.clone(),
             self.id.clone(),
             self.id.clone(),
-            TaskType::Model,
+            TaskReq::model(req),
         )
-        .set_args(req)
         .set_exec_channel(exec_channel);
         Ok(PlanningResult::Tasks(vec![task]))
     }
@@ -553,16 +552,17 @@ where
             self.parse_mcp_info(tool_name)?
         };
         let tool_req = ToolRequest::new(name, arguments);
+        let task_type = if is_tool {
+            TaskReq::tool(tool_req)
+        } else {
+            TaskReq::mcp(tool_req)
+        };
         let ctx = self.output.clone();
-        let mut task = Task::with_content(self.context.clone().set_output(Box::new(ctx)))
+        let task = Task::with_content(self.context.clone().set_output(Box::new(ctx)))
             .set_agent_id(self.agent_id.clone())
             .set_user_id(self.session_md.user_id().to_string())
-            .set_type(TaskType::Tool)
-            .set_channel(channel)
-            .set_args(tool_req);
-        if !is_tool {
-            task = task.set_type(TaskType::Mcp);
-        }
+            .set_type(task_type)
+            .set_channel(channel);
         Ok(task)
     }
 
@@ -878,9 +878,8 @@ where
             plan.get_context(),
             plan.id(),
             self.agent_id.clone(),
-            TaskType::Plan,
-        )
-        .set_args(plan);
+            TaskReq::plan(plan),
+        );
         env.spawn(vec![task]).await
     }
 
@@ -976,8 +975,12 @@ where
             plan.additional_session_tips(tips);
         }
         let plan: Box<dyn Planning + Send + 'static> = Box::new(plan);
-        let task =
-            Task::new(plan.get_context(), plan.id(), task.agent_id, TaskType::Plan).set_args(plan);
+        let task = Task::new(
+            plan.get_context(),
+            plan.id(),
+            task.agent_id,
+            TaskReq::plan(plan),
+        );
         env.spawn(vec![task]).await
     }
 

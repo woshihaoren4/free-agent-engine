@@ -1,9 +1,6 @@
 use crate::tools::{AGENT_TASK_TOOL_NAME, AgentTaskTool};
 use crate::{IdenInfo, Tool};
-use fae_agent::{
-    AgentTask, AgentTaskStatus, AgentTasks, Env, EnvEvent, Environment, Select, TaskResult,
-    TaskType, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse,
-};
+use fae_agent::{AgentTask, AgentTaskStatus, AgentTasks, Env, EnvEvent, Environment, Select, TaskResult, TaskReq, Thing, ThingItem, ThingSelect, ToolRequest, ToolResponse, TkTy};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -71,7 +68,7 @@ impl AgentRuntime {
         }
     }
     pub fn is_task_tool_task(task: &fae_agent::Task) -> bool {
-        task.get_type() == &TaskType::Tool
+        task.get_type() == TkTy::Tool
             && task.get_exec_channel() == "default"
             && task.deref_args::<ToolRequest, bool>(|x| {
                 if let Some(r) = x {
