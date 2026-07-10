@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use crate::{define_planning_group, AgentConfig, Context, Memory, MemoryEntry, MemoryMessageExt, NonePlan, Planning, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, SingleAgent, SingleAgentHandle, SingleAgentPlan, TaskReq, TaskResult, TkTy};
+use crate::{define_planning_group, AgentConfig, Context, Env, Memory, MemoryEntry, MemoryMessageExt, NonePlan, OutMsgOnce, Planning, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, SingleAgent, SingleAgentHandle, SingleAgentPlan, TaskReq, TaskResult, TkTy};
 
 pub trait WorkflowNode:Debug{
     fn id(&self) -> String;
@@ -101,6 +101,10 @@ where
     }
 
     async fn on_session_ctl(&self) -> Arc<dyn SessionCtl + Send + 'static> {
+        todo!()
+    }
+
+    async fn on_session_call(&self, _env: Env, meta: &mut S, _input: M, _output: OutMsgOnce<M>) -> anyhow::Result<WorkflowPlanLayer<S, M>> {
         todo!()
     }
 
