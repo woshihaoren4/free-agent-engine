@@ -1,19 +1,9 @@
 mod single_agent_handle;
-mod workflow;
 
 pub use single_agent_handle::*;
 use std::fmt::Debug;
 
-use crate::define::Event;
-use crate::{Context, Env, Task, TaskResult};
-
-/// 构建规划
-#[async_trait::async_trait]
-pub trait AgentPlanningExt<T: Planning + Send + 'static>: Sync {
-    fn id(&self) -> String;
-    async fn to_plan(&self, env: Env, event: Event) -> anyhow::Result<T>;
-    async fn exit(&self);
-}
+use crate::{Context, Task, TaskResult};
 
 #[derive(Debug)]
 pub enum PlanningResult {

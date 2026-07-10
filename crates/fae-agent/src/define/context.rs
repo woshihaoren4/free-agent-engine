@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug)]
 pub struct Context {
     pub env: Env,
+    pub record: Arc<RwLock<HashMap<String, String>>>,
     pub extend: Arc<RwLock<HashMap<String, String>>>,
     pub output: Option<Box<dyn Any + Send + Sync + 'static>>,
 }
@@ -16,6 +17,7 @@ impl Clone for Context {
             env: self.env.clone(),
             extend: self.extend.clone(),
             output: None,
+            record: self.record.clone(),
         }
     }
 }
@@ -23,6 +25,7 @@ impl Context {
     pub fn new(env: Env) -> Self {
         Self {
             env,
+            record: Arc::new(RwLock::new(HashMap::new())),
             extend: Arc::new(RwLock::new(HashMap::new())),
             output: None,
         }

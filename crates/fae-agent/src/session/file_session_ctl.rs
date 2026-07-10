@@ -6,6 +6,7 @@ use tokio::fs;
 use crate::{SessionCtlExt, SessionMetadata};
 
 /// 基于文件系统的会话元数据管理实现
+#[derive(Debug)]
 pub struct FileSessionCtl<T> {
     dir_path: PathBuf,
     id_extractor: fn(&T) -> String,

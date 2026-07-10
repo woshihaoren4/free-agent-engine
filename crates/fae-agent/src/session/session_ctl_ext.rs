@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use crate::{SessionCtl, SessionMD, SessionMetadata};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
@@ -20,7 +21,7 @@ where
 
 //session信息也可以自己管理
 #[async_trait::async_trait]
-pub trait SessionCtlExt<T>: Sync {
+pub trait SessionCtlExt<T>: Debug+ Sync {
     // 加载session列表
     async fn list_ext(&self, user_id: &str, offset: usize, limit: usize) -> anyhow::Result<Vec<T>>;
     // 加载session详情
