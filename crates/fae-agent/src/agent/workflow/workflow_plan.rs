@@ -1,42 +1,21 @@
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use crate::{define_planning_group, AgentConfig, Context, Env, Memory, MemoryEntry, MemoryMessageExt, NonePlan, OutMsgOnce, Planning, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, SingleAgent, SingleAgentHandle, SingleAgentPlan, TaskReq, TaskResult, TkTy};
 
-pub trait WorkflowNode:Debug{
-    fn id(&self) -> String;
-    fn ty(&self) -> TkTy;
-    fn build_request(&self, ctx: &Context) -> TaskReq;
-    fn to(&self) -> Vec<String>;
+pub trait GraphNode:Debug{
+    //todo
 }
 
 #[derive(Debug)]
 pub struct Workflow<S, M>{
     //工作流
     pub id: String,
-    pub nodes: HashMap<String, Box<dyn WorkflowNode+Send+Sync+'static>>,
+    //todo 待补充一个流程图，允许环，允许判断分支。
     memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
     session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
     agent_config: Arc<dyn AgentConfig + Send + 'static>,
-}
-impl<S, M> Workflow<S, M> {
-    pub fn new(
-        id: impl Into<String>,
-        memory: Arc<dyn MemoryMessageExt<M> + Send + 'static>,
-        session_config: Arc<dyn SessionCtlExt<S> + Send + 'static>,
-        agent_config: Arc<dyn AgentConfig + Send + 'static>,
-    ) -> Self {
-        let nodes = HashMap::new();
-        Self {
-            id: id.into(),
-            nodes,
-            memory,
-            session_config,
-            agent_config,
-        }
-    }
 }
 
 #[derive(Debug)]
