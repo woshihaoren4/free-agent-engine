@@ -1,0 +1,157 @@
+crates/fae-agent/src/agent/workflow/flow_graph.rs
+  h_d86fd13eb2c37d 18,26,28,35-38,40-41,43-44 gitai:{"mixed_line_ranges":[{"Single":40},{"Single":43}],"operations":[]}
+  s_70b126e04f2024::t_76be6e461abfa9 39 gitai:{"mixed_line_ranges":[{"Single":39}],"operations":[]}
+  s_8b405d0ce505bf::t_e1eba1d674358e 34
+  s_666de085d78a84::t_f34d9f6075d3b0 1,8,15
+  s_7771c91a1d5c36::t_c863932cef3dd0 46
+  s_0ae80a76a1a100::t_1e76918631a3d8 45
+  s_91dacfea467706::t_bcb83b975df5cd 20
+  s_e0e91be7de252f::t_fd84fe38634c09 30-31
+  s_8e0da92262d961::t_ee2832b2a3b1e3 21
+  s_c2d816f77edb27::t_c4e13f873bb54e 29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "af01e1924d0783528d6ca6609fae3c26d427da43",
+  "prompts": {},
+  "humans": {
+    "h_d86fd13eb2c37d": {
+      "author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "sessions": {
+    "s_0ae80a76a1a100": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-16586343-2369-4e75-b51c-acf73e8359a8",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_666de085d78a84": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-2208d9ae-dbdf-44ff-8b97-e6a866f89057",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_70b126e04f2024": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-0bb256ee-b976-4b07-afdb-46984c709dc8",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_7771c91a1d5c36": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-0265ba64-62e2-4541-98c7-bbfb482c6667",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_8b405d0ce505bf": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-4bfeeff4-410f-4c66-8bf9-fd2142947078",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_8e0da92262d961": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-726625e0-ea5c-4735-b9a5-2dbbd4aa05e8",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_91dacfea467706": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-79261e45-8f09-4953-a561-18b796d069df",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_c2d816f77edb27": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-fe935e77-ec53-4d6a-a24c-94713293dfdb",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    },
+    "s_e0e91be7de252f": {
+      "agent_id": {
+        "tool": "trae-cue",
+        "id": "ai_tab-icr-2d11171e-2bbd-4960-8389-0231004ee2cc",
+        "model": "default"
+      },
+      "human_author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {
+    "crates/fae-agent/src/agent/workflow/flow_graph.rs": [
+      {
+        "hash": "h_d86fd13eb2c37d",
+        "line_ranges": [
+          {
+            "Single": 18
+          },
+          {
+            "Single": 26
+          },
+          {
+            "Single": 28
+          },
+          {
+            "Range": [
+              35,
+              38
+            ]
+          },
+          {
+            "Range": [
+              40,
+              41
+            ]
+          },
+          {
+            "Range": [
+              43,
+              44
+            ]
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 40
+          },
+          {
+            "Single": 43
+          }
+        ],
+        "operations": []
+      },
+      {
+        "hash": "s_70b126e04f2024::t_76be6e461abfa9",
+        "line_ranges": [
+          {
+            "Single": 39
+          }
+        ],
+        "mixed_line_ranges": [
+          {
+            "Single": 39
+          }
+        ],
+        "operations": []
+      }
+    ]
+  },
+  "remote_transcripts": {}
+}
