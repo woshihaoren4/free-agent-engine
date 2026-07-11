@@ -1,10 +1,11 @@
 mod agent_config;
 pub mod single_agent;
-mod workflow;
+pub mod workflow;
 
 pub use agent_config::*;
 pub use single_agent::*;
 use std::fmt::Debug;
+pub use workflow::*;
 
 use crate::session::Session;
 use crate::{Command, Env, EnvEvent, Memory, SessionCtl, SessionMD};
