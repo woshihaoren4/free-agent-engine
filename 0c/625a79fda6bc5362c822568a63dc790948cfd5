@@ -1,0 +1,16 @@
+crates/fae-agent/src/agent/workflow/workflow_plan.rs
+  h_d86fd13eb2c37d 8-16,18-23,25-33,35-37,39-41,43-46,48-59,61-69,71-73,75-77,79-81,83-85,87-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0c625a79fda6bc5362c822568a63dc790948cfd5",
+  "prompts": {},
+  "humans": {
+    "h_d86fd13eb2c37d": {
+      "author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
