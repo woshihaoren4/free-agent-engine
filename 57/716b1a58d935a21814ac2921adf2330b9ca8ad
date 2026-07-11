@@ -1,0 +1,38 @@
+crates/fae-agent/src/agent/workflow/workflow_plan.rs
+  h_d86fd13eb2c37d 1,7-8,15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "57716b1a58d935a21814ac2921adf2330b9ca8ad",
+  "prompts": {},
+  "humans": {
+    "h_d86fd13eb2c37d": {
+      "author": "wangdong.teshin <wangdong.teshin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {
+    "s_52e8ff15432b3e": {
+      "tool": "trae",
+      "conversation_id": "6a508d83d72bbb355d049bbb",
+      "session_id": "6a508d83d72bbb355d049bbb",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_52e8ff15432b3e::t_01f5213fe93eb3": {
+      "tool": "trae",
+      "conversation_id": "6a508d83d72bbb355d049bbb",
+      "session_id": "6a508d83d72bbb355d049bbb",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_52e8ff15432b3e::t_86f1b918851c5f": {
+      "tool": "trae",
+      "conversation_id": "6a508d83d72bbb355d049bbb",
+      "session_id": "6a508d83d72bbb355d049bbb",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
