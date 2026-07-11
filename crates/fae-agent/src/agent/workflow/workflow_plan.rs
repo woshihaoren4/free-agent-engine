@@ -4,9 +4,6 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use crate::{define_planning_group, AgentConfig, Context, Env, Memory, MemoryEntry, MemoryMessageExt, NonePlan, OutMsgOnce, Planning, PlanningResult, SessionCtl, SessionCtlExt, SessionMetadata, SingleAgent, SingleAgentHandle, SingleAgentPlan, TaskReq, TaskResult, TkTy};
 
-pub trait GraphNode:Debug{
-    //todo
-}
 
 #[derive(Debug)]
 pub struct Workflow<S, M>{
