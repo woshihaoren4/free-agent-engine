@@ -1,5 +1,5 @@
 use std::{any::Any, sync::Arc, fmt::Debug};
-
+use std::ops::Deref;
 
 #[async_trait::async_trait]
 pub trait Context: Debug + Send + Sync + 'static {
@@ -8,5 +8,16 @@ pub trait Context: Debug + Send + Sync + 'static {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Ctx(Arc<dyn Context>);
+impl Ctx {
+    pub fn new(ctx: Arc<dyn Context>) -> Self {
+        Self(ctx)
+    }
+}
+impl Deref for Ctx {
+    type Target = dyn Context;
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}

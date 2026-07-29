@@ -1,4 +1,6 @@
 use std::fmt::Debug;
+use std::ops::Deref;
+use std::sync::Arc;
 
 #[async_trait::async_trait]
 pub trait Environment: Debug + Send + Sync + 'static {
@@ -10,6 +12,16 @@ pub trait Environment: Debug + Send + Sync + 'static {
     async fn exit(&self, key: &str) -> anyhow::Result<()>;
 }
 
-pub struct Env {
-    
+#[derive(Debug)]
+pub struct Env(Arc<dyn Environment>);
+impl Env {
+    pub fn new(env: Arc<dyn Environment>) -> Self {
+        Self(env)
+    }
+}
+impl Deref for Env {
+    type Target = dyn Environment;
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
 }

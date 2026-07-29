@@ -1,7 +1,9 @@
 mod plan;
 mod context;
 mod env;
+mod task;
 
+pub use task::*;
 pub use plan::*;
 pub use context::*;
 pub use env::*;
