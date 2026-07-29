@@ -1,10 +1,9 @@
 mod agent_config;
 pub mod single_agent;
-pub mod workflow;
+mod workflow;
 
 pub use agent_config::*;
 pub use single_agent::*;
-pub use workflow::*;
 use std::fmt::Debug;
 
 use crate::session::Session;
