@@ -1,47 +1,93 @@
 use std::any::Any;
 use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
+use wd_tools::PFSome;
 use crate::common;
 
-#[derive(Debug, Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug,Default, Clone,PartialEq,Eq,Serialize,Deserialize)]
 pub enum TaskType{
-    Plan,
+    #[default]
     Tool,
+    Plan,
     Any(String),
 }
+//
+// pub trait IntoTaskRequest{
+//     fn into_task_request(self) -> common::AnyType;
+// }
+// impl<T> IntoTaskRequest for T where T:Any+Send+Sync+'static{
+//     fn into_task_request(self) -> common::AnyType {
+//         Box::new(self)
+//     }
+// }
 
-pub trait IntoTaskRequest{
-    fn into_task_request(self) -> common::AnyType;
-}
-impl<T> IntoTaskRequest for T where T:Any+Send+Sync+'static{
-    fn into_task_request(self) -> common::AnyType {
-        Box::new(self)
-    }
+#[derive(Debug,Default)]
+pub struct TaskMeta{
+    pub id: String,
+    pub ty:TaskType,
+    pub publisher: String,
+    pub executor: String,
 }
 
 #[derive(Debug)]
-pub struct Task{
-    pub id: String,
-    pub ty:TaskType,
-    pub author: String,
+pub struct TaskRequest{
+    pub meta:TaskMeta,
     req: common::AnyType
 }
-
-impl Task {
-    pub fn new<T: IntoTaskRequest>(id: String, ty: TaskType, author: String, req: T) -> Self {
-        Self {
-            id,
-            ty,
-            author,
-            req: req.into_task_request(),
+impl TaskRequest {
+    pub(crate) fn new_null()->Self{
+        Self{
+            meta: TaskMeta::default(),
+            req: Box::new(()),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct TaskResult{
-    pub id: String,
-    pub ty:TaskType,
-    pub consumer: String,
-    result: common::AnyType
+pub struct TaskResponse{
+    pub meta:TaskMeta,
+    resp: common::AnyType
+}
+impl TaskResponse {
+    pub(crate) fn new_null()->Self{
+        Self{
+            meta: TaskMeta::default(),
+            resp: Box::new(()),
+        }
+    }
+}
+
+
+// --------------------------- 任务封装 ---------------------------
+
+#[derive(Debug)]
+pub struct TaskReq<T>{
+    pub meta:TaskMeta,
+    pub req:T,
+}
+impl<T: 'static> TaskReq<T> {
+    pub fn try_from_request(req:&mut TaskRequest) -> Option<Self>{
+        if req.req.downcast_ref::<T>().is_none() {
+            return None;
+        }
+        let tr = std::mem::replace(req, TaskRequest::new_null());
+
+        Self{
+            meta: tr.meta,
+            req: *(tr.req.downcast::<T>().unwrap()),
+        }.some()
+    }
+}
+#[derive(Debug)]
+pub struct TaskResp<T>{
+    pub meta:TaskMeta,
+    pub resp:T,
+}
+impl<T: Send+'static> TaskResp<T> {
+    pub fn into_response(self) -> TaskResponse {
+        TaskResponse{
+            meta: self.meta,
+            resp: Box::new(self.resp),
+        }
+    }
 }

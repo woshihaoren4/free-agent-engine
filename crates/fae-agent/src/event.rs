@@ -1,8 +1,9 @@
-use crate::{common, TaskResult};
+use crate::{common, Plan, TaskResponse};
 
 #[derive(Debug)]
 pub enum EventType{
-    TaskResult(TaskResult),
+    TaskResult(TaskResponse),
+    Plan(Box<dyn Plan>),
     Any(String,common::AnyType)
 }
 

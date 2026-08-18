@@ -1,9 +1,9 @@
-use std::fmt::{Debug, Formatter};
-use crate::{common, RT, Event, Task, TaskResult};
+use std::fmt::{Debug};
+use crate::{TaskRequest, TaskResponse};
 
 #[derive(Debug)]
 pub enum PlanNext{
-    Tasks(Vec<Task>),
+    Tasks(Vec<TaskRequest>),
     End,
 }
 
@@ -11,14 +11,14 @@ pub enum PlanNext{
 pub trait Plan: Debug + Send + Sync + 'static {
     fn id(&self)->&str;
     async fn init(&mut self)->anyhow::Result<PlanNext>;
-    async fn next(&mut self,task_result:TaskResult) -> anyhow::Result<PlanNext>;
+    async fn next(&mut self,task_result:TaskResponse) -> anyhow::Result<PlanNext>;
     async fn abort(&mut self,code:i32,error: String);
 }
 #[async_trait::async_trait]
 pub trait PlanWithEnv<ENV>: Debug + Send + Sync + 'static{
     fn id(&self)->&str;
     async fn init(&mut self, env : &mut ENV) ->anyhow::Result<PlanNext>;
-    async fn next(&mut self, env : &mut ENV, task_result:TaskResult) -> anyhow::Result<PlanNext>;
+    async fn next(&mut self, env : &mut ENV, task_result:TaskResponse) -> anyhow::Result<PlanNext>;
     async fn abort(&mut self, env : &mut ENV, code:i32, error: String);
 }
 
@@ -46,7 +46,7 @@ impl<ENV:Debug + Send + Sync + 'static> Plan for PlanWithEnvWrapper<ENV>
     async fn init(&mut self)->anyhow::Result<PlanNext> {
         self.plan.init(&mut self.env).await
     }
-    async fn next(&mut self,task_result:TaskResult) -> anyhow::Result<PlanNext> {
+    async fn next(&mut self,task_result:TaskResponse) -> anyhow::Result<PlanNext> {
         self.plan.next(&mut self.env, task_result).await
     }
     async fn abort(&mut self,code:i32,error: String) {

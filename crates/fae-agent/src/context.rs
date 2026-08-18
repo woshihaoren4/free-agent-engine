@@ -1,10 +1,14 @@
 use std::{any::Any, sync::Arc, fmt::Debug};
 use std::ops::Deref;
 
+#[derive(Debug)]
+pub struct ContextStack{
+    pub use_time_mill: u64,
+}
+
 #[async_trait::async_trait]
 pub trait Context: Debug + Send + Sync + 'static {
-    async fn get(&self, key: &str) -> Option<Box<dyn Any + Send + Sync + 'static>>;
-    async fn set(&self, key: &str, value: Box<dyn Any + Send + Sync + 'static>) -> anyhow::Result<()>;
+    fn append_stack(&self, key: &str, value:&str);
 }
 
 
