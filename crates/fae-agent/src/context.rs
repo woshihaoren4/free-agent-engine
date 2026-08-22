@@ -1,5 +1,6 @@
 use std::{any::Any, sync::Arc, fmt::Debug};
 use std::ops::Deref;
+use crate::RT;
 
 #[derive(Debug)]
 pub struct ContextStack{
@@ -9,6 +10,7 @@ pub struct ContextStack{
 #[async_trait::async_trait]
 pub trait Context: Debug + Send + Sync + 'static {
     fn append_stack(&self, key: &str, value:&str);
+    fn get_rt(&self) -> RT;
 }
 
 

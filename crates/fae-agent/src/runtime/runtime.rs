@@ -2,7 +2,7 @@ use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::channel::Receiver;
-use crate::{common, Event, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType};
+use crate::{common, Ctx, Event, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType};
 use crate::common::AnyType;
 
 #[async_trait::async_trait]
@@ -14,10 +14,10 @@ pub trait Runtime: Debug + Send + Sync + 'static {
     async fn select(&self,_ty:TaskType, _cond:&mut common::AnyType) -> crate::Result<common::AnyType>{
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn spawn(&self, _tasks:&mut TaskRequest) -> crate::Result<()>{
+    async fn spawn(&self, _ctx: Ctx, _tasks:&mut TaskRequest) -> crate::Result<()>{
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exec(&self, _task:&mut TaskRequest) -> crate::Result<TaskResponse>{
+    async fn exec(&self, _ctx: Ctx, _task:&mut TaskRequest) -> crate::Result<TaskResponse>{
         Err(crate::Error::RuntimeNoSupport)
     }
     async fn kill(&self, _task_id: &str) -> crate::Result<()>{
@@ -59,10 +59,10 @@ where
     async fn select(&self,_ty:TaskType, _cond:Cond) -> crate::Result<Info>{
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn spawn(&self, _tasks:TaskReq<Req>) -> crate::Result<()>{
+    async fn spawn(&self, _ctx: Ctx, _tasks:TaskReq<Req>) -> crate::Result<()>{
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exec(&self, _task:TaskReq<Req>) -> crate::Result<TaskResp<Resp>>{
+    async fn exec(&self, _ctx: Ctx, _task:TaskReq<Req>) -> crate::Result<TaskResp<Resp>>{
         Err(crate::Error::RuntimeNoSupport)
     }
     async fn kill(&self, _task_id: &str) -> crate::Result<()>{
@@ -104,22 +104,22 @@ where Req: Debug + Send  + 'static,
         Ok(Box::new(info))
     }
 
-    async fn spawn(&self, task: &mut TaskRequest) -> crate::Result<()> {
-        let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
+    async fn spawn(&self, _ctx: Ctx, _tasks: &mut TaskRequest) -> crate::Result<()> {
+        let req = if let Some(req) = TaskReq::<Req>::try_from_request(_tasks) {
             req
         }else{
             return Err(crate::Error::RuntimeNoSupport)
         };
-        self.inner.spawn(req).await
+        self.inner.spawn(_ctx, req).await
     }
 
-    async fn exec(&self, task: &mut TaskRequest) -> crate::Result<TaskResponse> {
-        let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
+    async fn exec(&self, _ctx: Ctx, _task: &mut TaskRequest) -> crate::Result<TaskResponse> {
+        let req = if let Some(req) = TaskReq::<Req>::try_from_request(_task) {
             req
         }else{
             return Err(crate::Error::RuntimeNoSupport)
         };
-        let resp = self.inner.exec(req).await?;
+        let resp = self.inner.exec(_ctx, req).await?;
         Ok(resp.into_response())
     }
 
