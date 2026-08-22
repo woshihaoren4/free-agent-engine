@@ -104,22 +104,26 @@ where Req: Debug + Send  + 'static,
         Ok(Box::new(info))
     }
 
-    async fn spawn(&self, _ctx: Ctx, _tasks: &mut TaskRequest) -> crate::Result<()> {
+    async fn spawn(&self, ctx: Ctx, _tasks: &mut TaskRequest) -> crate::Result<()> {
         let req = if let Some(req) = TaskReq::<Req>::try_from_request(_tasks) {
             req
         }else{
             return Err(crate::Error::RuntimeNoSupport)
         };
-        self.inner.spawn(_ctx, req).await
+        let info = format!("{}:{}",file!(),line!());
+        ctx.append_stack(self.id(),info);
+        self.inner.spawn(ctx, req).await
     }
 
-    async fn exec(&self, _ctx: Ctx, _task: &mut TaskRequest) -> crate::Result<TaskResponse> {
+    async fn exec(&self,ctx: Ctx, _task: &mut TaskRequest) -> crate::Result<TaskResponse> {
         let req = if let Some(req) = TaskReq::<Req>::try_from_request(_task) {
             req
         }else{
             return Err(crate::Error::RuntimeNoSupport)
         };
-        let resp = self.inner.exec(_ctx, req).await?;
+        let info = format!("{}:{}",file!(),line!());
+        ctx.append_stack(self.id(),info);
+        let resp = self.inner.exec(ctx, req).await?;
         Ok(resp.into_response())
     }
 

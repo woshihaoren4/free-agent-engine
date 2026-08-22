@@ -9,7 +9,7 @@ pub struct ContextStack{
 
 #[async_trait::async_trait]
 pub trait Context: Debug + Send + Sync + 'static {
-    fn append_stack(&self, key: &str, value:&str);
+    fn append_stack(&self, key: &str, value:String);
     fn get_rt(&self) -> RT;
 }
 
