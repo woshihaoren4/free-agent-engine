@@ -125,10 +125,10 @@ where Req: Debug + Send  + 'static,
 
 
     async fn kill(&self, _task_id: &str) -> crate::Result<()> {
-        todo!()
+        self.inner.kill(_task_id).await
     }
 
     async fn exit(&self) -> crate::Result<()> {
-        todo!()
+        self.inner.exit().await
     }
 }

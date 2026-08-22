@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use wd_tools::PFSome;
 use crate::common;
 
-#[derive(Debug,Default, Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[derive(Debug,Default,Hash,Clone,PartialEq,Eq,Serialize,Deserialize)]
 pub enum TaskType{
     #[default]
     Tool,
