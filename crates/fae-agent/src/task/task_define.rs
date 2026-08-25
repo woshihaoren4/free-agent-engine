@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use wd_tools::PFSome;
-use crate::common;
+use crate::{common,Ctx};
 
 #[derive(Debug,Default,Hash,Clone,PartialEq,Eq,Serialize,Deserialize)]
 pub enum TaskType{
@@ -31,12 +31,14 @@ pub struct TaskMeta{
 
 #[derive(Debug)]
 pub struct TaskRequest{
+    pub ctx: Ctx,
     pub meta:TaskMeta,
     req: common::AnyType
 }
 impl TaskRequest {
     pub(crate) fn new_null()->Self{
         Self{
+            ctx: Ctx::null(),
             meta: TaskMeta::default(),
             req: Box::new(()),
         }
@@ -45,12 +47,14 @@ impl TaskRequest {
 
 #[derive(Debug)]
 pub struct TaskResponse{
+    pub ctx: Ctx,
     pub meta:TaskMeta,
     resp: common::AnyType
 }
 impl TaskResponse {
     pub(crate) fn new_null()->Self{
         Self{
+            ctx: Ctx::null(),
             meta: TaskMeta::default(),
             resp: Box::new(()),
         }
@@ -62,6 +66,7 @@ impl TaskResponse {
 
 #[derive(Debug)]
 pub struct TaskReq<T>{
+    pub ctx: Ctx,
     pub meta:TaskMeta,
     pub req:T,
 }
@@ -73,6 +78,7 @@ impl<T: 'static> TaskReq<T> {
         let tr = std::mem::replace(req, TaskRequest::new_null());
 
         Self{
+            ctx: tr.ctx,
             meta: tr.meta,
             req: *(tr.req.downcast::<T>().unwrap()),
         }.some()
@@ -80,14 +86,28 @@ impl<T: 'static> TaskReq<T> {
 }
 #[derive(Debug)]
 pub struct TaskResp<T>{
+    pub ctx: Ctx,
     pub meta:TaskMeta,
     pub resp:T,
 }
 impl<T: Send+'static> TaskResp<T> {
     pub fn into_response(self) -> TaskResponse {
         TaskResponse{
+            ctx: self.ctx,
             meta: self.meta,
             resp: Box::new(self.resp),
         }
+    }
+    pub fn try_from_response(resp:&mut TaskResponse) -> Option<Self>{
+        if resp.resp.downcast_ref::<T>().is_none() {
+            return None;
+        }
+        let tr = std::mem::replace(resp, TaskResponse::new_null());
+
+        Self{
+            ctx: tr.ctx,
+            meta: tr.meta,
+            resp: *(tr.resp.downcast::<T>().unwrap()),
+        }.some()
     }
 }

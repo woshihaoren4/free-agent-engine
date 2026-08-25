@@ -1,14 +1,14 @@
-use crate::{common, Plan, TaskResponse};
+use crate::{common, TaskRequest, TaskResponse};
 
 #[derive(Debug)]
 pub enum EventType{
+    Task(TaskRequest),
     TaskResult(TaskResponse),
-    Plan(Box<dyn Plan>),
     Any(String,common::AnyType)
 }
 
 #[derive(Debug)]
 pub struct Event{
-    pub id: String,
+    pub from_rt_id: String,
     pub event_type: EventType,
 }
