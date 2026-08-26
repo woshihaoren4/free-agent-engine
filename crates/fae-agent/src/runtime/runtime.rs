@@ -41,7 +41,7 @@ impl Runtime for RuntimeNull{
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct RT(Arc<dyn Runtime>);
 impl RT {
     pub fn new(env: Arc<dyn Runtime>) -> Self {

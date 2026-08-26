@@ -1,3 +1,4 @@
+use super::Engine;
 use crate::engine_rt::EngineRuntime;
 use fae_agent::{
     PlanBuilder, PlanBuilderWithEnv, PlanBuilderWithEnvWrapper, Runtime, RuntimeSelectExec,
@@ -96,5 +97,10 @@ impl EngineBuilder {
 
     pub fn remove_runtime(&mut self, id: &str) -> Option<Box<dyn Runtime>> {
         self.runtimes.remove_runtime(id)
+    }
+
+    pub async fn build(self) -> Engine {
+        let rt = self.runtimes.build().await;
+        Engine::new(self.plan_builders, rt)
     }
 }
