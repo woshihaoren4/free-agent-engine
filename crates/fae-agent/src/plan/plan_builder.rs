@@ -1,5 +1,5 @@
+use crate::{Ctx, Plan, RT, common};
 use std::fmt::Debug;
-use crate::{Ctx, RT, Event, Plan, common};
 
 #[async_trait::async_trait]
 pub trait PlanBuilder: Debug + Send + Sync + 'static {
@@ -20,6 +20,12 @@ pub struct PlanBuilderWithEnvWrapper<ENV> {
     inner: Box<dyn PlanBuilderWithEnv<ENV>>,
 }
 
+impl<ENV> PlanBuilderWithEnvWrapper<ENV> {
+    pub fn new(inner: Box<dyn PlanBuilderWithEnv<ENV>>) -> Self {
+        Self { inner }
+    }
+}
+
 #[async_trait::async_trait]
 impl<ENV> PlanBuilder for PlanBuilderWithEnvWrapper<ENV>
 where
@@ -30,7 +36,9 @@ where
     }
 
     async fn build(&self, rt: RT, tx: Ctx, env: common::AnyType) -> anyhow::Result<Box<dyn Plan>> {
-        let env = env.downcast::<ENV>().expect("[PlanBuilderWithEnvWrapper<ENV>::PlanBuilder.build] env is not ENV");
+        let env = env
+            .downcast::<ENV>()
+            .expect("[PlanBuilderWithEnvWrapper<ENV>::PlanBuilder.build] env is not ENV");
         self.inner.build(rt, tx, *env).await
     }
 }

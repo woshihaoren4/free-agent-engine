@@ -1,8 +1,8 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::channel::Receiver;
-use crate::{common, Ctx, Event, EventType, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType};
+use crate::{common, Event, EventType, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType};
 use crate::common::AnyType;
 
 #[async_trait::async_trait]
