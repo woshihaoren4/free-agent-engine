@@ -433,6 +433,7 @@ dependencies = [
  "async-trait",
  "fae-agent",
  "fae-engine",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "wd_log",

@@ -56,7 +56,7 @@ impl EngineBuilder {
         self.plan_builders.insert(ty, builder)
     }
 
-    pub fn add_plan_builder_with_env<ENV>(
+    pub fn add_plan_builder_with_env_box<ENV>(
         &mut self,
         builder: Box<dyn PlanBuilderWithEnv<ENV>>,
     ) -> Option<Box<dyn PlanBuilder>>
@@ -64,6 +64,17 @@ impl EngineBuilder {
         ENV: Debug + Send + Sync + 'static,
     {
         self.add_raw_plan_builder(Box::new(PlanBuilderWithEnvWrapper::new(builder)))
+    }
+
+    pub fn add_plan_builder<T,ENV>(
+        &mut self,
+        builder: T,
+    ) -> Option<Box<dyn PlanBuilder>>
+    where
+        ENV: Debug + Send + Sync + 'static,
+        T: PlanBuilderWithEnv<ENV>,
+    {
+        self.add_plan_builder_with_env_box(Box::new(builder))
     }
 
     pub fn remove_plan_builder(&mut self, ty: &str) -> Option<Box<dyn PlanBuilder>> {
@@ -95,10 +106,7 @@ impl EngineBuilder {
         self.runtimes.add_runtime(rt)
     }
 
-    pub fn add_runtime<Req, Resp, Cond, Info,R>(
-        &mut self,
-        rt: R,
-    ) -> Option<Box<dyn Runtime>>
+    pub fn add_runtime<Req, Resp, Cond, Info, R>(&mut self, rt: R) -> Option<Box<dyn Runtime>>
     where
         Req: Debug + Send + 'static,
         Resp: Debug + Send + 'static,

@@ -1,9 +1,7 @@
-use crate::EngineContext;
-use fae_agent::{Ctx, Plan, PlanBuilder, PlanNext, RT, to_plan_ty};
+use crate::{EngineContext, PlanRuntime};
+use fae_agent::{Ctx, Plan, PlanBuilder, RT, to_plan_ty};
 use std::any::type_name;
 use std::collections::HashMap;
-
-const PLAN_ABORT_CODE: i32 = -1;
 
 #[derive(Debug)]
 pub struct Engine {
@@ -89,44 +87,8 @@ impl Engine {
         builder.build(self.rt(), ctx, Box::new(env)).await
     }
 
-    async fn run_plan(mut plan: Box<dyn Plan>, ctx: Ctx) -> anyhow::Result<()> {
-        let result = Self::run_plan_inner(plan.as_mut(), &ctx).await;
-        if let Err(error) = &result {
-            plan.abort(PLAN_ABORT_CODE, error.to_string()).await;
-        }
-        result
-    }
-
-    async fn run_plan_inner(plan: &mut dyn Plan, ctx: &Ctx) -> anyhow::Result<()> {
-        let mut next = plan.init().await?;
-
-        loop {
-            let tasks = match next {
-                PlanNext::End => return Ok(()),
-                PlanNext::Tasks(tasks) if tasks.is_empty() => {
-                    anyhow::bail!("plan `{}` produced an empty task batch", plan.id())
-                }
-                PlanNext::Tasks(tasks) => tasks,
-            };
-
-            let mut responses = Vec::with_capacity(tasks.len());
-            for mut task in tasks {
-                task.ctx = ctx.clone();
-                let mut response = ctx.get_rt().exec(&mut task).await?;
-                response.ctx = ctx.clone();
-                responses.push(response);
-            }
-
-            let mut generated_tasks = Vec::new();
-            for response in responses {
-                match plan.next(response).await? {
-                    PlanNext::End => return Ok(()),
-                    PlanNext::Tasks(tasks) => generated_tasks.extend(tasks),
-                }
-            }
-
-            next = PlanNext::Tasks(generated_tasks);
-        }
+    async fn run_plan(plan: Box<dyn Plan>, ctx: Ctx) -> anyhow::Result<()> {
+        PlanRuntime::run_plan(plan, ctx).await
     }
 }
 
@@ -134,7 +96,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::EngineBuilder;
-    use fae_agent::{PlanBuilderWithEnv, TaskResponse};
+    use fae_agent::{PlanBuilderWithEnv, PlanNext, TaskResponse};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -190,7 +152,7 @@ mod tests {
 
     async fn test_engine(aborted: Arc<AtomicBool>) -> Engine {
         let mut builder = EngineBuilder::new();
-        builder.add_plan_builder_with_env(Box::new(TestPlanBuilder { aborted }));
+        builder.add_plan_builder_with_env_box(Box::new(TestPlanBuilder { aborted }));
         builder.build().await
     }
 

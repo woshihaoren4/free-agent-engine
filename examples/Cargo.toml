@@ -12,7 +12,12 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 wd_log = { workspace = true }
+serde_json = { workspace = true }
 
 [[example]]
 name = "basic"
 path = "basic.rs"
+
+[[example]]
+name = "plan_builder_with_env"
+path = "plan_builder_with_env.rs"

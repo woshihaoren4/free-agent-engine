@@ -1,32 +1,36 @@
-use std::fmt::{Debug};
+use crate::common::AnyType;
+use crate::{Event, EventType, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, common};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
 use wd_tools::channel::Receiver;
-use crate::{common, Event, EventType, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType};
-use crate::common::AnyType;
 
 #[async_trait::async_trait]
 pub trait Runtime: Debug + Send + Sync + 'static {
     fn id(&self) -> &str;
-    async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>>{
+    async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn select(&self,_ty:TaskType, _cond:&mut common::AnyType) -> crate::Result<common::AnyType>{
+    async fn select(
+        &self,
+        _ty: TaskType,
+        _cond: &mut common::AnyType,
+    ) -> crate::Result<common::AnyType> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn spawn(&self, _tasks:&mut TaskRequest) -> crate::Result<()>{
+    async fn spawn(&self, _tasks: &mut TaskRequest) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn trigger(&self,_event:&mut Event)-> crate::Result<()>{
+    async fn trigger(&self, _event: &mut Event) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exec(&self, _task:&mut TaskRequest) -> crate::Result<TaskResponse>{
+    async fn exec(&self, _task: &mut TaskRequest) -> crate::Result<TaskResponse> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn kill(&self,_ty:TaskType,_rtid:&str, _task_id: &str) -> crate::Result<()>{
+    async fn kill(&self, _ty: TaskType, _rtid: &str, _task_id: &str) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exit(&self) -> crate::Result<()>{
+    async fn exit(&self) -> crate::Result<()> {
         Ok(())
     }
 }
@@ -35,13 +39,13 @@ pub trait Runtime: Debug + Send + Sync + 'static {
 pub struct RuntimeNull;
 
 #[async_trait::async_trait]
-impl Runtime for RuntimeNull{
+impl Runtime for RuntimeNull {
     fn id(&self) -> &str {
         "null"
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct RT(Arc<dyn Runtime>);
 impl RT {
     pub fn new(env: Arc<dyn Runtime>) -> Self {
@@ -49,6 +53,30 @@ impl RT {
     }
     pub(crate) fn null() -> Self {
         Self(Arc::new(RuntimeNull))
+    }
+
+    pub async fn spawn<Req>(&self, tasks: TaskReq<Req>) -> anyhow::Result<()>
+    where
+        Req: Send + 'static,
+    {
+        let mut task = tasks.into_request();
+        self.0.spawn(&mut task).await?;
+        Ok(())
+    }
+
+    pub async fn exec<Req, Resp>(&self, task: TaskReq<Req>) -> anyhow::Result<TaskResp<Resp>>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+    {
+        let mut task = task.into_request();
+        let mut response = self.0.exec(&mut task).await?;
+        TaskResp::<Resp>::try_from_response(&mut response).ok_or_else(|| {
+            anyhow::anyhow!(
+                "task response type does not match `{}`",
+                std::any::type_name::<Resp>()
+            )
+        })
     }
 }
 impl Deref for RT {
@@ -62,69 +90,67 @@ impl Deref for RT {
 #[async_trait::async_trait]
 pub trait RuntimeSelectExec<Req, Resp, Cond, Info>: Debug + Send + Sync + 'static
 where
-    Req: Debug + Send  + 'static,
-    Resp: Debug + Send  + 'static,
-    Cond: Debug + Send  + 'static,
-    Info: Debug + Send  + 'static,
+    Req: Debug + Send + 'static,
+    Resp: Debug + Send + 'static,
+    Cond: Debug + Send + 'static,
+    Info: Debug + Send + 'static,
 {
     fn id(&self) -> &str;
-    fn tys(&self)-> Vec<TaskType>;
-    async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>>{
+    fn tys(&self) -> Vec<TaskType>;
+    async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn select(&self,_ty:TaskType, _cond:Cond) -> crate::Result<Info>{
+    async fn select(&self, _ty: TaskType, _cond: Cond) -> crate::Result<Info> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn spawn(&self, _tasks:TaskReq<Req>) -> crate::Result<()>{
+    async fn spawn(&self, _tasks: TaskReq<Req>) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn trigger(&self, _event:&mut common::AnyType) -> crate::Result<()>{
+    async fn trigger(&self, _event: &mut common::AnyType) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn task_result_callback(&self, _task:TaskResp<Resp>) -> crate::Result<()>{
+    async fn task_result_callback(&self, _task: TaskResp<Resp>) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exec(&self, _task:TaskReq<Req>) -> crate::Result<TaskResp<Resp>>{
+    async fn exec(&self, _task: TaskReq<Req>) -> crate::Result<TaskResp<Resp>> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn kill(&self, _task_id: &str) -> crate::Result<()>{
+    async fn kill(&self, _task_id: &str) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn exit(&self) -> crate::Result<()>{
+    async fn exit(&self) -> crate::Result<()> {
         Ok(())
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct RuntimeSelectExecWrapped<Req, Resp, Cond, Info> {
     inner: Arc<dyn RuntimeSelectExec<Req, Resp, Cond, Info>>,
-    tys:Vec<TaskType>,
+    tys: Vec<TaskType>,
 }
 impl<Req, Resp, Cond, Info> RuntimeSelectExecWrapped<Req, Resp, Cond, Info>
-where Req: Debug + Send  + 'static,
-      Resp: Debug + Send  + 'static,
-      Cond: Debug + Send  + 'static,
-      Info: Debug + Send  + 'static,
+where
+    Req: Debug + Send + 'static,
+    Resp: Debug + Send + 'static,
+    Cond: Debug + Send + 'static,
+    Info: Debug + Send + 'static,
 {
     pub fn new(inner: Arc<dyn RuntimeSelectExec<Req, Resp, Cond, Info>>) -> Self {
         let tys = inner.tys();
-        Self{
-            inner,
-            tys,
-        }
+        Self { inner, tys }
     }
     fn contain_ty(&self, ty: &TaskType) -> bool {
         self.tys.contains(ty)
     }
 }
 
-
 #[async_trait::async_trait]
 impl<Req, Resp, Cond, Info> Runtime for RuntimeSelectExecWrapped<Req, Resp, Cond, Info>
-where Req: Debug + Send  + 'static,
-      Resp: Debug + Send  + 'static,
-      Cond: Debug + Send  + 'static,
-      Info: Debug + Send  + 'static,
+where
+    Req: Debug + Send + 'static,
+    Resp: Debug + Send + 'static,
+    Cond: Debug + Send + 'static,
+    Info: Debug + Send + 'static,
 {
     fn id(&self) -> &str {
         self.inner.id()
@@ -150,54 +176,49 @@ where Req: Debug + Send  + 'static,
         }
         let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
             req
-        }else{
-            return Err(crate::Error::RuntimeNoSupport)
+        } else {
+            return Err(crate::Error::RuntimeNoSupport);
         };
-        let info = format!("{}:{}",file!(),line!());
-        task.ctx.append_stack(self.id(),info);
+        let info = format!("{}:{}", file!(), line!());
+        task.ctx.append_stack(self.id(), info);
         self.inner.spawn(req).await
     }
 
     async fn trigger(&self, _event: &mut Event) -> crate::Result<()> {
-        let Event {event_type, ..} = _event;
+        let Event { event_type, .. } = _event;
         match event_type {
-            EventType::Task(req) => {
-                self.spawn(req).await
-            }
+            EventType::Task(req) => self.spawn(req).await,
             EventType::TaskResult(result) => {
                 if result.meta.publisher != self.id() {
                     return Err(crate::Error::RuntimeNoSupport);
                 }
                 let resp = if let Some(req) = TaskResp::<Resp>::try_from_response(result) {
                     req
-                }else{
-                    return Err(crate::Error::RuntimeNoSupport)
+                } else {
+                    return Err(crate::Error::RuntimeNoSupport);
                 };
                 self.inner.task_result_callback(resp).await
             }
-            EventType::Any(id, ty) => {
-                self.inner.trigger(ty).await
-            }
+            EventType::Any(_id, ty) => self.inner.trigger(ty).await,
         }
     }
 
-    async fn exec(&self,task: &mut TaskRequest) -> crate::Result<TaskResponse> {
+    async fn exec(&self, task: &mut TaskRequest) -> crate::Result<TaskResponse> {
         if task.meta.executor != self.id() {
             return Err(crate::Error::RuntimeNoSupport);
         }
         let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
             req
-        }else{
-            return Err(crate::Error::RuntimeNoSupport)
+        } else {
+            return Err(crate::Error::RuntimeNoSupport);
         };
-        let info = format!("{}:{}",file!(),line!());
-        task.ctx.append_stack(self.id(),info);
+        let info = format!("{}:{}", file!(), line!());
+        task.ctx.append_stack(self.id(), info);
         let resp = self.inner.exec(req).await?;
         Ok(resp.into_response())
     }
 
-
-    async fn kill(&self, ty: TaskType, rtid:&str, task_id: &str) -> crate::Result<()> {
+    async fn kill(&self, ty: TaskType, rtid: &str, task_id: &str) -> crate::Result<()> {
         if !self.contain_ty(&ty) {
             return Err(crate::Error::RuntimeNoSupport);
         }

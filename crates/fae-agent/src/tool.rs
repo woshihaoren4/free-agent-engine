@@ -25,7 +25,6 @@ impl ToolRequest {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolRespItem {
     Streaming(String),
@@ -52,12 +51,12 @@ impl ToolResponse {
             stream_chan: None,
         }
     }
-    pub fn with_error(code:i32, msg: String) -> Self {
+    pub fn with_error(code: i32, msg: String) -> Self {
         let err = serde_json::json!({
             "code": code,
             "msg": msg,
         });
-        let err = serde_json::to_string(&err).unwrap_or(format!("{}:{}",code,msg));
+        let err = serde_json::to_string(&err).unwrap_or(format!("{}:{}", code, msg));
         Self {
             once_result: Some(err),
             stream_chan: None,
@@ -102,7 +101,7 @@ impl ToolResponse {
                 Err(e) => Err(anyhow::anyhow!("recv error: {:?}", e)),
             }
         } else {
-            return anyhow::anyhow!("[ToolResponse] stream_chan is None").err()
+            return anyhow::anyhow!("[ToolResponse] stream_chan is None").err();
         }
     }
 }

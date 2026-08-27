@@ -1,57 +1,51 @@
-use std::fmt::{Debug};
 use crate::{TaskRequest, TaskResponse};
+use std::fmt::Debug;
 
 #[derive(Debug)]
-pub enum PlanNext{
+pub enum PlanNext {
     Tasks(Vec<TaskRequest>),
     End,
 }
 
 #[async_trait::async_trait]
 pub trait Plan: Debug + Send + Sync + 'static {
-    fn id(&self)->&str;
-    async fn init(&mut self)->anyhow::Result<PlanNext>;
-    async fn next(&mut self,task_result:TaskResponse) -> anyhow::Result<PlanNext>;
-    async fn abort(&mut self,code:i32,error: String);
+    fn id(&self) -> &str;
+    async fn init(&mut self) -> anyhow::Result<PlanNext>;
+    async fn next(&mut self, task_result: TaskResponse) -> anyhow::Result<PlanNext>;
+    async fn abort(&mut self, code: i32, error: String);
 }
 #[async_trait::async_trait]
-pub trait PlanWithEnv<ENV>: Debug + Send + Sync + 'static{
-    fn id(&self)->&str;
-    async fn init(&mut self, env : &mut ENV) ->anyhow::Result<PlanNext>;
-    async fn next(&mut self, env : &mut ENV, task_result:TaskResponse) -> anyhow::Result<PlanNext>;
-    async fn abort(&mut self, env : &mut ENV, code:i32, error: String);
+pub trait PlanWithEnv<ENV>: Debug + Send + Sync + 'static {
+    fn id(&self) -> &str;
+    async fn init(&mut self, env: &mut ENV) -> anyhow::Result<PlanNext>;
+    async fn next(&mut self, env: &mut ENV, task_result: TaskResponse) -> anyhow::Result<PlanNext>;
+    async fn abort(&mut self, env: &mut ENV, code: i32, error: String);
 }
 
 #[derive(Debug)]
-pub struct PlanWithEnvWrapper<ENV>{
+pub struct PlanWithEnvWrapper<ENV> {
     pub env: ENV,
     pub plan: Box<dyn PlanWithEnv<ENV>>,
 }
-impl <ENV: 'static> PlanWithEnvWrapper<ENV> {
+impl<ENV: 'static> PlanWithEnvWrapper<ENV> {
     pub fn new(env: ENV, plan: Box<dyn PlanWithEnv<ENV>>) -> Self {
-        Self {
-            env,
-            plan,
-        }
+        Self { env, plan }
     }
 }
 
 #[async_trait::async_trait]
-impl<ENV:Debug + Send + Sync + 'static> Plan for PlanWithEnvWrapper<ENV>
-{
+impl<ENV: Debug + Send + Sync + 'static> Plan for PlanWithEnvWrapper<ENV> {
     fn id(&self) -> &str {
         self.plan.id()
     }
 
-    async fn init(&mut self)->anyhow::Result<PlanNext> {
+    async fn init(&mut self) -> anyhow::Result<PlanNext> {
         self.plan.init(&mut self.env).await
     }
-    async fn next(&mut self,task_result:TaskResponse) -> anyhow::Result<PlanNext> {
+    async fn next(&mut self, task_result: TaskResponse) -> anyhow::Result<PlanNext> {
         self.plan.next(&mut self.env, task_result).await
     }
-    async fn abort(&mut self,code:i32,error: String) {
+    async fn abort(&mut self, code: i32, error: String) {
         self.plan.abort(&mut self.env, code, error).await
     }
 }
-
-
