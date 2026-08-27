@@ -82,7 +82,7 @@ impl EngineBuilder {
         self.runtimes.add_raw_runtime_with_tys(rt, tys)
     }
 
-    pub fn add_runtime<Req, Resp, Cond, Info>(
+    pub fn add_runtime_arc<Req, Resp, Cond, Info>(
         &mut self,
         rt: Arc<dyn RuntimeSelectExec<Req, Resp, Cond, Info>>,
     ) -> Option<Box<dyn Runtime>>
@@ -93,6 +93,20 @@ impl EngineBuilder {
         Info: Debug + Send + 'static,
     {
         self.runtimes.add_runtime(rt)
+    }
+
+    pub fn add_runtime<Req, Resp, Cond, Info,R>(
+        &mut self,
+        rt: R,
+    ) -> Option<Box<dyn Runtime>>
+    where
+        Req: Debug + Send + 'static,
+        Resp: Debug + Send + 'static,
+        Cond: Debug + Send + 'static,
+        Info: Debug + Send + 'static,
+        R: RuntimeSelectExec<Req, Resp, Cond, Info>,
+    {
+        self.add_runtime_arc(Arc::new(rt))
     }
 
     pub fn remove_runtime(&mut self, id: &str) -> Option<Box<dyn Runtime>> {

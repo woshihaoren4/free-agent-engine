@@ -5,7 +5,9 @@ mod event;
 mod common;
 mod plan;
 mod error;
+mod tool;
 
+pub use tool::*;
 pub use common::*;
 pub use task::*;
 pub use plan::*;
