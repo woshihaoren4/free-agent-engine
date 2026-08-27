@@ -8,6 +8,7 @@ pub enum TaskType {
     #[default]
     Tool,
     Plan,
+    Model,
     Any(String),
 }
 //

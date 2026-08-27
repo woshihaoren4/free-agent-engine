@@ -321,7 +321,6 @@ mod test {
     use std::sync::Arc;
     #[test]
     fn test_client_creation() {
-        unsafe { std::env::set_var("OPENAI_API_KEY", "test") }
         let openai_config = OpenAIConfig::default();
         let config = Box::new(openai_config.clone()) as Box<dyn Config>;
         let client = Client::with_config(config);

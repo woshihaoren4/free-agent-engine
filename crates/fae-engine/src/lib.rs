@@ -13,6 +13,7 @@ impl Engine {
         let mut builder = EngineBuilder::new();
 
         builder.add_runtime(PlanRuntime::new());
+        builder.add_runtime(ModelRuntime::new());
 
         let mut tools_runtime = ToolsRuntime::new();
         tools_runtime.add_tool(Box::new(DefaultTools::default()));
