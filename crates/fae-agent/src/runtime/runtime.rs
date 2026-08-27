@@ -179,8 +179,8 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        let info = format!("{}:{}", file!(), line!());
-        task.ctx.append_stack(self.id(), info);
+        let info = format!("{:?}", req.meta);
+        req.ctx.append_stack(self.id(), info);
         self.inner.spawn(req).await
     }
 
@@ -212,8 +212,8 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        let info = format!("{}:{}", file!(), line!());
-        task.ctx.append_stack(self.id(), info);
+        let info = format!("{:?}", req.meta);
+        req.ctx.append_stack(self.id(), info);
         let resp = self.inner.exec(req).await?;
         Ok(resp.into_response())
     }

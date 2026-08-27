@@ -58,6 +58,10 @@ impl Context for EngineContext {
             .push(value);
     }
 
+    fn stacks(&self) -> HashMap<String, Vec<String>> {
+        self.stacks.lock().unwrap().clone()
+    }
+
     fn get_rt(&self) -> RT {
         self.rt.clone()
     }

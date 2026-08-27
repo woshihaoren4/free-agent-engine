@@ -56,7 +56,7 @@ impl Plan for FileParsePlan {
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
         Ok(PlanNext::Tasks(vec![self.tool_task(
             "read_env",
-            format!("default__{}",EXECUTE_COMMAND).as_str(),
+            format!("default__{}", EXECUTE_COMMAND).as_str(),
             json!({
                 "command": read_env_command(&self.file_env_name),
                 "timeout_secs": 5
@@ -206,13 +206,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let engine = build_engine().await;
-    let (_ctx, parsed) = engine
+    let (ctx, parsed) = engine
         .invoke::<_, String>(FileParseEnv {
             file_env_name: INPUT_FILE_ENV.to_string(),
         })
         .await?;
 
     println!("{parsed}");
+    println!("{:#?}", ctx.stacks());
     engine.exit().await?;
 
     Ok(())

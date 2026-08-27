@@ -66,10 +66,7 @@ impl EngineBuilder {
         self.add_raw_plan_builder(Box::new(PlanBuilderWithEnvWrapper::new(builder)))
     }
 
-    pub fn add_plan_builder<T,ENV>(
-        &mut self,
-        builder: T,
-    ) -> Option<Box<dyn PlanBuilder>>
+    pub fn add_plan_builder<T, ENV>(&mut self, builder: T) -> Option<Box<dyn PlanBuilder>>
     where
         ENV: Debug + Send + Sync + 'static,
         T: PlanBuilderWithEnv<ENV>,

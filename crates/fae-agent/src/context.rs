@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::{fmt::Debug, sync::Arc};
 
@@ -11,6 +12,9 @@ pub struct ContextStack {
 #[async_trait::async_trait]
 pub trait Context: Debug + Send + Sync + 'static {
     fn append_stack(&self, _key: &str, _value: String) {}
+    fn stacks(&self) -> HashMap<String, Vec<String>> {
+        HashMap::new()
+    }
     fn get_rt(&self) -> RT;
     fn over(&self, _value: AnyType) {}
     fn error(&self, _error: String) {}
@@ -26,6 +30,10 @@ pub trait Context: Debug + Send + Sync + 'static {
 pub struct ContextNull;
 #[async_trait::async_trait]
 impl Context for ContextNull {
+    fn stacks(&self) -> HashMap<String, Vec<String>> {
+        HashMap::new()
+    }
+
     fn get_rt(&self) -> RT {
         RT::null()
     }
