@@ -4,10 +4,46 @@ use std::sync::Arc;
 use async_openai::{
     Client,
     config::{Config, OpenAIConfig},
-    types::chat::{CreateChatCompletionRequest, CreateChatCompletionResponse},
+    types::chat::{
+        ChatCompletionResponseStream, CreateChatCompletionRequest, CreateChatCompletionResponse,
+    },
 };
 use fae_agent::{Event, EventType, RuntimeSelectExec, TaskReq, TaskResp, TaskType};
 use wd_tools::channel::{Channel, Receiver, Sender};
+
+pub enum ModelResponse {
+    Completed(CreateChatCompletionResponse),
+    Streaming(ChatCompletionResponseStream),
+}
+
+impl Debug for ModelResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed(response) => f.debug_tuple("Completed").field(response).finish(),
+            Self::Streaming(_) => f.write_str("Streaming(<chat completion stream>)"),
+        }
+    }
+}
+
+impl ModelResponse {
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, Self::Streaming(_))
+    }
+
+    pub fn into_completed(self) -> Option<CreateChatCompletionResponse> {
+        match self {
+            Self::Completed(response) => Some(response),
+            Self::Streaming(_) => None,
+        }
+    }
+
+    pub fn into_stream(self) -> Option<ChatCompletionResponseStream> {
+        match self {
+            Self::Completed(_) => None,
+            Self::Streaming(stream) => Some(stream),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ModelRuntime<C: Config + Debug = OpenAIConfig> {
@@ -51,17 +87,33 @@ where
         self.client.as_ref()
     }
 
-    async fn complete(
-        &self,
-        task: TaskReq<CreateChatCompletionRequest>,
-    ) -> fae_agent::Result<TaskResp<CreateChatCompletionResponse>> {
-        let TaskReq { ctx, mut meta, req } = task;
-        let resp = self
-            .client
+    async fn request(
+        client: &Client<C>,
+        req: CreateChatCompletionRequest,
+    ) -> fae_agent::Result<ModelResponse> {
+        if req.stream.unwrap_or(false) {
+            let stream = client
+                .chat()
+                .create_stream(req)
+                .await
+                .map_err(anyhow::Error::from)?;
+            return Ok(ModelResponse::Streaming(stream));
+        }
+
+        let response = client
             .chat()
             .create(req)
             .await
             .map_err(anyhow::Error::from)?;
+        Ok(ModelResponse::Completed(response))
+    }
+
+    async fn complete(
+        &self,
+        task: TaskReq<CreateChatCompletionRequest>,
+    ) -> fae_agent::Result<TaskResp<ModelResponse>> {
+        let TaskReq { ctx, mut meta, req } = task;
+        let resp = Self::request(self.client.as_ref(), req).await?;
         meta.publisher = Self::ID.to_string();
 
         Ok(TaskResp { ctx, meta, resp })
@@ -69,8 +121,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<C> RuntimeSelectExec<CreateChatCompletionRequest, CreateChatCompletionResponse, (), ()>
-    for ModelRuntime<C>
+impl<C> RuntimeSelectExec<CreateChatCompletionRequest, ModelResponse, (), ()> for ModelRuntime<C>
 where
     C: Config + Debug + 'static,
 {
@@ -100,7 +151,7 @@ where
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
             let response_ctx = ctx.clone();
-            let result = client.chat().create(req).await.map(|resp| {
+            let result = Self::request(client.as_ref(), req).await.map(|resp| {
                 meta.publisher = Self::ID.to_string();
                 Event {
                     from_rt_id: Self::ID.to_string(),
@@ -131,7 +182,7 @@ where
     async fn exec(
         &self,
         task: TaskReq<CreateChatCompletionRequest>,
-    ) -> fae_agent::Result<TaskResp<CreateChatCompletionResponse>> {
+    ) -> fae_agent::Result<TaskResp<ModelResponse>> {
         self.complete(task).await
     }
 }
@@ -143,21 +194,20 @@ mod tests {
         ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
     };
     use fae_agent::{ContextNull, Ctx, TaskMeta};
+    use tokio_stream::StreamExt;
 
-    #[tokio::test]
-    #[ignore = "requires OPENAI_API_KEY and network access"]
-    async fn test_model_runtime_exec_chat_completion_bits_ut() -> anyhow::Result<()> {
-        let runtime = ModelRuntime::default();
-        println!("open ai config: {:?}", runtime.client.config());
-        let model = std::env::var("FAE_DEFAULT_MODEL").unwrap();
+    fn model_task(stream: bool) -> anyhow::Result<TaskReq<CreateChatCompletionRequest>> {
+        let model = std::env::var("FAE_DEFAULT_MODEL")?;
         let request = CreateChatCompletionRequestArgs::default()
             .model(model)
+            .stream(stream)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content("你好")
                 .build()?
                 .into()])
             .build()?;
-        let task = TaskReq {
+
+        Ok(TaskReq {
             ctx: Ctx::new(Arc::new(ContextNull)),
             meta: TaskMeta {
                 id: "task-1".to_string(),
@@ -165,7 +215,13 @@ mod tests {
                 ..Default::default()
             },
             req: request,
-        };
+        })
+    }
+
+    #[tokio::test]
+    async fn test_model_runtime_exec_chat_completion_bits_ut() -> anyhow::Result<()> {
+        let runtime = ModelRuntime::default();
+        println!("open ai config: {:?}", runtime.client.config());
 
         runtime.select(TaskType::Model, ()).await?;
         assert!(
@@ -173,13 +229,15 @@ mod tests {
             "model runtime must reject non-model tasks"
         );
 
-        let response = runtime.exec(task).await?;
-        println!("model response: {:#?}", response.resp);
+        let response = runtime.exec(model_task(false)?).await?;
         assert_eq!(response.meta.publisher, ModelRuntime::<OpenAIConfig>::ID);
-        assert!(!response.resp.id.is_empty());
+        let ModelResponse::Completed(response) = response.resp else {
+            anyhow::bail!("expected completed model response");
+        };
+        println!("model choices: {:#?}", response.choices);
+        assert!(!response.id.is_empty());
         assert!(
             response
-                .resp
                 .choices
                 .first()
                 .and_then(|choice| choice.message.content.as_deref())
@@ -187,6 +245,35 @@ mod tests {
             "model response must contain non-empty text"
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_model_runtime_exec_streaming_chat_completion_bits_ut() -> anyhow::Result<()> {
+        let runtime = ModelRuntime::default();
+        let response = runtime.exec(model_task(true)?).await?;
+        assert_eq!(response.meta.publisher, ModelRuntime::<OpenAIConfig>::ID);
+        let ModelResponse::Streaming(mut stream) = response.resp else {
+            anyhow::bail!("expected streaming model response");
+        };
+
+        let mut chunks = 0;
+        let mut has_content = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            println!("model stream choices: {:#?}", chunk.choices);
+            chunks += 1;
+            has_content |= chunk.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
+            });
+        }
+
+        assert!(chunks > 0, "model stream must return at least one chunk");
+        assert!(has_content, "model stream must contain non-empty text");
         Ok(())
     }
 }
