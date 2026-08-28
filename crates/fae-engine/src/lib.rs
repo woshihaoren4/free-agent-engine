@@ -14,10 +14,13 @@ impl Engine {
 
         builder.add_runtime(PlanRuntime::new());
         builder.add_runtime(ModelRuntime::new());
+        builder.add_runtime(SessionRuntime::new());
 
         let mut tools_runtime = ToolsRuntime::new();
         tools_runtime.add_tool(Box::new(DefaultTools::default()));
         builder.add_runtime(tools_runtime);
+
+        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
 
         builder.build().await
     }

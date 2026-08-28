@@ -21,3 +21,7 @@ path = "basic.rs"
 [[example]]
 name = "plan_builder_with_env"
 path = "plan_builder_with_env.rs"
+
+[[example]]
+name = "single_agent"
+path = "single_agent.rs"

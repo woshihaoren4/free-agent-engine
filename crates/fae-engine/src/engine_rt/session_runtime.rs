@@ -1,113 +1,14 @@
 use std::path::{Component, Path, PathBuf};
 
 use fae_agent::{Event, EventType, RuntimeSelectExec, TaskReq, TaskResp, TaskType};
-use serde::{Deserialize, Serialize};
+pub use fae_agent::{
+    SessionMessage, SessionMessageRole, SessionQuery, SessionRequest, SessionResponse,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use wd_tools::channel::{Channel, Receiver, Sender};
 
 pub const FAE_HOST_ENV: &str = "FAE_HOST";
 pub const DEFAULT_FAE_HOST_DIR: &str = ".fae";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SessionMessageRole {
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionMessage {
-    pub role: SessionMessageRole,
-    pub content: String,
-}
-
-impl SessionMessage {
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: SessionMessageRole::User,
-            content: content.into(),
-        }
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: SessionMessageRole::Assistant,
-            content: content.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionQuery {
-    pub user: String,
-    pub session_id: String,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub offset: Option<usize>,
-}
-
-impl SessionQuery {
-    pub fn new(user: impl Into<String>, session_id: impl Into<String>) -> Self {
-        Self {
-            user: user.into(),
-            session_id: session_id.into(),
-            limit: None,
-            offset: None,
-        }
-    }
-
-    pub fn with_page(
-        user: impl Into<String>,
-        session_id: impl Into<String>,
-        limit: impl Into<Option<usize>>,
-        offset: impl Into<Option<usize>>,
-    ) -> Self {
-        Self {
-            user: user.into(),
-            session_id: session_id.into(),
-            limit: limit.into(),
-            offset: offset.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionRequest {
-    Add {
-        user: String,
-        session_id: String,
-        messages: Vec<SessionMessage>,
-    },
-    Delete {
-        user: String,
-        session_id: String,
-    },
-    Query {
-        user: String,
-        session_id: String,
-        #[serde(default)]
-        limit: Option<usize>,
-        #[serde(default)]
-        offset: Option<usize>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionResponse {
-    Added {
-        path: PathBuf,
-        added: usize,
-    },
-    Deleted {
-        path: PathBuf,
-        existed: bool,
-    },
-    History {
-        path: PathBuf,
-        messages: Vec<SessionMessage>,
-    },
-}
 
 #[derive(Debug)]
 pub struct SessionRuntime {
