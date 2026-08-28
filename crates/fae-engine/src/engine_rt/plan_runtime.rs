@@ -51,7 +51,7 @@ impl PlanRuntime {
             let mut responses = Vec::with_capacity(tasks.len());
             for mut task in tasks {
                 task.ctx = ctx.clone();
-                let rt = ctx.get_rt();
+                let rt = ctx.get_engine().rt();
                 let mut response = Runtime::exec(&*rt, &mut task).await?;
                 response.ctx = ctx.clone();
                 responses.push(response);

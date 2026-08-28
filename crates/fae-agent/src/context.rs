@@ -2,7 +2,29 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{RT, common::AnyType};
+use crate::{Plan, RT, common::AnyType};
+
+#[async_trait::async_trait]
+pub trait Engine: Debug + Send + Sync + 'static {
+    fn rt(&self) -> RT;
+    async fn call(&self, ctx: Ctx, ty: String, env: AnyType) -> anyhow::Result<Box<dyn Plan>>;
+}
+
+pub type EngineRef = Arc<dyn Engine>;
+
+#[derive(Debug)]
+struct EngineNull;
+
+#[async_trait::async_trait]
+impl Engine for EngineNull {
+    fn rt(&self) -> RT {
+        RT::null()
+    }
+
+    async fn call(&self, _ctx: Ctx, _ty: String, _env: AnyType) -> anyhow::Result<Box<dyn Plan>> {
+        anyhow::bail!("null engine cannot build plans")
+    }
+}
 
 #[derive(Debug)]
 pub struct ContextStack {
@@ -15,7 +37,7 @@ pub trait Context: Debug + Send + Sync + 'static {
     fn stacks(&self) -> HashMap<String, Vec<String>> {
         HashMap::new()
     }
-    fn get_rt(&self) -> RT;
+    fn get_engine(&self) -> EngineRef;
     fn over(&self, _value: AnyType) {}
     fn error(&self, _error: String) {}
     fn is_completed(&self) -> bool {
@@ -34,8 +56,8 @@ impl Context for ContextNull {
         HashMap::new()
     }
 
-    fn get_rt(&self) -> RT {
-        RT::null()
+    fn get_engine(&self) -> EngineRef {
+        Arc::new(EngineNull)
     }
 }
 

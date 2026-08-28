@@ -9,6 +9,7 @@ pub enum TaskType {
     Tool,
     Plan,
     Model,
+    Session,
     Any(String),
 }
 //

@@ -2,20 +2,24 @@ use crate::{EngineContext, PlanRuntime};
 use fae_agent::{Ctx, Plan, PlanBuilder, RT, to_plan_ty};
 use std::any::type_name;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Engine {
-    plan_builders: HashMap<String, Box<dyn PlanBuilder>>,
+    plan_builders: Arc<HashMap<String, Box<dyn PlanBuilder>>>,
     rt: RT,
 }
 
 impl Engine {
     pub fn new(plan_builders: HashMap<String, Box<dyn PlanBuilder>>, rt: RT) -> Self {
-        Self { plan_builders, rt }
+        Self {
+            plan_builders: Arc::new(plan_builders),
+            rt,
+        }
     }
 
     pub fn ctx(&self) -> Ctx {
-        Ctx::new(EngineContext::into_arc(self.rt()))
+        Ctx::new(EngineContext::into_arc(self.clone()))
     }
 
     pub fn rt(&self) -> RT {
@@ -23,7 +27,7 @@ impl Engine {
     }
 
     pub fn plan_builders(&self) -> &HashMap<String, Box<dyn PlanBuilder>> {
-        &self.plan_builders
+        self.plan_builders.as_ref()
     }
 
     pub fn plan_builder(&self, ty: &str) -> Option<&dyn PlanBuilder> {
@@ -89,6 +93,26 @@ impl Engine {
 
     async fn run_plan(plan: Box<dyn Plan>, ctx: Ctx) -> anyhow::Result<()> {
         PlanRuntime::run_plan(plan, ctx).await
+    }
+}
+
+#[async_trait::async_trait]
+impl fae_agent::Engine for Engine {
+    fn rt(&self) -> RT {
+        self.rt()
+    }
+
+    async fn call(
+        &self,
+        ctx: Ctx,
+        ty: String,
+        env: fae_agent::AnyType,
+    ) -> anyhow::Result<Box<dyn Plan>> {
+        let builder = self.plan_builder(&ty).ok_or_else(|| {
+            anyhow::anyhow!("plan builder is not registered for environment type `{ty}`")
+        })?;
+
+        builder.build(self.rt(), ctx, env).await
     }
 }
 
@@ -164,5 +188,24 @@ mod tests {
         ctx.result::<()>().await.unwrap();
 
         assert!(ctx.is_completed());
+    }
+
+    #[tokio::test]
+    async fn clone_shares_plan_builders_and_context_exposes_engine() {
+        let engine = test_engine(Arc::new(AtomicBool::new(false))).await;
+        let cloned = engine.clone();
+        let ctx = engine.ctx();
+
+        assert!(Arc::ptr_eq(&engine.plan_builders, &cloned.plan_builders));
+        assert_eq!(engine.rt().id(), ctx.get_engine().rt().id());
+
+        ctx.get_engine()
+            .call(
+                ctx.clone(),
+                to_plan_ty::<TestEnv>(),
+                Box::new(TestEnv { fail: false }),
+            )
+            .await
+            .unwrap();
     }
 }

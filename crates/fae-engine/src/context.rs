@@ -1,4 +1,5 @@
-use fae_agent::{AnyType, Context, RT};
+use crate::Engine;
+use fae_agent::{AnyType, Context, EngineRef};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,7 @@ enum Completion {
 }
 
 pub struct EngineContext {
-    rt: RT,
+    engine: EngineRef,
     stacks: Mutex<HashMap<String, Vec<String>>>,
     result: Mutex<Completion>,
     completion: Notify,
@@ -21,7 +22,7 @@ impl Debug for EngineContext {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("EngineContext")
-            .field("rt", &self.rt)
+            .field("engine", &self.engine)
             .field("stacks", &self.stacks)
             .field("completed", &self.is_completed())
             .finish_non_exhaustive()
@@ -29,17 +30,17 @@ impl Debug for EngineContext {
 }
 
 impl EngineContext {
-    pub fn new(rt: RT) -> Self {
+    pub fn new(engine: Engine) -> Self {
         Self {
-            rt,
+            engine: Arc::new(engine),
             stacks: Mutex::new(HashMap::new()),
             result: Mutex::new(Completion::Pending),
             completion: Notify::new(),
         }
     }
 
-    pub fn into_arc(rt: RT) -> Arc<Self> {
-        Arc::new(Self::new(rt))
+    pub fn into_arc(engine: Engine) -> Arc<Self> {
+        Arc::new(Self::new(engine))
     }
 
     pub fn stacks(&self) -> HashMap<String, Vec<String>> {
@@ -62,8 +63,8 @@ impl Context for EngineContext {
         self.stacks.lock().unwrap().clone()
     }
 
-    fn get_rt(&self) -> RT {
-        self.rt.clone()
+    fn get_engine(&self) -> EngineRef {
+        self.engine.clone()
     }
 
     fn over(&self, value: AnyType) {

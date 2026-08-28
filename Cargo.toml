@@ -7,6 +7,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [workspace]
+resolver = "3"
 members = ["crates/fae-agent", "crates/fae-engine", "examples", "crates/async-openai"]
 
 [workspace.dependencies]
