@@ -1,8 +1,8 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -17,7 +17,7 @@ use async_openai::types::chat::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{
-    Mutex, RwLock,
+    Mutex, Notify, RwLock,
     mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 use tokio_stream::StreamExt;
@@ -104,6 +104,11 @@ pub enum SingleAgentEvent {
         name: String,
         messages: Vec<SessionMessage>,
     },
+    UserInput {
+        turn_id: u64,
+        name: String,
+        content: String,
+    },
     ModelOutput {
         turn_id: u64,
         name: String,
@@ -144,6 +149,7 @@ impl SingleAgentEvent {
         match self {
             Self::TurnStarted { .. } => "turn_started",
             Self::HistoryLoaded { .. } => "history_loaded",
+            Self::UserInput { .. } => "user_input",
             Self::ModelOutput { .. } => "model_output",
             Self::ModelReasoning { .. } => "model_reasoning",
             Self::ToolCall { .. } => "tool_call",
@@ -157,6 +163,7 @@ impl SingleAgentEvent {
         match self {
             Self::TurnStarted { name, .. }
             | Self::HistoryLoaded { name, .. }
+            | Self::UserInput { name, .. }
             | Self::ModelOutput { name, .. }
             | Self::ModelReasoning { name, .. }
             | Self::ToolCall { name, .. }
@@ -170,6 +177,7 @@ impl SingleAgentEvent {
         match self {
             Self::TurnStarted { turn_id, .. }
             | Self::HistoryLoaded { turn_id, .. }
+            | Self::UserInput { turn_id, .. }
             | Self::ModelOutput { turn_id, .. }
             | Self::ModelReasoning { turn_id, .. }
             | Self::ToolCall { turn_id, .. }
@@ -194,8 +202,16 @@ struct SingleAgentSessionInner {
     sender: UnboundedSender<SingleAgentEvent>,
     receiver: Mutex<UnboundedReceiver<SingleAgentEvent>>,
     binding: RwLock<Option<SingleAgentBinding>>,
-    active: AtomicBool,
+    state: StdMutex<SingleAgentSessionState>,
+    idle: Notify,
     next_turn_id: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct SingleAgentSessionState {
+    active: bool,
+    accepting_input: bool,
+    pending_inputs: VecDeque<String>,
 }
 
 impl SingleAgentSession {
@@ -206,7 +222,8 @@ impl SingleAgentSession {
                 sender,
                 receiver: Mutex::new(receiver),
                 binding: RwLock::new(None),
-                active: AtomicBool::new(false),
+                state: StdMutex::new(SingleAgentSessionState::default()),
+                idle: Notify::new(),
                 next_turn_id: AtomicU64::new(1),
             }),
         }
@@ -220,15 +237,43 @@ impl SingleAgentSession {
     }
 
     fn activate_turn(&self) -> anyhow::Result<u64> {
-        self.inner
-            .active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| anyhow::anyhow!("a turn is already running"))?;
+        let mut state = self.inner.state.lock().expect("session state poisoned");
+        anyhow::ensure!(!state.active, "a turn is already running");
+        state.active = true;
+        state.accepting_input = true;
         Ok(self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    fn take_pending_inputs(&self) -> Vec<String> {
+        let mut state = self.inner.state.lock().expect("session state poisoned");
+        state.pending_inputs.drain(..).collect()
+    }
+
+    fn finish_or_take_pending(&self) -> Option<Vec<String>> {
+        let mut state = self.inner.state.lock().expect("session state poisoned");
+        if state.pending_inputs.is_empty() {
+            state.accepting_input = false;
+            None
+        } else {
+            Some(state.pending_inputs.drain(..).collect())
+        }
+    }
+
     fn finish_turn(&self) {
-        self.inner.active.store(false, Ordering::Release);
+        let mut state = self.inner.state.lock().expect("session state poisoned");
+        state.active = false;
+        state.accepting_input = false;
+        drop(state);
+        self.inner.idle.notify_waiters();
+    }
+
+    fn abort_turn(&self) {
+        let mut state = self.inner.state.lock().expect("session state poisoned");
+        state.active = false;
+        state.accepting_input = false;
+        state.pending_inputs.clear();
+        drop(state);
+        self.inner.idle.notify_waiters();
     }
 }
 
@@ -243,7 +288,30 @@ impl Session<String, SingleAgentEvent> for SingleAgentSession {
             .await
             .clone()
             .ok_or_else(|| anyhow::anyhow!("single-agent session is not bound to an engine"))?;
-        let turn_id = self.activate_turn()?;
+
+        loop {
+            let idle = self.inner.idle.notified();
+            let should_wait = {
+                let mut state = self.inner.state.lock().expect("session state poisoned");
+                if !state.active {
+                    state.active = true;
+                    state.accepting_input = true;
+                    false
+                } else if state.accepting_input {
+                    state.pending_inputs.push_back(input);
+                    return Ok(());
+                } else {
+                    true
+                }
+            };
+            if should_wait {
+                idle.await;
+            } else {
+                break;
+            }
+        }
+
+        let turn_id = self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed);
         let plan = SingleAgentPlan::new(
             binding.ctx.clone(),
             binding.template,
@@ -262,7 +330,7 @@ impl Session<String, SingleAgentEvent> for SingleAgentSession {
         };
 
         if let Err(error) = binding.rt.spawn(task).await {
-            self.finish_turn();
+            self.abort_turn();
             return Err(error);
         }
         Ok(())
@@ -390,10 +458,13 @@ struct SingleAgentPlan {
     session: SingleAgentSession,
     stage: SingleAgentStage,
     messages: Vec<ChatCompletionRequestMessage>,
+    unsaved_messages: Vec<SessionMessage>,
     final_output: String,
     tool_iterations: usize,
     task_sequence: u64,
     pending_tools: HashMap<String, (String, String)>,
+    owns_active_turn: bool,
+    finish_on_drop: bool,
 }
 
 impl SingleAgentPlan {
@@ -404,6 +475,7 @@ impl SingleAgentPlan {
         turn_id: u64,
         session: SingleAgentSession,
     ) -> Self {
+        let initial_message = SessionMessage::user(input.clone());
         Self {
             ctx,
             template,
@@ -412,10 +484,13 @@ impl SingleAgentPlan {
             session,
             stage: SingleAgentStage::History,
             messages: Vec::new(),
+            unsaved_messages: vec![initial_message],
             final_output: String::new(),
             tool_iterations: 0,
             task_sequence: 0,
             pending_tools: HashMap::new(),
+            owns_active_turn: true,
+            finish_on_drop: false,
         }
     }
 
@@ -475,12 +550,29 @@ impl SingleAgentPlan {
             SessionRequest::Add {
                 user: self.template.agent.user_id.clone(),
                 session_id: self.template.agent.session_id.clone(),
-                messages: vec![
-                    SessionMessage::user(self.input.clone()),
-                    SessionMessage::assistant(self.final_output.clone()),
-                ],
+                messages: self.unsaved_messages.clone(),
             },
         )
+    }
+
+    async fn append_user_inputs(&mut self, inputs: Vec<String>) -> anyhow::Result<()> {
+        for input in inputs {
+            self.emit(SingleAgentEvent::UserInput {
+                turn_id: self.turn_id,
+                name: self.template.agent.user_id.clone(),
+                content: input.clone(),
+            })
+            .await?;
+            self.messages.push(ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: input.clone().into(),
+                    ..Default::default()
+                },
+            ));
+            self.unsaved_messages.push(SessionMessage::user(input));
+        }
+        trim_messages_to_context(&mut self.messages, self.template.model.context_size);
+        Ok(())
     }
 
     fn prepare_messages(&mut self, history: &[SessionMessage]) {
@@ -587,7 +679,23 @@ impl SingleAgentPlan {
     async fn handle_model_response(&mut self, response: ModelResponse) -> anyhow::Result<PlanNext> {
         let (content, tool_calls) = self.consume_model(response).await?;
         if tool_calls.is_empty() {
-            self.final_output = content;
+            self.final_output = content.clone();
+            self.messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(content.clone().into()),
+                    ..Default::default()
+                },
+            ));
+            self.unsaved_messages
+                .push(SessionMessage::assistant(content));
+
+            let pending = self.session.take_pending_inputs();
+            if !pending.is_empty() {
+                self.append_user_inputs(pending).await?;
+                self.stage = SingleAgentStage::Model;
+                return Ok(PlanNext::Tasks(vec![self.model_task()?]));
+            }
+
             self.stage = SingleAgentStage::Save;
             return Ok(PlanNext::Tasks(vec![self.save_task()]));
         }
@@ -691,6 +799,8 @@ impl SingleAgentPlan {
         };
         *remaining -= 1;
         if *remaining == 0 {
+            let pending = self.session.take_pending_inputs();
+            self.append_user_inputs(pending).await?;
             self.stage = SingleAgentStage::Model;
             Ok(PlanNext::Tasks(vec![self.model_task()?]))
         } else {
@@ -730,6 +840,8 @@ impl Plan for SingleAgentPlan {
                 })
                 .await?;
                 self.prepare_messages(&messages);
+                let pending = self.session.take_pending_inputs();
+                self.append_user_inputs(pending).await?;
                 self.stage = SingleAgentStage::Model;
                 Ok(PlanNext::Tasks(vec![self.model_task()?]))
             }
@@ -751,20 +863,29 @@ impl Plan for SingleAgentPlan {
                     matches!(response.resp, SessionResponse::Added { .. }),
                     "expected session add response"
                 );
-                self.session.finish_turn();
-                self.emit(SingleAgentEvent::Completed {
-                    turn_id: self.turn_id,
-                    name: self.template.agent.name.clone(),
-                    content: self.final_output.clone(),
-                })
-                .await?;
-                Ok(PlanNext::End)
+                self.unsaved_messages.clear();
+
+                if let Some(pending) = self.session.finish_or_take_pending() {
+                    self.append_user_inputs(pending).await?;
+                    self.stage = SingleAgentStage::Model;
+                    Ok(PlanNext::Tasks(vec![self.model_task()?]))
+                } else {
+                    self.finish_on_drop = true;
+                    self.emit(SingleAgentEvent::Completed {
+                        turn_id: self.turn_id,
+                        name: self.template.agent.name.clone(),
+                        content: self.final_output.clone(),
+                    })
+                    .await?;
+                    Ok(PlanNext::End)
+                }
             }
         }
     }
 
     async fn abort(&mut self, _code: i32, error: String) {
-        self.session.finish_turn();
+        self.session.abort_turn();
+        self.owns_active_turn = false;
         let _ = self
             .emit(SingleAgentEvent::Failed {
                 turn_id: self.turn_id,
@@ -777,7 +898,13 @@ impl Plan for SingleAgentPlan {
 
 impl Drop for SingleAgentPlan {
     fn drop(&mut self) {
-        self.session.finish_turn();
+        if self.owns_active_turn {
+            if self.finish_on_drop {
+                self.session.finish_turn();
+            } else {
+                self.session.abort_turn();
+            }
+        }
     }
 }
 
@@ -913,29 +1040,187 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_plan_appends_new_call_to_current_messages() {
+        let session = SingleAgentSession::new();
+        let ctx = Ctx::null();
+        let template = test_template();
+        let turn_id = session
+            .bind(SingleAgentBinding {
+                rt: RT::null(),
+                ctx: ctx.clone(),
+                template: template.clone(),
+            })
+            .await
+            .unwrap();
+        let mut plan = SingleAgentPlan::new(
+            ctx.clone(),
+            template,
+            "first".to_string(),
+            turn_id,
+            session.clone(),
+        );
+
+        session.call("second".to_string()).await.unwrap();
+        plan.init().await.unwrap();
+        let history_response = TaskResp {
+            ctx,
+            meta: TaskMeta::default(),
+            resp: SessionResponse::History {
+                path: "session.jsonl".into(),
+                messages: Vec::new(),
+            },
+        }
+        .into_response();
+        assert!(matches!(
+            plan.next(history_response).await.unwrap(),
+            PlanNext::Tasks(_)
+        ));
+
+        let user_messages = plan
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::User(message) => match &message.content {
+                    async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                        content,
+                    ) => Some(content.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(user_messages, vec!["first", "second"]);
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![
+                SessionMessage::user("first"),
+                SessionMessage::user("second")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_plan_appends_new_input_after_tool_result() {
+        let session = SingleAgentSession::new();
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template
+            .tool_routes
+            .insert("read_file".to_string(), "read_file".to_string());
+        let turn_id = session
+            .bind(SingleAgentBinding {
+                rt: RT::null(),
+                ctx: ctx.clone(),
+                template: template.clone(),
+            })
+            .await
+            .unwrap();
+        let mut plan = SingleAgentPlan::new(
+            ctx.clone(),
+            template,
+            "first".to_string(),
+            turn_id,
+            session.clone(),
+        );
+
+        plan.init().await.unwrap();
+        plan.next(
+            TaskResp {
+                ctx: ctx.clone(),
+                meta: TaskMeta::default(),
+                resp: SessionResponse::History {
+                    path: "session.jsonl".into(),
+                    messages: Vec::new(),
+                },
+            }
+            .into_response(),
+        )
+        .await
+        .unwrap();
+
+        let model_response: CreateChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "response-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "content": null,
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"Cargo.toml\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "created": 0,
+                "model": "test-model",
+                "object": "chat.completion",
+                "usage": null
+            }))
+            .unwrap();
+        let PlanNext::Tasks(tool_tasks) = plan
+            .next(
+                TaskResp {
+                    ctx: ctx.clone(),
+                    meta: TaskMeta::default(),
+                    resp: ModelResponse::Completed(model_response),
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected tool task");
+        };
+        let tool_task_id = tool_tasks[0].meta.id.clone();
+
+        session.call("second".to_string()).await.unwrap();
+        let next = plan
+            .next(
+                TaskResp {
+                    ctx,
+                    meta: TaskMeta {
+                        id: tool_task_id,
+                        ..Default::default()
+                    },
+                    resp: ToolResponse::with_result("{\"content\":\"workspace\"}".to_string()),
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(next, PlanNext::Tasks(_)));
+        assert!(matches!(
+            plan.messages.as_slice(),
+            [
+                ChatCompletionRequestMessage::System(_),
+                ChatCompletionRequestMessage::User(_),
+                ChatCompletionRequestMessage::Assistant(_),
+                ChatCompletionRequestMessage::Tool(_),
+                ChatCompletionRequestMessage::User(_)
+            ]
+        ));
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![
+                SessionMessage::user("first"),
+                SessionMessage::user("second")
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn no_tool_turn_streams_and_completes() {
         let session = SingleAgentSession::new();
         session.activate_turn().unwrap();
         let ctx = Ctx::null();
-        let template = SingleAgentTemplate {
-            agent: SingleAgentInfo {
-                name: "test-agent".to_string(),
-                user_id: "user-1".to_string(),
-                session_id: "session-1".to_string(),
-                metadata: HashMap::new(),
-            },
-            prompt: "be concise".to_string(),
-            model: SingleAgentModelConfig {
-                model: "test-model".to_string(),
-                context_size: 1_024,
-                history_turns: 2,
-                max_completion_tokens: None,
-                temperature: None,
-                max_tool_iterations: 2,
-            },
-            tool_definitions: Vec::new(),
-            tool_routes: HashMap::new(),
-        };
+        let template = test_template();
         let mut plan = SingleAgentPlan::new(
             ctx.clone(),
             template,
@@ -1014,5 +1299,27 @@ mod tests {
                 "completed"
             ]
         );
+    }
+
+    fn test_template() -> SingleAgentTemplate {
+        SingleAgentTemplate {
+            agent: SingleAgentInfo {
+                name: "test-agent".to_string(),
+                user_id: "user-1".to_string(),
+                session_id: "session-1".to_string(),
+                metadata: HashMap::new(),
+            },
+            prompt: "be concise".to_string(),
+            model: SingleAgentModelConfig {
+                model: "test-model".to_string(),
+                context_size: 1_024,
+                history_turns: 2,
+                max_completion_tokens: None,
+                temperature: None,
+                max_tool_iterations: 2,
+            },
+            tool_definitions: Vec::new(),
+            tool_routes: HashMap::new(),
+        }
     }
 }

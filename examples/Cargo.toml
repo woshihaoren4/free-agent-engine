@@ -19,8 +19,8 @@ name = "basic"
 path = "basic.rs"
 
 [[example]]
-name = "plan_builder_with_env"
-path = "plan_builder_with_env.rs"
+name = "plan_builder"
+path = "plan_builder.rs"
 
 [[example]]
 name = "single_agent"

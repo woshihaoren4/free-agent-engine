@@ -59,6 +59,10 @@ async fn print_turn(session: &impl Session<String, SingleAgentEvent>) -> anyhow:
             SingleAgentEvent::HistoryLoaded { messages, .. } => {
                 println!("history> loaded {} message(s)", messages.len());
             }
+            SingleAgentEvent::UserInput { content, .. } => {
+                finish_stream(&mut streaming);
+                println!("user> {content}");
+            }
             SingleAgentEvent::ModelReasoning { content, .. } => {
                 if streaming != Some("reasoning") {
                     finish_stream(&mut streaming);
