@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fae_agent::{
-    ContextNull, Ctx, Event, EventType, RuntimeSelectExec, TaskReq, TaskResp, TaskType,
+    ContextNull, Ctx, Event, EventType, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType,
     ToolRequest, ToolResponse, Tools,
 };
 use serde_json::Value;
@@ -123,7 +123,7 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
     }
 
     async fn spawn(&self, task: TaskReq<ToolRequest>) -> fae_agent::Result<()> {
-        let TaskReq { ctx, meta, req } = task;
+        let TaskReq { ctx, mut meta, req } = task;
         let tool = self
             .lookup_tool(req.get_tool_name())
             .cloned()
@@ -132,17 +132,20 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
 
         tokio::spawn(async move {
             let runtime_id = Self::ID.to_string();
+            if meta.publisher.is_empty() {
+                meta.publisher = runtime_id.clone();
+            }
             let response_ctx = ctx.clone();
+            let error_meta = meta.clone();
             let result = tool.exec(&ctx, req).await.map(|resp| {
-                let mut response = TaskResp {
+                let response = TaskResp {
                     ctx: response_ctx,
                     meta,
                     resp,
                 }
                 .into_response();
-                response.meta.publisher = runtime_id.clone();
                 Event {
-                    from_rt_id: runtime_id,
+                    from_rt_id: runtime_id.clone(),
                     event_type: EventType::TaskResult(response),
                 }
             });
@@ -153,7 +156,19 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
                         wd_log::log_error_ln!("send tool task result failed: {:?}", err);
                     }
                 }
-                Err(err) => ctx.error(err.to_string()),
+                Err(error) => {
+                    let event = Event {
+                        from_rt_id: runtime_id,
+                        event_type: EventType::TaskError(TaskError {
+                            ctx,
+                            meta: error_meta,
+                            error: error.to_string(),
+                        }),
+                    };
+                    if let Err(error) = event_sender.send(event).await {
+                        wd_log::log_error_ln!("send tool task error failed: {:?}", error);
+                    }
+                }
             }
         });
 

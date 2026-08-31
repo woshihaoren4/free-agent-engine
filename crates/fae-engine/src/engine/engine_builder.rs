@@ -1,5 +1,5 @@
 use super::Engine;
-use crate::engine_rt::EngineRuntime;
+use crate::engine_rt::{EngineRuntime, PlanRuntime};
 use fae_agent::{
     PlanBuilder, PlanBuilderWithEnv, PlanBuilderWithEnvWrapper, Runtime, RuntimeSelectExec,
     TaskType,
@@ -118,7 +118,10 @@ impl EngineBuilder {
         self.runtimes.remove_runtime(id)
     }
 
-    pub async fn build(self) -> Engine {
+    pub async fn build(mut self) -> Engine {
+        if !self.runtimes.contains_runtime(PlanRuntime::ID) {
+            self.add_runtime(PlanRuntime::new());
+        }
         let rt = self.runtimes.build().await;
         Engine::new(self.plan_builders, rt)
     }

@@ -1,5 +1,7 @@
 use crate::common::AnyType;
-use crate::{Event, EventType, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, common};
+use crate::{
+    Event, EventType, TaskError, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, common,
+};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -109,7 +111,10 @@ where
     async fn trigger(&self, _event: &mut common::AnyType) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
-    async fn task_result_callback(&self, _task: TaskResp<Resp>) -> crate::Result<()> {
+    async fn task_result_callback(&self, _task: TaskResponse) -> crate::Result<()> {
+        Err(crate::Error::RuntimeNoSupport)
+    }
+    async fn task_error_callback(&self, _task: TaskError) -> crate::Result<()> {
         Err(crate::Error::RuntimeNoSupport)
     }
     async fn exec(&self, _task: TaskReq<Req>) -> crate::Result<TaskResp<Resp>> {
@@ -192,12 +197,22 @@ where
                 if result.meta.publisher != self.id() {
                     return Err(crate::Error::RuntimeNoSupport);
                 }
-                let resp = if let Some(req) = TaskResp::<Resp>::try_from_response(result) {
-                    req
-                } else {
+                let response = std::mem::replace(result, TaskResponse::new_null());
+                self.inner.task_result_callback(response).await
+            }
+            EventType::TaskError(error) => {
+                if error.meta.publisher != self.id() {
                     return Err(crate::Error::RuntimeNoSupport);
-                };
-                self.inner.task_result_callback(resp).await
+                }
+                let error = std::mem::replace(
+                    error,
+                    TaskError {
+                        ctx: crate::Ctx::null(),
+                        meta: crate::TaskMeta::default(),
+                        error: String::new(),
+                    },
+                );
+                self.inner.task_error_callback(error).await
             }
             EventType::Any(_id, ty) => self.inner.trigger(ty).await,
         }

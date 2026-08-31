@@ -36,15 +36,20 @@ impl EngineRuntime {
     }
 
     pub async fn build(self) -> RT {
+        let mut receivers = Vec::new();
         for rt in self.rts.values() {
             let Ok(rt_receiver) = rt.watch().await else {
                 continue;
             };
-
-            Self::forward_events(rt_receiver, self.event_sender.clone());
+            receivers.push(rt_receiver);
         }
 
-        RT::new(Arc::new(self))
+        let runtime = Arc::new(self);
+        for receiver in receivers {
+            Self::forward_events(receiver, runtime.clone());
+        }
+
+        RT::new(runtime)
     }
 
     pub fn event_sender(&self) -> Sender<Event> {
@@ -127,11 +132,43 @@ impl EngineRuntime {
         });
     }
 
-    fn forward_events(receiver: Receiver<Event>, sender: Sender<Event>) {
+    fn forward_events(receiver: Receiver<Event>, runtime: Arc<Self>) {
         tokio::spawn(async move {
-            while let Ok(event) = receiver.recv().await {
-                if sender.send(event).await.is_err() {
-                    break;
+            while let Ok(mut event) = receiver.recv().await {
+                let callback_runtime = match &event.event_type {
+                    EventType::TaskResult(result)
+                        if !result.meta.parent_id.is_empty()
+                            && !result.meta.publisher.is_empty() =>
+                    {
+                        runtime.rts.get(&result.meta.publisher)
+                    }
+                    EventType::TaskError(error)
+                        if !error.meta.parent_id.is_empty() && !error.meta.publisher.is_empty() =>
+                    {
+                        runtime.rts.get(&error.meta.publisher)
+                    }
+                    _ => None,
+                };
+
+                if let Some(callback_runtime) = callback_runtime {
+                    let ctx = match &event.event_type {
+                        EventType::TaskResult(result) => Some(result.ctx.clone()),
+                        EventType::TaskError(error) => Some(error.ctx.clone()),
+                        _ => None,
+                    };
+                    if let Err(error) = callback_runtime.trigger(&mut event).await {
+                        if let Some(ctx) = ctx {
+                            ctx.error(error.to_string());
+                        }
+                        wd_log::log_error_ln!("dispatch task result callback failed: {:?}", error);
+                    }
+                } else {
+                    if let EventType::TaskError(error) = &event.event_type {
+                        error.ctx.error(error.error.clone());
+                    }
+                    if runtime.event_sender.send(event).await.is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -196,6 +233,7 @@ impl Runtime for EngineRuntime {
         let rt_id = match &event.event_type {
             EventType::Task(_) => unreachable!(),
             EventType::TaskResult(result) => result.meta.publisher.clone(),
+            EventType::TaskError(error) => error.meta.publisher.clone(),
             EventType::Any(rt_id, _) => rt_id.clone(),
         };
 

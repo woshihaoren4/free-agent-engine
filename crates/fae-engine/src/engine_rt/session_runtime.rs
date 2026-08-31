@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use fae_agent::{Event, EventType, RuntimeSelectExec, TaskReq, TaskResp, TaskType};
+use fae_agent::{Event, EventType, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType};
 pub use fae_agent::{
     SessionMessage, SessionMessageRole, SessionQuery, SessionRequest, SessionResponse,
 };
@@ -211,7 +211,11 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
 
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
+            if meta.publisher.is_empty() {
+                meta.publisher = Self::ID.to_string();
+            }
             let response_ctx = ctx.clone();
+            let error_meta = meta.clone();
             let runtime = SessionRuntime::with_host_dir(host_dir);
             let result = match req {
                 SessionRequest::Add {
@@ -229,19 +233,16 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
                     offset,
                 } => runtime.query_page(&user, &session_id, limit, offset).await,
             }
-            .map(|resp| {
-                meta.publisher = Self::ID.to_string();
-                Event {
-                    from_rt_id: Self::ID.to_string(),
-                    event_type: EventType::TaskResult(
-                        TaskResp {
-                            ctx: response_ctx,
-                            meta,
-                            resp,
-                        }
-                        .into_response(),
-                    ),
-                }
+            .map(|resp| Event {
+                from_rt_id: Self::ID.to_string(),
+                event_type: EventType::TaskResult(
+                    TaskResp {
+                        ctx: response_ctx,
+                        meta,
+                        resp,
+                    }
+                    .into_response(),
+                ),
             });
 
             match result {
@@ -250,7 +251,19 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
                         wd_log::log_error_ln!("send session task result failed: {:?}", err);
                     }
                 }
-                Err(err) => ctx.error(err.to_string()),
+                Err(error) => {
+                    let event = Event {
+                        from_rt_id: Self::ID.to_string(),
+                        event_type: EventType::TaskError(TaskError {
+                            ctx,
+                            meta: error_meta,
+                            error: error.to_string(),
+                        }),
+                    };
+                    if let Err(error) = event_sender.send(event).await {
+                        wd_log::log_error_ln!("send session task error failed: {:?}", error);
+                    }
+                }
             }
         });
 

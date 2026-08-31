@@ -92,103 +92,85 @@ impl SingleAgentEnv {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SingleAgentEvent {
+    pub turn_id: u64,
+    #[serde(rename = "name")]
+    pub source: String,
+    #[serde(flatten)]
+    pub data: SingleAgentEventData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SingleAgentEvent {
+pub enum SingleAgentEventData {
     TurnStarted {
-        turn_id: u64,
-        name: String,
         input: String,
     },
     HistoryLoaded {
-        turn_id: u64,
-        name: String,
         messages: Vec<SessionMessage>,
     },
     UserInput {
-        turn_id: u64,
-        name: String,
         content: String,
     },
     ModelOutput {
-        turn_id: u64,
-        name: String,
         content: String,
     },
     ModelReasoning {
-        turn_id: u64,
-        name: String,
         content: String,
     },
     ToolCall {
-        turn_id: u64,
-        name: String,
         call_id: String,
         arguments: String,
     },
     ToolOutput {
-        turn_id: u64,
-        name: String,
         call_id: String,
         output: String,
         completed: bool,
     },
     Completed {
-        turn_id: u64,
-        name: String,
         content: String,
     },
     Failed {
-        turn_id: u64,
-        name: String,
         error: String,
     },
 }
 
 impl SingleAgentEvent {
+    pub fn new(turn_id: u64, source: impl Into<String>, data: SingleAgentEventData) -> Self {
+        Self {
+            turn_id,
+            source: source.into(),
+            data,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
-        match self {
-            Self::TurnStarted { .. } => "turn_started",
-            Self::HistoryLoaded { .. } => "history_loaded",
-            Self::UserInput { .. } => "user_input",
-            Self::ModelOutput { .. } => "model_output",
-            Self::ModelReasoning { .. } => "model_reasoning",
-            Self::ToolCall { .. } => "tool_call",
-            Self::ToolOutput { .. } => "tool_output",
-            Self::Completed { .. } => "completed",
-            Self::Failed { .. } => "failed",
+        match self.data {
+            SingleAgentEventData::TurnStarted { .. } => "turn_started",
+            SingleAgentEventData::HistoryLoaded { .. } => "history_loaded",
+            SingleAgentEventData::UserInput { .. } => "user_input",
+            SingleAgentEventData::ModelOutput { .. } => "model_output",
+            SingleAgentEventData::ModelReasoning { .. } => "model_reasoning",
+            SingleAgentEventData::ToolCall { .. } => "tool_call",
+            SingleAgentEventData::ToolOutput { .. } => "tool_output",
+            SingleAgentEventData::Completed { .. } => "completed",
+            SingleAgentEventData::Failed { .. } => "failed",
         }
     }
 
     pub fn name(&self) -> &str {
-        match self {
-            Self::TurnStarted { name, .. }
-            | Self::HistoryLoaded { name, .. }
-            | Self::UserInput { name, .. }
-            | Self::ModelOutput { name, .. }
-            | Self::ModelReasoning { name, .. }
-            | Self::ToolCall { name, .. }
-            | Self::ToolOutput { name, .. }
-            | Self::Completed { name, .. }
-            | Self::Failed { name, .. } => name,
-        }
+        &self.source
     }
 
     pub fn turn_id(&self) -> u64 {
-        match self {
-            Self::TurnStarted { turn_id, .. }
-            | Self::HistoryLoaded { turn_id, .. }
-            | Self::UserInput { turn_id, .. }
-            | Self::ModelOutput { turn_id, .. }
-            | Self::ModelReasoning { turn_id, .. }
-            | Self::ToolCall { turn_id, .. }
-            | Self::ToolOutput { turn_id, .. }
-            | Self::Completed { turn_id, .. }
-            | Self::Failed { turn_id, .. } => *turn_id,
-        }
+        self.turn_id
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed { .. } | Self::Failed { .. })
+        matches!(
+            self.data,
+            SingleAgentEventData::Completed { .. } | SingleAgentEventData::Failed { .. }
+        )
     }
 }
 
@@ -451,6 +433,7 @@ enum SingleAgentStage {
 
 #[derive(Debug)]
 struct SingleAgentPlan {
+    id: String,
     ctx: Ctx,
     template: SingleAgentTemplate,
     input: String,
@@ -477,6 +460,7 @@ impl SingleAgentPlan {
     ) -> Self {
         let initial_message = SessionMessage::user(input.clone());
         Self {
+            id: format!("single_agent-{}", wd_tools::uuid::v4()),
             ctx,
             template,
             input,
@@ -494,11 +478,15 @@ impl SingleAgentPlan {
         }
     }
 
-    async fn emit(&self, event: SingleAgentEvent) -> anyhow::Result<()> {
+    async fn emit(
+        &self,
+        source: impl Into<String>,
+        data: SingleAgentEventData,
+    ) -> anyhow::Result<()> {
         self.session
             .inner
             .sender
-            .send(event)
+            .send(SingleAgentEvent::new(self.turn_id, source, data))
             .map_err(|error| anyhow::anyhow!("send single-agent event failed: {error}"))
     }
 
@@ -557,11 +545,12 @@ impl SingleAgentPlan {
 
     async fn append_user_inputs(&mut self, inputs: Vec<String>) -> anyhow::Result<()> {
         for input in inputs {
-            self.emit(SingleAgentEvent::UserInput {
-                turn_id: self.turn_id,
-                name: self.template.agent.user_id.clone(),
-                content: input.clone(),
-            })
+            self.emit(
+                self.template.agent.user_id.clone(),
+                SingleAgentEventData::UserInput {
+                    content: input.clone(),
+                },
+            )
             .await?;
             self.messages.push(ChatCompletionRequestMessage::User(
                 ChatCompletionRequestUserMessage {
@@ -630,11 +619,12 @@ impl SingleAgentPlan {
                     .ok_or_else(|| anyhow::anyhow!("model returned no choices"))?;
                 let content = choice.message.content.unwrap_or_default();
                 if !content.is_empty() {
-                    self.emit(SingleAgentEvent::ModelOutput {
-                        turn_id: self.turn_id,
-                        name: self.template.model.model.clone(),
-                        content: content.clone(),
-                    })
+                    self.emit(
+                        self.template.model.model.clone(),
+                        SingleAgentEventData::ModelOutput {
+                            content: content.clone(),
+                        },
+                    )
                     .await?;
                 }
                 Ok((content, choice.message.tool_calls.unwrap_or_default()))
@@ -647,19 +637,17 @@ impl SingleAgentPlan {
                     for choice in chunk.choices {
                         if let Some(delta) = choice.delta.content {
                             content.push_str(&delta);
-                            self.emit(SingleAgentEvent::ModelOutput {
-                                turn_id: self.turn_id,
-                                name: self.template.model.model.clone(),
-                                content: delta,
-                            })
+                            self.emit(
+                                self.template.model.model.clone(),
+                                SingleAgentEventData::ModelOutput { content: delta },
+                            )
                             .await?;
                         }
                         if let Some(reasoning) = choice.delta.reasoning_content {
-                            self.emit(SingleAgentEvent::ModelReasoning {
-                                turn_id: self.turn_id,
-                                name: self.template.model.model.clone(),
-                                content: reasoning,
-                            })
+                            self.emit(
+                                self.template.model.model.clone(),
+                                SingleAgentEventData::ModelReasoning { content: reasoning },
+                            )
                             .await?;
                         }
                         for call in choice.delta.tool_calls.unwrap_or_default() {
@@ -730,12 +718,13 @@ impl SingleAgentPlan {
                 .get(&tool_name)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("model requested unavailable tool `{tool_name}`"))?;
-            self.emit(SingleAgentEvent::ToolCall {
-                turn_id: self.turn_id,
-                name: tool_name.clone(),
-                call_id: call_id.clone(),
-                arguments: arguments.clone(),
-            })
+            self.emit(
+                tool_name.clone(),
+                SingleAgentEventData::ToolCall {
+                    call_id: call_id.clone(),
+                    arguments: arguments.clone(),
+                },
+            )
             .await?;
             let task = self.task(
                 TaskType::Tool,
@@ -764,23 +753,25 @@ impl SingleAgentPlan {
         let completed_output = loop {
             match response.next().await? {
                 ToolRespItem::Streaming(output) => {
-                    self.emit(SingleAgentEvent::ToolOutput {
-                        turn_id: self.turn_id,
-                        name: tool_name.clone(),
-                        call_id: call_id.clone(),
-                        output,
-                        completed: false,
-                    })
+                    self.emit(
+                        tool_name.clone(),
+                        SingleAgentEventData::ToolOutput {
+                            call_id: call_id.clone(),
+                            output,
+                            completed: false,
+                        },
+                    )
                     .await?;
                 }
                 ToolRespItem::Completed(output) => {
-                    self.emit(SingleAgentEvent::ToolOutput {
-                        turn_id: self.turn_id,
-                        name: tool_name,
-                        call_id: call_id.clone(),
-                        output: output.clone(),
-                        completed: true,
-                    })
+                    self.emit(
+                        tool_name,
+                        SingleAgentEventData::ToolOutput {
+                            call_id: call_id.clone(),
+                            output: output.clone(),
+                            completed: true,
+                        },
+                    )
                     .await?;
                     break output;
                 }
@@ -812,15 +803,16 @@ impl SingleAgentPlan {
 #[async_trait::async_trait]
 impl Plan for SingleAgentPlan {
     fn id(&self) -> &str {
-        "single_agent"
+        &self.id
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
-        self.emit(SingleAgentEvent::TurnStarted {
-            turn_id: self.turn_id,
-            name: self.template.agent.name.clone(),
-            input: self.input.clone(),
-        })
+        self.emit(
+            self.template.agent.name.clone(),
+            SingleAgentEventData::TurnStarted {
+                input: self.input.clone(),
+            },
+        )
         .await?;
         Ok(PlanNext::Tasks(vec![self.history_task()]))
     }
@@ -833,11 +825,12 @@ impl Plan for SingleAgentPlan {
                 let SessionResponse::History { messages, .. } = response.resp else {
                     anyhow::bail!("expected history query response");
                 };
-                self.emit(SingleAgentEvent::HistoryLoaded {
-                    turn_id: self.turn_id,
-                    name: "session".to_string(),
-                    messages: messages.clone(),
-                })
+                self.emit(
+                    "session",
+                    SingleAgentEventData::HistoryLoaded {
+                        messages: messages.clone(),
+                    },
+                )
                 .await?;
                 self.prepare_messages(&messages);
                 let pending = self.session.take_pending_inputs();
@@ -871,11 +864,12 @@ impl Plan for SingleAgentPlan {
                     Ok(PlanNext::Tasks(vec![self.model_task()?]))
                 } else {
                     self.finish_on_drop = true;
-                    self.emit(SingleAgentEvent::Completed {
-                        turn_id: self.turn_id,
-                        name: self.template.agent.name.clone(),
-                        content: self.final_output.clone(),
-                    })
+                    self.emit(
+                        self.template.agent.name.clone(),
+                        SingleAgentEventData::Completed {
+                            content: self.final_output.clone(),
+                        },
+                    )
                     .await?;
                     Ok(PlanNext::End)
                 }
@@ -887,11 +881,10 @@ impl Plan for SingleAgentPlan {
         self.session.abort_turn();
         self.owns_active_turn = false;
         let _ = self
-            .emit(SingleAgentEvent::Failed {
-                turn_id: self.turn_id,
-                name: self.template.agent.name.clone(),
-                error,
-            })
+            .emit(
+                self.template.agent.name.clone(),
+                SingleAgentEventData::Failed { error },
+            )
             .await;
     }
 }
@@ -969,6 +962,34 @@ mod tests {
     };
 
     #[test]
+    fn event_uses_common_envelope_and_flat_payload() {
+        let event = SingleAgentEvent::new(
+            7,
+            "read_file",
+            SingleAgentEventData::ToolCall {
+                call_id: "call-1".to_string(),
+                arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+            },
+        );
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "turn_id": 7,
+                "name": "read_file",
+                "type": "tool_call",
+                "call_id": "call-1",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SingleAgentEvent>(value).unwrap(),
+            event
+        );
+    }
+
+    #[test]
     fn streamed_tool_call_chunks_are_assembled() {
         let mut call = ToolCallAccumulator::default();
         call.merge(ChatCompletionMessageToolCallChunk {
@@ -1037,6 +1058,28 @@ mod tests {
         let session = SingleAgentSession::new();
         let error = session.call("hello".to_string()).await.unwrap_err();
         assert!(error.to_string().contains("not bound"));
+    }
+
+    #[test]
+    fn plans_have_unique_ids() {
+        let first = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "first".to_string(),
+            1,
+            SingleAgentSession::new(),
+        );
+        let second = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "second".to_string(),
+            2,
+            SingleAgentSession::new(),
+        );
+
+        assert!(first.id().starts_with("single_agent-"));
+        assert!(second.id().starts_with("single_agent-"));
+        assert_ne!(first.id(), second.id());
     }
 
     #[tokio::test]

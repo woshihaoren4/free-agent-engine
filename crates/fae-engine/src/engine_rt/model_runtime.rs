@@ -5,7 +5,9 @@ use async_openai::{
     config::{Config, OpenAIConfig},
     types::chat::CreateChatCompletionRequest,
 };
-use fae_agent::{Event, EventType, ModelResponse, RuntimeSelectExec, TaskReq, TaskResp, TaskType};
+use fae_agent::{
+    Event, EventType, ModelResponse, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType,
+};
 use wd_tools::channel::{Channel, Receiver, Sender};
 
 #[derive(Debug)]
@@ -113,20 +115,21 @@ where
 
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
-            let response_ctx = ctx.clone();
-            let result = Self::request(client.as_ref(), req).await.map(|resp| {
+            if meta.publisher.is_empty() {
                 meta.publisher = Self::ID.to_string();
-                Event {
-                    from_rt_id: Self::ID.to_string(),
-                    event_type: EventType::TaskResult(
-                        TaskResp {
-                            ctx: response_ctx,
-                            meta,
-                            resp,
-                        }
-                        .into_response(),
-                    ),
-                }
+            }
+            let response_ctx = ctx.clone();
+            let error_meta = meta.clone();
+            let result = Self::request(client.as_ref(), req).await.map(|resp| Event {
+                from_rt_id: Self::ID.to_string(),
+                event_type: EventType::TaskResult(
+                    TaskResp {
+                        ctx: response_ctx,
+                        meta,
+                        resp,
+                    }
+                    .into_response(),
+                ),
             });
 
             match result {
@@ -135,7 +138,19 @@ where
                         wd_log::log_error_ln!("send model task result failed: {:?}", err);
                     }
                 }
-                Err(err) => ctx.error(err.to_string()),
+                Err(error) => {
+                    let event = Event {
+                        from_rt_id: Self::ID.to_string(),
+                        event_type: EventType::TaskError(TaskError {
+                            ctx,
+                            meta: error_meta,
+                            error: error.to_string(),
+                        }),
+                    };
+                    if let Err(error) = event_sender.send(event).await {
+                        wd_log::log_error_ln!("send model task error failed: {:?}", error);
+                    }
+                }
             }
         });
 
