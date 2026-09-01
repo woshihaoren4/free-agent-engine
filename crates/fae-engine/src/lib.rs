@@ -21,6 +21,7 @@ impl Engine {
         builder.add_runtime(tools_runtime);
 
         builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+        builder.add_plan_builder(fae_agent::WorkflowPlanBuilder);
 
         builder.build().await
     }
@@ -31,7 +32,7 @@ mod tests {
     use super::*;
     use fae_agent::{
         Ctx, EventType, TaskMeta, TaskReq, TaskResp, TaskType, ToolRequest, ToolRespItem,
-        ToolResponse,
+        ToolResponse, WorkflowAction, WorkflowBuilder, WorkflowRun,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
@@ -80,6 +81,35 @@ mod tests {
                 .contains("pub use tools::*;")
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
+        let engine = Engine::default().await;
+        let mut builder = WorkflowBuilder::new("read-file-workflow");
+        builder.start("start", "read")?;
+        builder.execute(
+            "read",
+            WorkflowAction::Tool {
+                tool_name: READ_FILE.to_string(),
+                arguments: json!({
+                    "path": "{$input.path}",
+                    "max_bytes": 64
+                }),
+            },
+            "end",
+        )?;
+        builder.end("end", Some(json!("{$read.truncated}")))?;
+
+        let input = json!({
+            "path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
+        });
+        let (_, output) = engine
+            .invoke::<_, Value>(WorkflowRun::new(builder.build()?, input))
+            .await?;
+
+        assert_eq!(output, json!(true));
         Ok(())
     }
 

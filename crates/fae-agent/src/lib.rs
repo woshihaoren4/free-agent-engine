@@ -8,6 +8,7 @@ mod runtime;
 mod session;
 mod task;
 mod tool;
+mod workflow;
 
 pub use common::*;
 pub use context::*;
@@ -19,6 +20,7 @@ pub use runtime::*;
 pub use session::*;
 pub use task::*;
 pub use tool::*;
+pub use workflow::*;
 
 #[cfg(test)]
 mod tests {
