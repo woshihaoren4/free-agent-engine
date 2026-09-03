@@ -8,6 +8,7 @@ pub enum TaskType {
     #[default]
     Tool,
     Plan,
+    Workflow,
     Model,
     Session,
     Any(String),
@@ -25,7 +26,7 @@ pub enum TaskType {
 #[derive(Debug, Default, Clone)]
 pub struct TaskMeta {
     pub id: String,
-    pub parent_id: String,
+    pub plan_id: String,
     pub ty: TaskType,
     pub publisher: String,
     pub executor: String,

@@ -4,7 +4,7 @@ use std::{
 };
 
 use fae_agent::{
-    Session, SingleAgentEnv, SingleAgentEvent, SingleAgentEventData, SingleAgentInfo,
+    Session, SessionEvent, SessionEventData, SingleAgentEnv, SingleAgentInfo,
     SingleAgentModelConfig,
 };
 
@@ -74,24 +74,24 @@ fn read_user_input() -> anyhow::Result<Option<String>> {
     }
 }
 
-async fn print_turn(session: &impl Session<String, SingleAgentEvent>) -> anyhow::Result<()> {
+async fn print_turn(session: &impl Session<String, SessionEvent>) -> anyhow::Result<()> {
     let mut streaming = None;
 
     while let Some(event) = session.answer().await? {
-        let turn_id = event.turn_id;
+        let turn_id = event.turn_id.unwrap_or_default();
         let source = event.source;
         match event.data {
-            SingleAgentEventData::TurnStarted { input } => {
+            SessionEventData::TurnStarted { input } => {
                 println!("\n== Turn {turn_id} | {source} ==\nuser> {input}");
             }
-            SingleAgentEventData::HistoryLoaded { messages } => {
+            SessionEventData::HistoryLoaded { messages } => {
                 println!("history> loaded {} message(s)", messages.len());
             }
-            SingleAgentEventData::UserInput { content } => {
+            SessionEventData::UserInput { content } => {
                 finish_stream(&mut streaming);
                 println!("user> {content}");
             }
-            SingleAgentEventData::ModelReasoning { content } => {
+            SessionEventData::ModelReasoning { content } => {
                 if streaming != Some("reasoning") {
                     finish_stream(&mut streaming);
                     print!("reasoning> ");
@@ -100,7 +100,7 @@ async fn print_turn(session: &impl Session<String, SingleAgentEvent>) -> anyhow:
                 print!("{content}");
                 io::stdout().flush()?;
             }
-            SingleAgentEventData::ModelOutput { content } => {
+            SessionEventData::ModelOutput { content } => {
                 if streaming != Some("assistant") {
                     finish_stream(&mut streaming);
                     print!("assistant> ");
@@ -109,27 +109,35 @@ async fn print_turn(session: &impl Session<String, SingleAgentEvent>) -> anyhow:
                 print!("{content}");
                 io::stdout().flush()?;
             }
-            SingleAgentEventData::ToolCall { arguments, .. } => {
+            SessionEventData::ToolCall { arguments, .. } => {
                 finish_stream(&mut streaming);
                 println!("tool call> {source}\n{}", pretty_json(&arguments));
             }
-            SingleAgentEventData::ToolOutput {
+            SessionEventData::ToolOutput {
                 output, completed, ..
             } => {
                 finish_stream(&mut streaming);
                 let status = if completed { "completed" } else { "streaming" };
                 println!("tool result> {source} [{status}]\n{}", pretty_json(&output));
             }
-            SingleAgentEventData::Completed { .. } => {
+            SessionEventData::Completed { .. } => {
                 finish_stream(&mut streaming);
                 println!("== Turn {turn_id} completed ==");
                 break;
             }
-            SingleAgentEventData::Failed { error } => {
+            SessionEventData::Failed { error } => {
                 finish_stream(&mut streaming);
                 eprintln!("== Turn {turn_id} failed ==\n{error}");
                 break;
             }
+            SessionEventData::Custom {
+                event_type,
+                content,
+            } => {
+                finish_stream(&mut streaming);
+                println!("{event_type}> {content}");
+            }
+            SessionEventData::NodeCompleted { .. } => {}
         }
     }
     Ok(())

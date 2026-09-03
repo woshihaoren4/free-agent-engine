@@ -13,6 +13,7 @@ impl Engine {
         let mut builder = EngineBuilder::new();
 
         builder.add_runtime(PlanRuntime::new());
+        builder.add_runtime(WorkflowRuntime::new());
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(SessionRuntime::new());
 
@@ -31,8 +32,9 @@ impl Engine {
 mod tests {
     use super::*;
     use fae_agent::{
-        Ctx, EventType, TaskMeta, TaskReq, TaskResp, TaskType, ToolRequest, ToolRespItem,
-        ToolResponse, WorkflowAction, WorkflowBuilder, WorkflowRun,
+        Ctx, EventType, Session, SessionEventData, TaskMeta, TaskReq, TaskResp, TaskType,
+        ToolRequest, ToolRespItem, ToolResponse, WorkflowAction, WorkflowEnv,
+        WorkflowMetadataBuilder,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
@@ -87,7 +89,7 @@ mod tests {
     #[tokio::test]
     async fn test_default_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
         let engine = Engine::default().await;
-        let mut builder = WorkflowBuilder::new("read-file-workflow");
+        let mut builder = WorkflowMetadataBuilder::new("read-file-workflow");
         builder.start("start", "read")?;
         builder.execute(
             "read",
@@ -105,11 +107,53 @@ mod tests {
         let input = json!({
             "path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
         });
-        let (_, output) = engine
-            .invoke::<_, Value>(WorkflowRun::new(builder.build()?, input))
-            .await?;
+        builder.input(input);
+        let (env, session) = WorkflowEnv::new(builder.build()?);
+        let (_, output) = engine.invoke::<_, Value>(env).await?;
 
         assert_eq!(output, json!(true));
+        for expected_node in ["start", "read", "end"] {
+            let event = session
+                .answer()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("workflow session ended unexpectedly"))?;
+            assert_eq!(event.node_id.as_deref(), Some(expected_node));
+            assert!(matches!(event.data, SessionEventData::NodeCompleted { .. }));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_engine_executes_nested_workflow_bits_ut() -> anyhow::Result<()> {
+        let engine = Engine::default().await;
+
+        let mut child = WorkflowMetadataBuilder::new("child");
+        child.start("start", "end")?;
+        child.end("end", Some(json!("{$input.value}")))?;
+        child.input(json!({"value": "{$input.child_value}"}));
+
+        let mut parent = WorkflowMetadataBuilder::new("parent");
+        parent.start("start", "nested")?;
+        parent.execute(
+            "nested",
+            WorkflowAction::Workflow {
+                workflow: Box::new(child.build()?),
+            },
+            "end",
+        )?;
+        parent.end("end", Some(json!({"nested": "{$nested}"})))?;
+        parent.input(json!({"child_value": 42}));
+
+        let (env, _) = WorkflowEnv::new(parent.build()?);
+        let (ctx, output) = engine.invoke::<_, Value>(env).await?;
+
+        assert_eq!(output, json!({"nested": 42}));
+        assert_eq!(
+            ctx.stacks().get(PlanRuntime::ID).map(Vec::len),
+            Some(2),
+            "parent and child plans should share the root context"
+        );
+        assert_eq!(ctx.stacks().get(WorkflowRuntime::ID).map(Vec::len), Some(1));
         Ok(())
     }
 

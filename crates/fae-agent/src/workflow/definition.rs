@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{SessionRequest, SingleAgentInfo, SingleAgentModelConfig};
@@ -20,17 +22,41 @@ fn default_python_task_type() -> String {
     "workflow.python".to_string()
 }
 
+fn deserialize_targets<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(target) => vec![target],
+        OneOrMany::Many(targets) => targets,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowDefinition {
+pub struct WorkflowMetadata {
     #[serde(default = "workflow_version")]
     pub version: u32,
     pub id: String,
+    #[serde(default)]
+    pub input: Value,
     pub nodes: BTreeMap<String, WorkflowNode>,
 }
 
-impl WorkflowDefinition {
+impl WorkflowMetadata {
+    pub fn with_input(mut self, input: Value) -> Self {
+        self.input = input;
+        self
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
-        crate::WorkflowBuilder::validate_definition(self)
+        crate::WorkflowMetadataBuilder::validate_metadata(self)
     }
 
     pub fn to_json(&self) -> anyhow::Result<String> {
@@ -39,9 +65,7 @@ impl WorkflowDefinition {
     }
 
     pub fn from_json(json: &str) -> anyhow::Result<Self> {
-        let workflow: Self = serde_json::from_str(json)?;
-        workflow.validate()?;
-        Ok(workflow)
+        json.parse()
     }
 
     pub async fn save_json(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -54,24 +78,52 @@ impl WorkflowDefinition {
     }
 }
 
+impl fmt::Display for WorkflowMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let serialized = serde_json::to_string(self).map_err(|_| fmt::Error)?;
+        formatter.write_str(&serialized)
+    }
+}
+
+impl FromStr for WorkflowMetadata {
+    type Err = anyhow::Error;
+
+    fn from_str(serialized: &str) -> Result<Self, Self::Err> {
+        let metadata: Self = serde_json::from_str(serialized)?;
+        metadata.validate()?;
+        Ok(metadata)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowNode {
     Start {
-        next: String,
+        #[serde(deserialize_with = "deserialize_targets")]
+        next: Vec<String>,
+    },
+    ParallelStart {
+        next: Vec<String>,
     },
     End {
         #[serde(default)]
         output: Option<Value>,
     },
+    JoinEnd {
+        #[serde(default)]
+        output: Option<Value>,
+    },
     Execute {
         action: WorkflowAction,
-        next: String,
+        #[serde(deserialize_with = "deserialize_targets")]
+        next: Vec<String>,
     },
     Decision {
         condition: WorkflowCondition,
-        on_true: String,
-        on_false: String,
+        #[serde(deserialize_with = "deserialize_targets")]
+        on_true: Vec<String>,
+        #[serde(deserialize_with = "deserialize_targets")]
+        on_false: Vec<String>,
     },
     Loop {
         condition: WorkflowCondition,
@@ -85,11 +137,13 @@ pub enum WorkflowNode {
 impl WorkflowNode {
     pub(crate) fn successors(&self) -> Vec<&str> {
         match self {
-            Self::Start { next } | Self::Execute { next, .. } => vec![next],
-            Self::End { .. } => Vec::new(),
+            Self::Start { next } | Self::ParallelStart { next } | Self::Execute { next, .. } => {
+                next.iter().map(String::as_str).collect()
+            }
+            Self::End { .. } | Self::JoinEnd { .. } => Vec::new(),
             Self::Decision {
                 on_true, on_false, ..
-            } => vec![on_true, on_false],
+            } => on_true.iter().chain(on_false).map(String::as_str).collect(),
             Self::Loop { body, next, .. } => vec![body, next],
         }
     }
@@ -98,6 +152,9 @@ impl WorkflowNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowAction {
+    Workflow {
+        workflow: Box<WorkflowMetadata>,
+    },
     Tool {
         tool_name: String,
         #[serde(default)]
@@ -155,19 +212,6 @@ pub enum WorkflowCompare {
     Le,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowRun {
-    pub workflow: WorkflowDefinition,
-    #[serde(default)]
-    pub input: Value,
-}
-
-impl WorkflowRun {
-    pub fn new(workflow: WorkflowDefinition, input: Value) -> Self {
-        Self { workflow, input }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowActionRequest {
     pub action: String,
@@ -184,24 +228,89 @@ pub struct WorkflowActionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WorkflowBuilder;
+    use crate::WorkflowMetadataBuilder;
     use serde_json::json;
 
     #[tokio::test]
     async fn saves_and_loads_a_valid_workflow() {
-        let mut builder = WorkflowBuilder::new("persisted");
+        let mut builder = WorkflowMetadataBuilder::new("persisted");
         builder.start("start", "end").unwrap();
         builder.end("end", Some(json!("{$input.result}"))).unwrap();
-        let workflow = builder.build().unwrap();
+        builder.input(json!({"result": "done"}));
+        let metadata = builder.build().unwrap();
         let path = std::env::temp_dir().join(format!("fae-workflow-{}.json", wd_tools::uuid::v4()));
 
-        workflow.save_json(&path).await.unwrap();
-        let loaded = WorkflowDefinition::load_json(&path).await.unwrap();
+        metadata.save_json(&path).await.unwrap();
+        let loaded = WorkflowMetadata::load_json(&path).await.unwrap();
         tokio::fs::remove_file(path).await.unwrap();
 
         assert_eq!(
             serde_json::to_value(loaded).unwrap(),
-            serde_json::to_value(workflow).unwrap()
+            serde_json::to_value(metadata).unwrap()
         );
+    }
+
+    #[test]
+    fn serializes_to_and_parses_from_string() {
+        let mut child = WorkflowMetadataBuilder::new("child");
+        child.start("start", "end").unwrap();
+        child.end("end", Some(json!("{$input.value}"))).unwrap();
+
+        let mut builder = WorkflowMetadataBuilder::new("string-round-trip");
+        builder.start("start", "child").unwrap();
+        builder
+            .execute(
+                "child",
+                WorkflowAction::Workflow {
+                    workflow: Box::new(child.build().unwrap()),
+                },
+                "end",
+            )
+            .unwrap();
+        builder.end("end", None).unwrap();
+        builder.input(json!({"value": 42}));
+        let metadata = builder.build().unwrap();
+
+        let serialized = metadata.to_string();
+        let parsed: WorkflowMetadata = serialized.parse().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            serde_json::to_value(metadata).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_legacy_single_target_fields() {
+        let metadata = WorkflowMetadata::from_json(
+            r#"{
+                "version": 1,
+                "id": "legacy",
+                "nodes": {
+                    "start": {"type": "start", "next": "decision"},
+                    "decision": {
+                        "type": "decision",
+                        "condition": {"type": "truthy", "value": true},
+                        "on_true": "end",
+                        "on_false": "end"
+                    },
+                    "end": {"type": "end"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            metadata.nodes.get("start"),
+            Some(WorkflowNode::Start { next }) if next == &["decision"]
+        ));
+        assert!(matches!(
+            metadata.nodes.get("decision"),
+            Some(WorkflowNode::Decision {
+                on_true,
+                on_false,
+                ..
+            }) if on_true == &["end"] && on_false == &["end"]
+        ));
     }
 }

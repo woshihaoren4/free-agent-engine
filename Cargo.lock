@@ -437,6 +437,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "wd_log",
+ "wd_tools 0.14.15",
 ]
 
 [[package]]

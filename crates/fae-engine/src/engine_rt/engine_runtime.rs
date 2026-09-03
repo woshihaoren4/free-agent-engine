@@ -135,33 +135,43 @@ impl EngineRuntime {
     fn forward_events(receiver: Receiver<Event>, runtime: Arc<Self>) {
         tokio::spawn(async move {
             while let Ok(mut event) = receiver.recv().await {
-                let callback_runtime = match &event.event_type {
+                let callback_runtime_id = match &event.event_type {
                     EventType::TaskResult(result)
-                        if !result.meta.parent_id.is_empty()
-                            && !result.meta.publisher.is_empty() =>
+                        if !result.meta.plan_id.is_empty() && !result.meta.publisher.is_empty() =>
                     {
-                        runtime.rts.get(&result.meta.publisher)
+                        Some(result.meta.publisher.clone())
                     }
                     EventType::TaskError(error)
-                        if !error.meta.parent_id.is_empty() && !error.meta.publisher.is_empty() =>
+                        if !error.meta.plan_id.is_empty() && !error.meta.publisher.is_empty() =>
                     {
-                        runtime.rts.get(&error.meta.publisher)
+                        Some(error.meta.publisher.clone())
                     }
                     _ => None,
-                };
+                }
+                .filter(|id| runtime.rts.contains_key(id));
 
-                if let Some(callback_runtime) = callback_runtime {
+                if let Some(callback_runtime_id) = callback_runtime_id {
                     let ctx = match &event.event_type {
                         EventType::TaskResult(result) => Some(result.ctx.clone()),
                         EventType::TaskError(error) => Some(error.ctx.clone()),
                         _ => None,
                     };
-                    if let Err(error) = callback_runtime.trigger(&mut event).await {
-                        if let Some(ctx) = ctx {
-                            ctx.error(error.to_string());
+                    let callback_owner = runtime.clone();
+                    tokio::spawn(async move {
+                        let callback_runtime = callback_owner
+                            .rts
+                            .get(&callback_runtime_id)
+                            .expect("callback runtime disappeared after engine build");
+                        if let Err(error) = callback_runtime.trigger(&mut event).await {
+                            if let Some(ctx) = ctx {
+                                ctx.error(error.to_string());
+                            }
+                            wd_log::log_error_ln!(
+                                "dispatch task result callback failed: {:?}",
+                                error
+                            );
                         }
-                        wd_log::log_error_ln!("dispatch task result callback failed: {:?}", error);
-                    }
+                    });
                 } else {
                     if let EventType::TaskError(error) = &event.event_type {
                         error.ctx.error(error.error.clone());
@@ -172,6 +182,102 @@ impl EngineRuntime {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fae_agent::{ContextNull, TaskMeta, TaskResp};
+    use tokio::sync::Notify;
+
+    #[derive(Debug)]
+    struct EventSourceRuntime {
+        receiver: Receiver<Event>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runtime for EventSourceRuntime {
+        fn id(&self) -> &str {
+            "event_source"
+        }
+
+        async fn watch(&self) -> fae_agent::Result<Receiver<Event>> {
+            Ok(self.receiver.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingCallbackRuntime {
+        slow_started: Arc<Notify>,
+        release_slow: Arc<Notify>,
+        fast_finished: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runtime for BlockingCallbackRuntime {
+        fn id(&self) -> &str {
+            "blocking_callback"
+        }
+
+        async fn trigger(&self, event: &mut Event) -> fae_agent::Result<()> {
+            let EventType::TaskResult(response) = &event.event_type else {
+                return Err(fae_agent::Error::RuntimeNoSupport);
+            };
+            match response.meta.id.as_str() {
+                "slow" => {
+                    self.slow_started.notify_one();
+                    self.release_slow.notified().await;
+                }
+                "fast" => self.fast_finished.notify_one(),
+                _ => return Err(fae_agent::Error::RuntimeNoSupport),
+            }
+            Ok(())
+        }
+    }
+
+    fn callback_event(id: &str) -> Event {
+        Event {
+            from_rt_id: "event_source".to_string(),
+            event_type: EventType::TaskResult(
+                TaskResp {
+                    ctx: fae_agent::Ctx::new(Arc::new(ContextNull)),
+                    meta: TaskMeta {
+                        id: id.to_string(),
+                        plan_id: format!("{id}-plan"),
+                        publisher: "blocking_callback".to_string(),
+                        ..Default::default()
+                    },
+                    resp: (),
+                }
+                .into_response(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn forwards_callbacks_concurrently() {
+        let (sender, receiver) = Channel::new(2);
+        let slow_started = Arc::new(Notify::new());
+        let release_slow = Arc::new(Notify::new());
+        let fast_finished = Arc::new(Notify::new());
+        let mut runtime = EngineRuntime::new();
+        runtime.add_raw_runtime(Box::new(EventSourceRuntime { receiver }));
+        runtime.add_raw_runtime(Box::new(BlockingCallbackRuntime {
+            slow_started: slow_started.clone(),
+            release_slow: release_slow.clone(),
+            fast_finished: fast_finished.clone(),
+        }));
+        let _runtime = runtime.build().await;
+
+        sender.send(callback_event("slow")).await.unwrap();
+        slow_started.notified().await;
+        sender.send(callback_event("fast")).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), fast_finished.notified())
+            .await
+            .expect("fast callback was blocked by slow callback");
+        release_slow.notify_one();
     }
 }
 

@@ -149,7 +149,7 @@ impl PlanRuntime {
 
                 for task in &mut tasks {
                     task.ctx = ctx.clone();
-                    task.meta.parent_id = plan_id.to_string();
+                    task.meta.plan_id = plan_id.to_string();
                     task.meta.publisher = Self::ID.to_string();
                 }
 
@@ -208,7 +208,7 @@ impl PlanRuntime {
         execution.plan.abort(PLAN_ABORT_CODE, message.clone()).await;
 
         match execution.completion.take() {
-            Some(PlanCompletion::Spawn(meta)) if !meta.parent_id.is_empty() => {
+            Some(PlanCompletion::Spawn(meta)) if !meta.plan_id.is_empty() => {
                 let event = Event {
                     from_rt_id: Self::ID.to_string(),
                     event_type: EventType::TaskError(TaskError {
@@ -254,7 +254,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     async fn spawn(&self, task: TaskReq<Box<dyn Plan>>) -> fae_agent::Result<()> {
         let meta = TaskMeta {
             id: task.meta.id.clone(),
-            parent_id: task.meta.parent_id.clone(),
+            plan_id: task.meta.plan_id.clone(),
             ty: task.meta.ty.clone(),
             publisher: task.meta.publisher.clone(),
             executor: task.meta.executor.clone(),
@@ -264,7 +264,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     }
 
     async fn task_result_callback(&self, response: TaskResponse) -> fae_agent::Result<()> {
-        let plan_id = response.meta.parent_id.clone();
+        let plan_id = response.meta.plan_id.clone();
         let task_id = response.meta.id.clone();
         let execution = self
             .plans
@@ -342,7 +342,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     }
 
     async fn task_error_callback(&self, error: TaskError) -> fae_agent::Result<()> {
-        self.fail_plan(&error.meta.parent_id, anyhow::anyhow!(error.error))
+        self.fail_plan(&error.meta.plan_id, anyhow::anyhow!(error.error))
             .await;
         Ok(())
     }
@@ -351,7 +351,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
         let ctx = task.ctx.clone();
         let mut meta = TaskMeta {
             id: task.meta.id.clone(),
-            parent_id: task.meta.parent_id.clone(),
+            plan_id: task.meta.plan_id.clone(),
             ty: task.meta.ty.clone(),
             publisher: task.meta.publisher.clone(),
             executor: task.meta.executor.clone(),
