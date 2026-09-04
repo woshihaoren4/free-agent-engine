@@ -389,10 +389,12 @@ impl WorkflowPlan {
                 model,
                 input,
                 tools,
+                skills,
+                mcp_servers,
             } => {
                 let prompt = resolved_string(&self.values().resolve(&Value::String(prompt))?)?;
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (env, session) = SingleAgentEnv::new_with_session(
+                let (mut env, session) = SingleAgentEnv::new_with_session(
                     agent,
                     prompt,
                     model,
@@ -402,6 +404,8 @@ impl WorkflowPlan {
                     self.metadata.id.clone(),
                     self.current.clone(),
                 );
+                env.skills = skills;
+                env.mcp_servers = mcp_servers;
                 let child = self
                     .ctx
                     .get_engine()
@@ -681,10 +685,12 @@ impl DagWorkflowPlan {
                 model,
                 input,
                 tools,
+                skills,
+                mcp_servers,
             } => {
                 let prompt = resolved_string(&self.values().resolve(&Value::String(prompt))?)?;
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (env, session) = SingleAgentEnv::new_with_session(
+                let (mut env, session) = SingleAgentEnv::new_with_session(
                     agent,
                     prompt,
                     model,
@@ -694,6 +700,8 @@ impl DagWorkflowPlan {
                     self.metadata.id.clone(),
                     node_id.to_string(),
                 );
+                env.skills = skills;
+                env.mcp_servers = mcp_servers;
                 let child = self
                     .ctx
                     .get_engine()

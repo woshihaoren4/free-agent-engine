@@ -16,6 +16,8 @@ impl Engine {
         builder.add_runtime(WorkflowRuntime::new());
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(SessionRuntime::new());
+        builder.add_runtime(SkillRuntime::new());
+        builder.add_runtime(McpRuntime::new());
 
         let mut tools_runtime = ToolsRuntime::new();
         tools_runtime.add_tool(Box::new(DefaultTools::default()));
@@ -44,6 +46,8 @@ mod tests {
         builder.add_runtime(WorkflowRuntime::new());
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(SessionRuntime::new());
+        builder.add_runtime(SkillRuntime::new());
+        builder.add_runtime(McpRuntime::new());
 
         let mut tools_runtime = ToolsRuntime::new();
         tools_runtime.add_tool(Box::new(DefaultTools::default()));

@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{SessionRequest, SingleAgentInfo, SingleAgentModelConfig};
+use crate::{SessionRequest, SingleAgentInfo, SingleAgentModelConfig, SkillQuery};
 
 pub const WORKFLOW_VERSION: u32 = 1;
 
@@ -162,6 +162,10 @@ pub enum WorkflowAction {
         input: Value,
         #[serde(default)]
         tools: Vec<String>,
+        #[serde(default)]
+        skills: Vec<SkillQuery>,
+        #[serde(default)]
+        mcp_servers: Vec<String>,
     },
     Session {
         request: SessionRequest,

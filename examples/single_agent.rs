@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
+    path::PathBuf,
 };
 
 use fae_agent::{
     Session, SessionEvent, SessionEventData, SingleAgentEnv, SingleAgentInfo,
-    SingleAgentModelConfig,
+    SingleAgentModelConfig, SkillQuery,
 };
 
 #[tokio::main]
@@ -37,8 +38,11 @@ async fn main() -> anyhow::Result<()> {
             max_tool_iterations: 8,
         },
         first_input,
-        vec![fae_engine::READ_FILE.to_string()],
+        vec![fae_engine::READ_FILE.to_string(),fae_engine::EXECUTE_COMMAND.to_string()],
     );
+    let weather_skill =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/skills/weather/SKILL.md");
+    let env = env.with_skills(vec![SkillQuery::Path(weather_skill)]);
 
     let first_turn = engine.launch(env).await?;
     print_turn(&session).await?;

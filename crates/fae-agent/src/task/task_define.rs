@@ -7,6 +7,8 @@ use wd_tools::PFSome;
 pub enum TaskType {
     #[default]
     Tool,
+    Skill,
+    Mcp,
     Plan,
     Workflow,
     Model,

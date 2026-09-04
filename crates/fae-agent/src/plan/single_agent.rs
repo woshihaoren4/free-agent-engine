@@ -20,10 +20,11 @@ use tokio::sync::{Notify, RwLock};
 use tokio_stream::StreamExt;
 
 use crate::{
-    Ctx, ModelResponse, Plan, PlanBuilderWithEnv, PlanNext, RT, Session, SessionEvent,
-    SessionEventChannel, SessionEventData, SessionMessage, SessionMessageRole, SessionRequest,
-    SessionResponse, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, ToolRequest,
-    ToolRespItem, ToolResponse, WorkflowSession, common,
+    Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse, Plan, PlanBuilderWithEnv,
+    PlanNext, RT, Session, SessionEvent, SessionEventChannel, SessionEventData, SessionMessage,
+    SessionMessageRole, SessionRequest, SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq,
+    TaskRequest, TaskResp, TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse,
+    WorkflowSession, common,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +60,8 @@ pub struct SingleAgentEnv {
     pub model: SingleAgentModelConfig,
     pub input: String,
     pub tools: Vec<String>,
+    pub skills: Vec<SkillQuery>,
+    pub mcp_servers: Vec<String>,
     session: SingleAgentSession,
 }
 
@@ -78,6 +81,8 @@ impl SingleAgentEnv {
                 model,
                 input: input.into(),
                 tools,
+                skills: Vec::new(),
+                mcp_servers: Vec::new(),
                 session: session.clone(),
             },
             session,
@@ -86,6 +91,16 @@ impl SingleAgentEnv {
 
     pub fn session(&self) -> SingleAgentSession {
         self.session.clone()
+    }
+
+    pub fn with_skills(mut self, skills: Vec<SkillQuery>) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    pub fn with_mcp_servers(mut self, mcp_servers: Vec<String>) -> Self {
+        self.mcp_servers = mcp_servers;
+        self
     }
 
     pub fn new_with_session(
@@ -106,6 +121,8 @@ impl SingleAgentEnv {
                 model,
                 input: input.into(),
                 tools,
+                skills: Vec::new(),
+                mcp_servers: Vec::new(),
                 session: session.clone(),
             },
             session,
@@ -315,10 +332,20 @@ pub struct SingleAgentPlanBuilder;
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
         validate_env(&env)?;
-        let (tool_definitions, tool_routes) = resolve_tools(&rt, &env.tools).await?;
+        let skills = resolve_skills(&rt, &env.skills).await?;
+        let prompt = prompt_with_skills(env.prompt, &skills);
+        let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &env.tools).await?;
+        let (mcp_definitions, mcp_routes) = resolve_mcp_tools(&rt, &env.mcp_servers).await?;
+        for (name, route) in mcp_routes {
+            anyhow::ensure!(
+                tool_routes.insert(name.clone(), route).is_none(),
+                "multiple configured tools expose the model name `{name}`"
+            );
+        }
+        tool_definitions.extend(mcp_definitions);
         let template = SingleAgentTemplate {
             agent: env.agent,
-            prompt: env.prompt,
+            prompt,
             model: env.model,
             tool_definitions,
             tool_routes,
@@ -366,7 +393,7 @@ fn validate_env(env: &SingleAgentEnv) -> anyhow::Result<()> {
 async fn resolve_tools(
     rt: &RT,
     tools: &[String],
-) -> anyhow::Result<(Vec<ChatCompletionTools>, HashMap<String, String>)> {
+) -> anyhow::Result<(Vec<ChatCompletionTools>, HashMap<String, CallableRoute>)> {
     let mut definitions = Vec::with_capacity(tools.len());
     let mut routes = HashMap::with_capacity(tools.len());
     for tool_name in tools {
@@ -380,7 +407,10 @@ async fn resolve_tools(
         })?;
         anyhow::ensure!(
             routes
-                .insert(function.name.clone(), tool_name.clone())
+                .insert(
+                    function.name.clone(),
+                    CallableRoute::Tool(tool_name.clone())
+                )
                 .is_none(),
             "multiple configured tools expose the model name `{}`",
             function.name
@@ -390,6 +420,83 @@ async fn resolve_tools(
         ));
     }
     Ok((definitions, routes))
+}
+
+async fn resolve_skills(rt: &RT, queries: &[SkillQuery]) -> anyhow::Result<Vec<SkillInfo>> {
+    let mut skills = Vec::new();
+    for query in queries {
+        let mut condition: common::AnyType = Box::new(query.clone());
+        let value = rt.select(TaskType::Skill, &mut condition).await?;
+        let mut found = *value
+            .downcast::<Vec<SkillInfo>>()
+            .map_err(|_| anyhow::anyhow!("skill query response was not Vec<SkillInfo>"))?;
+        skills.append(&mut found);
+    }
+    Ok(skills)
+}
+
+fn prompt_with_skills(mut prompt: String, skills: &[SkillInfo]) -> String {
+    if skills.is_empty() {
+        return prompt;
+    }
+    prompt.push_str("\n\n## Available Skills\n");
+    prompt.push_str("Read the matching SKILL.md file before applying a skill.\n");
+    for skill in skills {
+        prompt.push_str(&format!(
+            "- {}: {} (path: {})\n",
+            skill.name,
+            skill.description,
+            skill.path.display()
+        ));
+    }
+    prompt
+}
+
+async fn resolve_mcp_tools(
+    rt: &RT,
+    servers: &[String],
+) -> anyhow::Result<(Vec<ChatCompletionTools>, HashMap<String, CallableRoute>)> {
+    let mut definitions = Vec::new();
+    let mut routes = HashMap::new();
+    for server in servers {
+        let mut condition: common::AnyType = Box::new(McpQuery::new(server));
+        let value = rt.select(TaskType::Mcp, &mut condition).await?;
+        let tools = *value.downcast::<Vec<McpToolInfo>>().map_err(|_| {
+            anyhow::anyhow!("MCP server `{server}` query response was not Vec<McpToolInfo>")
+        })?;
+        for tool in tools {
+            let model_name = tool.model_name();
+            anyhow::ensure!(
+                routes
+                    .insert(
+                        model_name.clone(),
+                        CallableRoute::Mcp {
+                            server: tool.server,
+                            tool_name: tool.name,
+                        },
+                    )
+                    .is_none(),
+                "MCP tools expose duplicate model name `{model_name}`"
+            );
+            definitions.push(ChatCompletionTools::Function(
+                async_openai::types::chat::ChatCompletionTool {
+                    function: FunctionObject {
+                        name: model_name,
+                        description: (!tool.description.is_empty()).then_some(tool.description),
+                        parameters: Some(tool.input_schema),
+                        strict: None,
+                    },
+                },
+            ));
+        }
+    }
+    Ok((definitions, routes))
+}
+
+#[derive(Debug, Clone)]
+enum CallableRoute {
+    Tool(String),
+    Mcp { server: String, tool_name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -405,7 +512,20 @@ struct SingleAgentTemplate {
     prompt: String,
     model: SingleAgentModelConfig,
     tool_definitions: Vec<ChatCompletionTools>,
-    tool_routes: HashMap<String, String>,
+    tool_routes: HashMap<String, CallableRoute>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingCallKind {
+    Tool,
+    Mcp,
+}
+
+#[derive(Debug)]
+struct PendingCall {
+    call_id: String,
+    tool_name: String,
+    kind: PendingCallKind,
 }
 
 #[derive(Debug)]
@@ -430,7 +550,7 @@ struct SingleAgentPlan {
     final_output: String,
     tool_iterations: usize,
     task_sequence: u64,
-    pending_tools: HashMap<String, (String, String)>,
+    pending_tools: HashMap<String, PendingCall>,
     owns_active_turn: bool,
     finish_on_drop: bool,
 }
@@ -612,7 +732,8 @@ impl SingleAgentPlan {
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;
                     for choice in chunk.choices {
-                        if let Some(delta) = choice.delta.content {
+                        if let Some(delta) = choice.delta.content.filter(|delta| !delta.is_empty())
+                        {
                             content.push_str(&delta);
                             self.emit(
                                 self.template.model.model.clone(),
@@ -620,7 +741,11 @@ impl SingleAgentPlan {
                             )
                             .await?;
                         }
-                        if let Some(reasoning) = choice.delta.reasoning_content {
+                        if let Some(reasoning) = choice
+                            .delta
+                            .reasoning_content
+                            .filter(|reasoning| !reasoning.is_empty())
+                        {
                             self.emit(
                                 self.template.model.model.clone(),
                                 SessionEventData::ModelReasoning { content: reasoning },
@@ -689,7 +814,7 @@ impl SingleAgentPlan {
             let call_id = call.id;
             let tool_name = call.function.name;
             let arguments = call.function.arguments;
-            let runtime_tool_name = self
+            let route = self
                 .template
                 .tool_routes
                 .get(&tool_name)
@@ -703,12 +828,27 @@ impl SingleAgentPlan {
                 },
             )
             .await?;
-            let task = self.task(
-                TaskType::Tool,
-                ToolRequest::new(runtime_tool_name, arguments),
+            let (task, kind) = match route {
+                CallableRoute::Tool(runtime_tool_name) => (
+                    self.task(
+                        TaskType::Tool,
+                        ToolRequest::new(runtime_tool_name, arguments),
+                    ),
+                    PendingCallKind::Tool,
+                ),
+                CallableRoute::Mcp { server, tool_name } => (
+                    self.task(TaskType::Mcp, McpRequest::new(server, tool_name, arguments)),
+                    PendingCallKind::Mcp,
+                ),
+            };
+            self.pending_tools.insert(
+                task.meta.id.clone(),
+                PendingCall {
+                    call_id,
+                    tool_name,
+                    kind,
+                },
             );
-            self.pending_tools
-                .insert(task.meta.id.clone(), (call_id, tool_name));
             tasks.push(task);
         }
         self.stage = SingleAgentStage::Tools {
@@ -722,7 +862,7 @@ impl SingleAgentPlan {
         task_id: String,
         mut response: ToolResponse,
     ) -> anyhow::Result<PlanNext> {
-        let (call_id, tool_name) = self
+        let pending = self
             .pending_tools
             .remove(&task_id)
             .ok_or_else(|| anyhow::anyhow!("unknown tool task `{task_id}`"))?;
@@ -731,9 +871,9 @@ impl SingleAgentPlan {
             match response.next().await? {
                 ToolRespItem::Streaming(output) => {
                     self.emit(
-                        tool_name.clone(),
+                        pending.tool_name.clone(),
                         SessionEventData::ToolOutput {
-                            call_id: call_id.clone(),
+                            call_id: pending.call_id.clone(),
                             output,
                             completed: false,
                         },
@@ -742,9 +882,9 @@ impl SingleAgentPlan {
                 }
                 ToolRespItem::Completed(output) => {
                     self.emit(
-                        tool_name,
+                        pending.tool_name.clone(),
                         SessionEventData::ToolOutput {
-                            call_id: call_id.clone(),
+                            call_id: pending.call_id.clone(),
                             output: output.clone(),
                             completed: true,
                         },
@@ -755,10 +895,39 @@ impl SingleAgentPlan {
             }
         };
 
+        self.finish_tool_call(pending, completed_output).await
+    }
+
+    async fn handle_mcp_response(
+        &mut self,
+        task_id: String,
+        response: McpResponse,
+    ) -> anyhow::Result<PlanNext> {
+        let pending = self
+            .pending_tools
+            .remove(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP task `{task_id}`"))?;
+        self.emit(
+            pending.tool_name.clone(),
+            SessionEventData::ToolOutput {
+                call_id: pending.call_id.clone(),
+                output: response.output.clone(),
+                completed: true,
+            },
+        )
+        .await?;
+        self.finish_tool_call(pending, response.output).await
+    }
+
+    async fn finish_tool_call(
+        &mut self,
+        pending: PendingCall,
+        output: String,
+    ) -> anyhow::Result<PlanNext> {
         self.messages.push(ChatCompletionRequestMessage::Tool(
             ChatCompletionRequestToolMessage {
-                content: ChatCompletionRequestToolMessageContent::Text(completed_output),
-                tool_call_id: call_id,
+                content: ChatCompletionRequestToolMessageContent::Text(output),
+                tool_call_id: pending.call_id,
             },
         ));
 
@@ -822,9 +991,24 @@ impl Plan for SingleAgentPlan {
             }
             SingleAgentStage::Tools { .. } => {
                 let task_id = task_result.meta.id.clone();
-                let response = TaskResp::<ToolResponse>::try_from_response(&mut task_result)
-                    .ok_or_else(|| anyhow::anyhow!("expected ToolResponse"))?;
-                self.handle_tool_response(task_id, response.resp).await
+                let kind = self
+                    .pending_tools
+                    .get(&task_id)
+                    .map(|pending| pending.kind)
+                    .ok_or_else(|| anyhow::anyhow!("unknown tool task `{task_id}`"))?;
+                match kind {
+                    PendingCallKind::Tool => {
+                        let response =
+                            TaskResp::<ToolResponse>::try_from_response(&mut task_result)
+                                .ok_or_else(|| anyhow::anyhow!("expected ToolResponse"))?;
+                        self.handle_tool_response(task_id, response.resp).await
+                    }
+                    PendingCallKind::Mcp => {
+                        let response = TaskResp::<McpResponse>::try_from_response(&mut task_result)
+                            .ok_or_else(|| anyhow::anyhow!("expected McpResponse"))?;
+                        self.handle_mcp_response(task_id, response.resp).await
+                    }
+                }
             }
             SingleAgentStage::Save => {
                 let response = TaskResp::<SessionResponse>::try_from_response(&mut task_result)
@@ -939,7 +1123,7 @@ mod tests {
     };
 
     #[test]
-    fn event_uses_common_envelope_and_flat_payload() {
+    fn event_uses_common_envelope_and_nested_payload() {
         let event = SessionEvent::single_agent(
             7,
             "read_file",
@@ -956,8 +1140,10 @@ mod tests {
                 "turn_id": 7,
                 "name": "read_file",
                 "type": "tool_call",
-                "call_id": "call-1",
-                "arguments": "{\"path\":\"Cargo.toml\"}"
+                "data": {
+                    "call_id": "call-1",
+                    "arguments": "{\"path\":\"Cargo.toml\"}"
+                }
             })
         );
         assert_eq!(
@@ -1028,6 +1214,95 @@ mod tests {
             messages.last(),
             Some(ChatCompletionRequestMessage::User(_))
         ));
+    }
+
+    #[test]
+    fn skill_metadata_is_added_to_the_system_prompt() {
+        let prompt = prompt_with_skills(
+            "base prompt".to_string(),
+            &[SkillInfo {
+                name: "review".to_string(),
+                description: "Review Rust code".to_string(),
+                path: "/tmp/review/SKILL.md".into(),
+                version: None,
+                metadata: None,
+            }],
+        );
+
+        assert!(prompt.contains("review: Review Rust code"));
+        assert!(prompt.contains("/tmp/review/SKILL.md"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_calls_use_the_mcp_task_type_and_response() -> anyhow::Result<()> {
+        let session = SingleAgentSession::new();
+        session.activate_turn().unwrap();
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            "maps__search".to_string(),
+            CallableRoute::Mcp {
+                server: "maps".to_string(),
+                tool_name: "search".to_string(),
+            },
+        );
+        let mut plan = SingleAgentPlan::new(ctx.clone(), template, "find it".into(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": null,
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "maps__search",
+                            "arguments": "{\"query\":\"park\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))?;
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await?
+        else {
+            panic!("expected MCP task");
+        };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Mcp);
+        let request = TaskReq::<McpRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert_eq!(request.req.server, "maps");
+        assert_eq!(request.req.tool_name, "search");
+
+        let next = plan
+            .next(
+                TaskResp {
+                    ctx,
+                    meta: request.meta,
+                    resp: McpResponse {
+                        output: "{\"content\":[]}".to_string(),
+                    },
+                }
+                .into_response(),
+            )
+            .await?;
+        assert!(matches!(next, PlanNext::Tasks(tasks) if tasks.len() == 1));
+        assert!(matches!(
+            plan.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(message))
+                if message.tool_call_id == "call-1"
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1124,9 +1399,10 @@ mod tests {
         let session = SingleAgentSession::new();
         let ctx = Ctx::null();
         let mut template = test_template();
-        template
-            .tool_routes
-            .insert("read_file".to_string(), "read_file".to_string());
+        template.tool_routes.insert(
+            "read_file".to_string(),
+            CallableRoute::Tool("read_file".to_string()),
+        );
         let turn_id = session
             .bind(SingleAgentBinding {
                 rt: RT::null(),

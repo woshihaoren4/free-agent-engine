@@ -356,6 +356,8 @@ fn agent_action(
         model,
         input,
         tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
     }
 }
 
