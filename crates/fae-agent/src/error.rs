@@ -3,6 +3,9 @@ pub enum Error {
     #[error("runtime is not supported")]
     RuntimeNoSupport,
 
+    #[error("context has been aborted")]
+    ContextAborted,
+
     #[error(transparent)]
     AnyError(#[from] anyhow::Error),
 }

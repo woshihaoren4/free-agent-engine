@@ -303,6 +303,10 @@ impl Runtime for EngineRuntime {
     }
 
     async fn spawn(&self, task: &mut TaskRequest) -> fae_agent::Result<()> {
+        if task.ctx.is_aborted() {
+            return Err(fae_agent::Error::ContextAborted);
+        }
+
         if task.meta.executor.is_empty() {
             let Some(rt_ids) = self.runtime_ids_by_task_type(&task.meta.ty) else {
                 return Err(fae_agent::Error::RuntimeNoSupport);
@@ -351,6 +355,10 @@ impl Runtime for EngineRuntime {
     }
 
     async fn exec(&self, task: &mut TaskRequest) -> fae_agent::Result<TaskResponse> {
+        if task.ctx.is_aborted() {
+            return Err(fae_agent::Error::ContextAborted);
+        }
+
         if task.meta.executor.is_empty() {
             let Some(rt_ids) = self.runtime_ids_by_task_type(&task.meta.ty) else {
                 return Err(fae_agent::Error::RuntimeNoSupport);

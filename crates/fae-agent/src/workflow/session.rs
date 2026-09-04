@@ -1,25 +1,28 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde_json::Value;
 use tokio::sync::Notify;
 
-use crate::{Session, SessionEvent, SessionEventChannel, SessionEventData, WorkflowMetadata};
+use crate::{Session, SessionEvent, SessionEventChannel, SessionEventData};
 
 #[derive(Debug)]
 pub struct WorkflowEnv {
-    pub meta: WorkflowMetadata,
+    pub workflow_id: String,
+    pub input: Value,
     pub(crate) session: WorkflowSession,
-    pub(crate) complete_context: bool,
 }
 
 impl WorkflowEnv {
-    pub fn new(meta: WorkflowMetadata) -> (Self, WorkflowSession) {
+    pub fn new(workflow_id: impl Into<String>, input: Value) -> (Self, WorkflowSession) {
         let session = WorkflowSession::new();
         (
             Self {
-                meta,
+                workflow_id: workflow_id.into(),
+                input,
                 session: session.clone(),
-                complete_context: true,
             },
             session,
         )
@@ -29,9 +32,19 @@ impl WorkflowEnv {
         self.session.clone()
     }
 
-    pub fn defer_context_completion(mut self) -> Self {
-        self.complete_context = false;
-        self
+    #[doc(hidden)]
+    pub fn defer_context_completion(&self) {
+        self.session
+            .completion
+            .complete_context
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn completes_context(&self) -> bool {
+        self.session
+            .completion
+            .complete_context
+            .load(Ordering::Acquire)
     }
 }
 
@@ -41,10 +54,21 @@ pub struct WorkflowSession {
     completion: Arc<WorkflowCompletion>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct WorkflowCompletion {
     result: Mutex<Option<Result<Value, String>>>,
     notify: Notify,
+    complete_context: AtomicBool,
+}
+
+impl Default for WorkflowCompletion {
+    fn default() -> Self {
+        Self {
+            result: Mutex::new(None),
+            notify: Notify::new(),
+            complete_context: AtomicBool::new(true),
+        }
+    }
 }
 
 impl WorkflowSession {

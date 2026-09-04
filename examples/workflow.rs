@@ -6,9 +6,9 @@ use std::{
 };
 
 use fae_agent::{
-    Event, EventType, RuntimeSelectExec, Session, SessionEvent, SessionEventData,
-    SingleAgentModelConfig, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
-    WorkflowActionResponse, WorkflowEnv,
+    DefaultWorkflowMetadataLoader, Event, EventType, RuntimeSelectExec, Session, SessionEvent,
+    SessionEventData, SingleAgentModelConfig, TaskError, TaskReq, TaskResp, TaskType,
+    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::EngineBuilder;
 use serde_json::{Value, json};
@@ -135,7 +135,7 @@ async fn execute_python(code: &str, arguments: &Value) -> anyhow::Result<Value> 
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-async fn build_engine() -> fae_engine::Engine {
+async fn build_engine(loader: DefaultWorkflowMetadataLoader) -> fae_engine::Engine {
     let mut builder = EngineBuilder::new();
     builder.add_runtime(fae_engine::PlanRuntime::new());
     builder.add_runtime(fae_engine::WorkflowRuntime::new());
@@ -148,12 +148,13 @@ async fn build_engine() -> fae_engine::Engine {
     builder.add_runtime(tools);
 
     builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
-    builder.add_plan_builder(fae_agent::WorkflowPlanBuilder);
+    builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
     builder.build().await
 }
 
 async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Result<()> {
     let mut streaming = None;
+    println!("\n=== WORKFLOW SESSION (LIVE) ===");
 
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
@@ -163,6 +164,7 @@ async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Resu
         }
     }
     finish_stream(&mut streaming);
+    println!("\n=== WORKFLOW SESSION COMPLETE ===");
     Ok(())
 }
 
@@ -240,17 +242,18 @@ async fn main() -> anyhow::Result<()> {
         max_tool_iterations: 1,
     };
     let input = workflow_input(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let metadata = build_release_review_workflow(input, model_config)?;
-    let (env, session) = WorkflowEnv::new(metadata);
-    let engine = build_engine().await;
+    let loader = DefaultWorkflowMetadataLoader::new();
+    let engine = build_engine(loader.clone()).await;
+    loader.add(build_release_review_workflow(model_config)?)?;
+    loader.add(workflow_metadata::build_remediation_workflow()?)?;
+    let (env, session) = WorkflowEnv::new("release-readiness-review", input);
 
     let execution = engine.launch(env).await?;
+    // 在 workflow 执行期间持续消费 session，实时输出节点和 Agent 事件。
     print_session(&session).await?;
-    let session_output = session.result().await?;
     let output = execution.result::<Value>().await?;
     println!(
-        "\n=== SESSION RESULT ===\n{}\n\n=== WORKFLOW OUTPUT ===\n{}",
-        serde_json::to_string_pretty(&session_output)?,
+        "\n=== WORKFLOW OUTPUT ===\n{}",
         serde_json::to_string_pretty(&output)?
     );
 
@@ -265,18 +268,24 @@ mod tests {
 
     #[tokio::test]
     async fn executes_python_tool_and_loop_actions() -> anyhow::Result<()> {
-        let counter_path = std::env::temp_dir().join(format!(
-            "fae-workflow-remediation-{}.txt",
-            std::process::id()
-        ));
-        let metadata = build_remediation_workflow()?.with_input(json!({
+        // 此测试只执行有限整改循环子流程；完整的发布检查 DAG 由 main 演示。
+        let counter_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("workflow-remediation-{}.txt", std::process::id()));
+        let input = json!({
             "counter_path": &counter_path,
             "rounds": 2
-        }));
-        let (env, _) = WorkflowEnv::new(metadata);
-        let engine = build_engine().await;
+        });
+        let loader = DefaultWorkflowMetadataLoader::new();
+        let engine = build_engine(loader.clone()).await;
+        loader.add(build_remediation_workflow()?)?;
+        let (env, session) = WorkflowEnv::new("bounded-remediation-loop", input);
 
-        let (_, output) = engine.invoke::<_, Value>(env).await?;
+        // invoke() 会等待流程结束，因此需要并发消费 session，确保使用
+        // `--nocapture` 运行测试时能够实时看到事件。
+        let (execution, ()) =
+            tokio::try_join!(engine.invoke::<_, Value>(env), print_session(&session))?;
+        let (_, output) = execution;
 
         assert_eq!(output["iterations"], 2);
         assert_eq!(output["remaining"], 0);

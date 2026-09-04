@@ -44,17 +44,10 @@ pub struct WorkflowMetadata {
     #[serde(default = "workflow_version")]
     pub version: u32,
     pub id: String,
-    #[serde(default)]
-    pub input: Value,
     pub nodes: BTreeMap<String, WorkflowNode>,
 }
 
 impl WorkflowMetadata {
-    pub fn with_input(mut self, input: Value) -> Self {
-        self.input = input;
-        self
-    }
-
     pub fn validate(&self) -> anyhow::Result<()> {
         crate::WorkflowMetadataBuilder::validate_metadata(self)
     }
@@ -153,7 +146,9 @@ impl WorkflowNode {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowAction {
     Workflow {
-        workflow: Box<WorkflowMetadata>,
+        workflow_id: String,
+        #[serde(default)]
+        input: Value,
     },
     Tool {
         tool_name: String,
@@ -236,7 +231,6 @@ mod tests {
         let mut builder = WorkflowMetadataBuilder::new("persisted");
         builder.start("start", "end").unwrap();
         builder.end("end", Some(json!("{$input.result}"))).unwrap();
-        builder.input(json!({"result": "done"}));
         let metadata = builder.build().unwrap();
         let path = std::env::temp_dir().join(format!("fae-workflow-{}.json", wd_tools::uuid::v4()));
 
@@ -252,23 +246,21 @@ mod tests {
 
     #[test]
     fn serializes_to_and_parses_from_string() {
-        let mut child = WorkflowMetadataBuilder::new("child");
-        child.start("start", "end").unwrap();
-        child.end("end", Some(json!("{$input.value}"))).unwrap();
-
         let mut builder = WorkflowMetadataBuilder::new("string-round-trip");
         builder.start("start", "child").unwrap();
         builder
             .execute(
                 "child",
                 WorkflowAction::Workflow {
-                    workflow: Box::new(child.build().unwrap()),
+                    workflow_id: "child".to_string(),
+                    input: json!({
+                        "value": "{$input.value}"
+                    }),
                 },
                 "end",
             )
             .unwrap();
         builder.end("end", None).unwrap();
-        builder.input(json!({"value": 42}));
         let metadata = builder.build().unwrap();
 
         let serialized = metadata.to_string();

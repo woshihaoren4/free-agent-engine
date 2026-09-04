@@ -30,3 +30,7 @@ path = "single_agent.rs"
 [[example]]
 name = "workflow"
 path = "workflow.rs"
+
+[[example]]
+name = "parent_child_workflow"
+path = "parent_child_workflow.rs"

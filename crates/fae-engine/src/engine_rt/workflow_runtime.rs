@@ -34,7 +34,7 @@ impl WorkflowRuntime {
             meta.publisher = Self::ID.to_string();
         }
         let session = req.session();
-        let req = req.defer_context_completion();
+        req.defer_context_completion();
         let engine = ctx.get_engine();
         let plan = engine
             .call(ctx.clone(), to_plan_ty::<WorkflowEnv>(), Box::new(req))

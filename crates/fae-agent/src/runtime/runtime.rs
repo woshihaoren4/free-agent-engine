@@ -184,6 +184,9 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
+        if req.ctx.is_aborted() {
+            return Err(crate::Error::ContextAborted);
+        }
         let info = format!("{:?}", req.meta);
         req.ctx.append_stack(self.id(), info);
         self.inner.spawn(req).await
@@ -227,6 +230,9 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
+        if req.ctx.is_aborted() {
+            return Err(crate::Error::ContextAborted);
+        }
         let info = format!("{:?}", req.meta);
         req.ctx.append_stack(self.id(), info);
         let resp = self.inner.exec(req).await?;

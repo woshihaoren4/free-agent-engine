@@ -22,7 +22,6 @@ impl Engine {
         builder.add_runtime(tools_runtime);
 
         builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
-        builder.add_plan_builder(fae_agent::WorkflowPlanBuilder);
 
         builder.build().await
     }
@@ -32,12 +31,28 @@ impl Engine {
 mod tests {
     use super::*;
     use fae_agent::{
-        Ctx, EventType, Session, SessionEventData, TaskMeta, TaskReq, TaskResp, TaskType,
-        ToolRequest, ToolRespItem, ToolResponse, WorkflowAction, WorkflowEnv,
-        WorkflowMetadataBuilder,
+        Ctx, DefaultWorkflowMetadataLoader, EventType, Session, SessionEventData, TaskMeta,
+        TaskReq, TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction,
+        WorkflowEnv, WorkflowMetadataBuilder,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
+
+    async fn engine_with_workflow(loader: DefaultWorkflowMetadataLoader) -> Engine {
+        let mut builder = EngineBuilder::new();
+        builder.add_runtime(PlanRuntime::new());
+        builder.add_runtime(WorkflowRuntime::new());
+        builder.add_runtime(ModelRuntime::new());
+        builder.add_runtime(SessionRuntime::new());
+
+        let mut tools_runtime = ToolsRuntime::new();
+        tools_runtime.add_tool(Box::new(DefaultTools::default()));
+        builder.add_runtime(tools_runtime);
+
+        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+        builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
+        builder.build().await
+    }
 
     fn tool_task(ctx: Ctx, tool_name: &str, arguments: Value) -> TaskReq<ToolRequest> {
         TaskReq {
@@ -87,8 +102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
-        let engine = Engine::default().await;
+    async fn test_configured_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
         let mut builder = WorkflowMetadataBuilder::new("read-file-workflow");
         builder.start("start", "read")?;
         builder.execute(
@@ -107,8 +121,10 @@ mod tests {
         let input = json!({
             "path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
         });
-        builder.input(input);
-        let (env, session) = WorkflowEnv::new(builder.build()?);
+        let loader = DefaultWorkflowMetadataLoader::new();
+        let engine = engine_with_workflow(loader.clone()).await;
+        loader.add(builder.build()?)?;
+        let (env, session) = WorkflowEnv::new("read-file-workflow", input);
         let (_, output) = engine.invoke::<_, Value>(env).await?;
 
         assert_eq!(output, json!(true));
@@ -124,27 +140,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_engine_executes_nested_workflow_bits_ut() -> anyhow::Result<()> {
-        let engine = Engine::default().await;
-
+    async fn test_configured_engine_executes_nested_workflow_bits_ut() -> anyhow::Result<()> {
         let mut child = WorkflowMetadataBuilder::new("child");
         child.start("start", "end")?;
         child.end("end", Some(json!("{$input.value}")))?;
-        child.input(json!({"value": "{$input.child_value}"}));
 
         let mut parent = WorkflowMetadataBuilder::new("parent");
         parent.start("start", "nested")?;
         parent.execute(
             "nested",
             WorkflowAction::Workflow {
-                workflow: Box::new(child.build()?),
+                workflow_id: "child".to_string(),
+                input: json!({
+                    "value": "{$input.child_value}"
+                }),
             },
             "end",
         )?;
         parent.end("end", Some(json!({"nested": "{$nested}"})))?;
-        parent.input(json!({"child_value": 42}));
-
-        let (env, _) = WorkflowEnv::new(parent.build()?);
+        let loader = DefaultWorkflowMetadataLoader::new();
+        let engine = engine_with_workflow(loader.clone()).await;
+        loader.add(parent.build()?)?;
+        loader.add(child.build()?)?;
+        let (env, _) = WorkflowEnv::new("parent", json!({"child_value": 42}));
         let (ctx, output) = engine.invoke::<_, Value>(env).await?;
 
         assert_eq!(output, json!({"nested": 42}));

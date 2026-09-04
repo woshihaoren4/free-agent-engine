@@ -38,6 +38,10 @@ pub trait Context: Debug + Send + Sync + 'static {
         HashMap::new()
     }
     fn get_engine(&self) -> EngineRef;
+    fn abort(&self) {}
+    fn is_aborted(&self) -> bool {
+        false
+    }
     fn over(&self, _value: AnyType) {}
     fn error(&self, _error: String) {}
     fn is_completed(&self) -> bool {

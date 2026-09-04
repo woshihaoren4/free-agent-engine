@@ -8,7 +8,8 @@ use tokio::sync::Notify;
 enum Completion {
     Pending,
     Ready(Result<AnyType, String>),
-    Consumed,
+    Aborted,
+    Consumed { aborted: bool },
 }
 
 pub struct EngineContext {
@@ -25,6 +26,7 @@ impl Debug for EngineContext {
             .field("engine", &self.engine)
             .field("stacks", &self.stacks)
             .field("completed", &self.is_completed())
+            .field("aborted", &self.is_aborted())
             .finish_non_exhaustive()
     }
 }
@@ -67,6 +69,25 @@ impl Context for EngineContext {
         self.engine.clone()
     }
 
+    fn abort(&self) {
+        {
+            let mut completion = self.result.lock().unwrap();
+            if !matches!(&*completion, Completion::Pending) {
+                return;
+            }
+            *completion = Completion::Aborted;
+        }
+
+        self.completion.notify_waiters();
+    }
+
+    fn is_aborted(&self) -> bool {
+        matches!(
+            &*self.result.lock().unwrap(),
+            Completion::Aborted | Completion::Consumed { aborted: true }
+        )
+    }
+
     fn over(&self, value: AnyType) {
         self.finish(Ok(value));
     }
@@ -89,16 +110,21 @@ impl Context for EngineContext {
                 let mut result = self.result.lock().unwrap();
                 match &*result {
                     Completion::Pending => None,
-                    Completion::Consumed => {
+                    Completion::Consumed { .. } => {
                         anyhow::bail!("context result has already been consumed")
                     }
                     Completion::Ready(_) => {
-                        let Completion::Ready(value) =
-                            std::mem::replace(&mut *result, Completion::Consumed)
-                        else {
+                        let Completion::Ready(value) = std::mem::replace(
+                            &mut *result,
+                            Completion::Consumed { aborted: false },
+                        ) else {
                             unreachable!()
                         };
                         Some(value)
+                    }
+                    Completion::Aborted => {
+                        *result = Completion::Consumed { aborted: true };
+                        return Err(fae_agent::Error::ContextAborted.into());
                     }
                 }
             };
@@ -122,5 +148,26 @@ impl EngineContext {
         }
 
         self.completion.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::EngineBuilder;
+
+    #[tokio::test]
+    async fn abort_completes_context_with_abort_error() {
+        let engine = EngineBuilder::new().build().await;
+        let ctx = engine.ctx();
+
+        ctx.abort();
+
+        assert!(ctx.is_aborted());
+        assert!(ctx.is_completed());
+        assert_eq!(
+            ctx.result::<()>().await.unwrap_err().to_string(),
+            "context has been aborted"
+        );
+        assert!(ctx.is_aborted());
     }
 }

@@ -53,7 +53,6 @@ where
 #[derive(Debug)]
 pub struct WorkflowMetadataBuilder {
     id: String,
-    input: Value,
     nodes: BTreeMap<String, WorkflowNode>,
 }
 
@@ -61,19 +60,8 @@ impl WorkflowMetadataBuilder {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
-            input: Value::Null,
             nodes: BTreeMap::new(),
         }
-    }
-
-    pub fn input(&mut self, input: Value) -> &mut Self {
-        self.input = input;
-        self
-    }
-
-    pub fn with_input(mut self, input: Value) -> Self {
-        self.input = input;
-        self
     }
 
     pub fn add_node(
@@ -187,7 +175,6 @@ impl WorkflowMetadataBuilder {
         let metadata = WorkflowMetadata {
             version: WORKFLOW_VERSION,
             id: self.id,
-            input: self.input,
             nodes: self.nodes,
         };
         Self::validate_metadata(&metadata)?;

@@ -9,12 +9,76 @@ use serde_json::{Value, json};
 
 pub const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 
+/// 构建完整的发布就绪检查流程：
+///
+/// 1. 根据输入选择严格或快速检查策略。
+/// 2. 并行读取并审查 Rust 源码和 Cargo 清单。
+/// 3. 使用 Python 汇总两个 Agent 的审查结果。
+/// 4. 根据汇总结果决定是否执行限定次数的整改子流程。
+/// 5. 由 release-manager Agent 生成最终报告。
+///
+/// ```text
+///                               +-----------------+
+///                               |      start      |
+///                               +--------+--------+
+///                                        |
+///                               +--------v--------+
+///                               |  select_policy  |
+///                               +---+---------+---+
+///                         strict   |         |   quick
+///                    +-------------+         +-------------+
+///                    |                                       |
+///           +--------v--------+                     +--------v-------+
+///           |  strict_policy  |                     |  quick_policy  |
+///           +--------+--------+                     +--------+-------+
+///                    +-------------------+-------------------+
+///                                        |
+///                              +---------v---------+
+///                              |  dispatch_checks  |
+///                              +----+----------+---+
+///                                   |          |
+///                       +-----------+          +-----------+
+///                       |                                  |
+///              +--------v--------+                +--------v---------+
+///              |   read_source   |                |  read_manifest   |
+///              +--------+--------+                +--------+---------+
+///                       |                                  |
+///              +--------v--------+                +--------v---------+
+///              | review_source   |                | review_manifest  |
+///              |    (Agent)      |                |     (Agent)      |
+///              +--------+--------+                +--------+---------+
+///                       +---------------+------------------+
+///                                       |
+///                            +----------v-----------+
+///                            |  aggregate_reviews   |
+///                            |      (Python)        |
+///                            +----------+-----------+
+///                                       |
+///                            +----------v-----------+
+///                            |  route_remediation   |
+///                            +---+--------------+---+
+///                         yes    |              |    no
+///                   +------------+              +------------+
+///                   |                                        |
+///          +--------v---------+                    +---------v----------+
+///          |   remediation    |                    | skip_remediation   |
+///          | (nested workflow)|                    |     (Python)       |
+///          +--------+---------+                    +---------+----------+
+///                   +-------------------+--------------------+
+///                                       |
+///                              +--------v--------+
+///                              |  final_report   |
+///                              |     (Agent)     |
+///                              +--------+--------+
+///                                       |
+///                                  +----v----+
+///                                  |   end   |
+///                                  +---------+
+/// ```
 pub fn build_release_review_workflow(
-    input: Value,
     model: SingleAgentModelConfig,
 ) -> anyhow::Result<WorkflowMetadata> {
     let mut builder = WorkflowMetadataBuilder::new("release-readiness-review");
-    builder.input(input);
 
     builder.start("start", "select_policy")?;
     builder.decision(
@@ -79,10 +143,10 @@ pub fn build_release_review_workflow(
         agent_action(
             "source-reviewer",
             concat!(
-                "Review the Rust source for release risks. Return concise JSON with keys ",
-                "`summary`, `risks`, and `recommendation`."
+                "审查这份 Rust 源代码中可能影响发布的风险。请使用中文返回简洁的 JSON，",
+                "并包含 `summary`、`risks` 和 `recommendation` 字段。"
             ),
-            json!("Policy: {$input.policy}\nPath: {$read_source.path}\n\n{$read_source.content}"),
+            json!("策略：{$input.policy}\n路径：{$read_source.path}\n\n{$read_source.content}"),
             model.clone(),
         ),
         "aggregate_reviews",
@@ -92,12 +156,10 @@ pub fn build_release_review_workflow(
         agent_action(
             "manifest-reviewer",
             concat!(
-                "Review this Cargo manifest for release risks. Return concise JSON with keys ",
-                "`summary`, `risks`, and `recommendation`."
+                "审查这份 Cargo 清单中可能影响发布的风险。请使用中文返回简洁的 JSON，",
+                "并包含 `summary`、`risks` 和 `recommendation` 字段。"
             ),
-            json!(
-                "Policy: {$input.policy}\nPath: {$read_manifest.path}\n\n{$read_manifest.content}"
-            ),
+            json!("策略：{$input.policy}\n路径：{$read_manifest.path}\n\n{$read_manifest.content}"),
             model.clone(),
         ),
         "aggregate_reviews",
@@ -134,7 +196,11 @@ pub fn build_release_review_workflow(
     builder.execute(
         "remediation",
         WorkflowAction::Workflow {
-            workflow: Box::new(build_remediation_workflow()?),
+            workflow_id: "bounded-remediation-loop".to_string(),
+            input: json!({
+                "counter_path": "{$input.counter_path}",
+                "rounds": "{$input.remediation_rounds}"
+            }),
         },
         "final_report",
     )?;
@@ -151,8 +217,8 @@ pub fn build_release_review_workflow(
         agent_action(
             "release-manager",
             concat!(
-                "Produce a concise final release-readiness report from the supplied review ",
-                "bundle. State the policy, decision, and the most important next action."
+                "根据提供的审查结果生成简洁的中文发布就绪报告。",
+                "报告需说明检查策略、发布决策以及最重要的后续行动。"
             ),
             json!({
                 "policy": "{$input.policy}",
@@ -175,14 +241,35 @@ pub fn build_release_review_workflow(
     builder.build()
 }
 
+/// 构建用于演示有限循环的顺序子流程。
+///
+/// 首先通过写文件验证普通工具调用，随后将循环状态保存在每次 Python
+/// 动作的输出中，并通过 `{$last.remaining}` 读取：
+/// `rounds -> rounds - 1 -> ... -> 0`.
+///
+/// ```text
+/// +-------+     +--------------+     +------------------+
+/// | start | --> | seed_counter | --> | initialize_state |
+/// +-------+     | (write_file) |     |     (Python)     |
+///               +--------------+     +--------+---------+
+///                                             |
+///                                    +--------v--------+
+///                              +---->|   retry_loop    |---- remaining == 0 ----+
+///                              |     +--------+--------+                        |
+///                              |              | remaining > 0                  |
+///                              |     +--------v------------+                   |
+///                              +-----+ decrement_counter   |                   |
+///                                    |      (Python)       |                   |
+///                                    +---------------------+                   |
+///                                                                              |
+///                                                                    +---------v--+
+///                                                                    |    done    |
+///                                                                    +------------+
+/// ```
 pub fn build_remediation_workflow() -> anyhow::Result<WorkflowMetadata> {
     let mut builder = WorkflowMetadataBuilder::new("bounded-remediation-loop");
-    builder.input(json!({
-        "counter_path": "{$input.counter_path}",
-        "rounds": "{$input.remediation_rounds}"
-    }));
-
     builder.start("start", "seed_counter")?;
+    // 进入循环前，将请求执行的轮数记录到文件中。
     builder.execute(
         "seed_counter",
         WorkflowAction::Tool {
@@ -195,6 +282,7 @@ pub fn build_remediation_workflow() -> anyhow::Result<WorkflowMetadata> {
         },
         "initialize_state",
     )?;
+    // 将 workflow 输入转换为初始循环状态。
     builder.execute(
         "initialize_state",
         python_action(
@@ -203,6 +291,7 @@ pub fn build_remediation_workflow() -> anyhow::Result<WorkflowMetadata> {
         ),
         "retry_loop",
     )?;
+    // 当最近一次 Python 输出仍有剩余轮数时继续循环。
     builder.loop_node(
         "retry_loop",
         WorkflowCondition::Compare {
@@ -214,6 +303,7 @@ pub fn build_remediation_workflow() -> anyhow::Result<WorkflowMetadata> {
         "done",
         8,
     )?;
+    // 每执行一次循环体，代表完成一轮整改。
     builder.execute(
         "decrement_counter",
         python_action(
@@ -287,18 +377,7 @@ mod tests {
 
     #[test]
     fn metadata_covers_parallel_choice_loop_tools_agents_and_python() {
-        let workflow = build_release_review_workflow(
-            json!({
-                "policy": "strict",
-                "run_remediation": true,
-                "source_path": "src/lib.rs",
-                "manifest_path": "Cargo.toml",
-                "counter_path": "target/workflow-counter.txt",
-                "remediation_rounds": 2
-            }),
-            model(),
-        )
-        .unwrap();
+        let workflow = build_release_review_workflow(model()).unwrap();
 
         assert!(matches!(
             workflow.nodes["select_policy"],
@@ -331,18 +410,16 @@ mod tests {
         )));
 
         let WorkflowNode::Execute {
-            action: WorkflowAction::Workflow { workflow: child },
+            action: WorkflowAction::Workflow {
+                workflow_id, input, ..
+            },
             ..
         } = &workflow.nodes["remediation"]
         else {
             panic!("remediation must execute a nested workflow");
         };
-        assert!(
-            child
-                .nodes
-                .values()
-                .any(|node| matches!(node, WorkflowNode::Loop { .. }))
-        );
+        assert_eq!(workflow_id, "bounded-remediation-loop");
+        assert_eq!(input["rounds"], "{$input.remediation_rounds}");
         assert!(WorkflowMetadata::from_json(&workflow.to_json().unwrap()).is_ok());
     }
 }

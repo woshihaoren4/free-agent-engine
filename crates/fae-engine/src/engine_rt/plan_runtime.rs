@@ -79,8 +79,17 @@ impl PlanRuntime {
         let TaskReq {
             ctx,
             meta: _,
-            req: plan,
+            req: mut plan,
         } = task;
+        if ctx.is_aborted() {
+            plan.abort(
+                PLAN_ABORT_CODE,
+                fae_agent::Error::ContextAborted.to_string(),
+            )
+            .await;
+            return Err(fae_agent::Error::ContextAborted);
+        }
+
         let execution_id = Self::next_plan_id(plan.id());
         let execution = Arc::new(Mutex::new(PlanExecution {
             plan,
@@ -100,17 +109,27 @@ impl PlanRuntime {
 
         let next = {
             let mut execution = execution.lock().await;
-            execution.plan.init().await
+            let next = execution.plan.init().await;
+            if execution.ctx.is_aborted() {
+                None
+            } else {
+                Some(next)
+            }
         };
         match next {
-            Ok(next) => self.advance(&execution_id, next).await,
-            Err(error) => self.fail_plan(&execution_id, error).await,
+            Some(Ok(next)) => self.advance(&execution_id, next).await,
+            Some(Err(error)) => self.fail_plan(&execution_id, error).await,
+            None => self.abort_plan(&execution_id).await,
         }
 
         Ok(execution_id)
     }
 
     async fn advance(&self, plan_id: &str, next: PlanNext) {
+        if self.abort_if_requested(plan_id).await {
+            return;
+        }
+
         match next {
             PlanNext::End => self.finish_plan(plan_id).await,
             PlanNext::Tasks(tasks) if tasks.is_empty() => {
@@ -155,6 +174,10 @@ impl PlanRuntime {
 
                 let rt = ctx.get_engine().rt();
                 for mut task in tasks {
+                    if ctx.is_aborted() {
+                        self.abort_plan(plan_id).await;
+                        return;
+                    }
                     if let Err(error) = Runtime::spawn(&*rt, &mut task).await {
                         self.fail_plan(plan_id, error.into()).await;
                         return;
@@ -165,6 +188,10 @@ impl PlanRuntime {
     }
 
     async fn finish_plan(&self, plan_id: &str) {
+        if self.abort_if_requested(plan_id).await {
+            return;
+        }
+
         let Some(execution) = self.plans.lock().await.remove(plan_id) else {
             return;
         };
@@ -228,6 +255,26 @@ impl PlanRuntime {
             None => {}
         }
     }
+
+    async fn abort_if_requested(&self, plan_id: &str) -> bool {
+        let Some(execution) = self.plans.lock().await.get(plan_id).cloned() else {
+            return false;
+        };
+        if !execution.lock().await.ctx.is_aborted() {
+            return false;
+        }
+
+        self.abort_plan(plan_id).await;
+        true
+    }
+
+    async fn abort_plan(&self, plan_id: &str) {
+        self.fail_plan(
+            plan_id,
+            anyhow::Error::new(fae_agent::Error::ContextAborted),
+        )
+        .await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -266,6 +313,10 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     async fn task_result_callback(&self, response: TaskResponse) -> fae_agent::Result<()> {
         let plan_id = response.meta.plan_id.clone();
         let task_id = response.meta.id.clone();
+        if response.ctx.is_aborted() {
+            self.abort_plan(&plan_id).await;
+            return Ok(());
+        }
         let execution = self
             .plans
             .lock()
@@ -311,7 +362,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
 
         let mut generated_tasks = Vec::new();
         let mut ended = false;
-        let result = {
+        let (result, aborted) = {
             let mut execution = execution.lock().await;
             let mut result = Ok(());
             for response in responses {
@@ -326,11 +377,15 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
                         break;
                     }
                 }
+                if execution.ctx.is_aborted() {
+                    break;
+                }
             }
-            result
+            (result, execution.ctx.is_aborted())
         };
 
         match result {
+            _ if aborted => self.abort_plan(&plan_id).await,
             Err(error) => self.fail_plan(&plan_id, error).await,
             Ok(()) if ended => self.finish_plan(&plan_id).await,
             Ok(()) => {
@@ -342,8 +397,12 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     }
 
     async fn task_error_callback(&self, error: TaskError) -> fae_agent::Result<()> {
-        self.fail_plan(&error.meta.plan_id, anyhow::anyhow!(error.error))
-            .await;
+        if error.ctx.is_aborted() {
+            self.abort_plan(&error.meta.plan_id).await;
+        } else {
+            self.fail_plan(&error.meta.plan_id, anyhow::anyhow!(error.error))
+                .await;
+        }
         Ok(())
     }
 
@@ -379,6 +438,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     #[derive(Debug)]
     struct AsyncStringRuntime {
@@ -565,5 +625,90 @@ mod tests {
 
         assert!(error.to_string().contains("task failed"));
         assert!(aborted.load(Ordering::SeqCst));
+    }
+
+    #[derive(Debug)]
+    struct ContextAbortPlan {
+        started: Arc<Notify>,
+        aborted: Arc<AtomicBool>,
+        next_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Plan for ContextAbortPlan {
+        fn id(&self) -> &str {
+            "context-abort"
+        }
+
+        async fn init(&mut self) -> anyhow::Result<PlanNext> {
+            self.started.notify_one();
+            Ok(PlanNext::Tasks(vec![CallbackPlan::task("slow", "slow")]))
+        }
+
+        async fn next(&mut self, _response: TaskResponse) -> anyhow::Result<PlanNext> {
+            self.next_called.store(true, Ordering::SeqCst);
+            Ok(PlanNext::End)
+        }
+
+        async fn abort(&mut self, _code: i32, _error: String) {
+            self.aborted.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn context_abort_stops_plan_before_next_callback() {
+        let mut builder = EngineBuilder::new();
+        builder.add_runtime(PlanRuntime::new());
+        builder.add_runtime(AsyncStringRuntime::default());
+        let engine = builder.build().await;
+        let ctx = engine.ctx();
+        let started = Arc::new(Notify::new());
+        let aborted = Arc::new(AtomicBool::new(false));
+        let next_called = Arc::new(AtomicBool::new(false));
+        let task = TaskReq {
+            ctx: ctx.clone(),
+            meta: TaskMeta {
+                ty: TaskType::Plan,
+                ..Default::default()
+            },
+            req: Box::new(ContextAbortPlan {
+                started: started.clone(),
+                aborted: aborted.clone(),
+                next_called: next_called.clone(),
+            }) as Box<dyn Plan>,
+        };
+        let rt = engine.rt();
+        let execution = tokio::spawn(async move { rt.exec::<Box<dyn Plan>, ()>(task).await });
+
+        started.notified().await;
+        ctx.abort();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .expect("plan timed out")
+            .expect("plan task panicked")
+            .expect_err("aborted plan should fail");
+
+        assert_eq!(error.to_string(), "context has been aborted");
+        assert!(ctx.is_aborted());
+        assert!(aborted.load(Ordering::SeqCst));
+        assert!(!next_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn aborted_context_rejects_new_runtime_tasks() {
+        let mut builder = EngineBuilder::new();
+        builder.add_runtime(AsyncStringRuntime::default());
+        let engine = builder.build().await;
+        let ctx = engine.ctx();
+        ctx.abort();
+        let mut task = CallbackPlan::task("after-abort", "value");
+        task.ctx = ctx;
+
+        let error = Runtime::spawn(&*engine.rt(), &mut task)
+            .await
+            .expect_err("runtime should reject tasks after abort");
+
+        assert!(matches!(error, fae_agent::Error::ContextAborted));
     }
 }
