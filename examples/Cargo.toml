@@ -28,6 +28,10 @@ name = "single_agent"
 path = "single_agent.rs"
 
 [[example]]
+name = "single_agent_workflow"
+path = "single_agent_workflow.rs"
+
+[[example]]
 name = "workflow"
 path = "workflow.rs"
 
