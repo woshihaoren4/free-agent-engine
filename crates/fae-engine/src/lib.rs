@@ -23,7 +23,7 @@ impl Engine {
         tools_runtime.add_tool(Box::new(DefaultTools::default()));
         builder.add_runtime(tools_runtime);
 
-        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
 
         builder.build().await
     }
@@ -53,7 +53,7 @@ mod tests {
         tools_runtime.add_tool(Box::new(DefaultTools::default()));
         builder.add_runtime(tools_runtime);
 
-        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+        builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
         builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
         builder.build().await
     }

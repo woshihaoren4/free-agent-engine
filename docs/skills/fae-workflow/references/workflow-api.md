@@ -126,27 +126,14 @@ JSON 值。
 
 ```rust
 WorkflowAction::SingleAgent {
-    agent: SingleAgentInfo {
-        name: "reviewer".into(),
-        user_id: "workflow".into(),
-        session_id: "review-session".into(),
-        metadata: HashMap::new(),
-    },
-    prompt: "Review the input.".into(),
-    model: SingleAgentModelConfig {
-        model: model_name,
-        context_size: 32_000,
-        history_turns: 1,
-        max_completion_tokens: Some(1024),
-        temperature: Some(0.0),
-        max_tool_iterations: 8,
-    },
+    source: SingleAgentSource::AgentId("reviewer".into()),
     input: json!("Review: {$input.content}"),
-    tools: vec![],
-    skills: vec![],
-    mcp_servers: vec![],
 }
 ```
+
+该配置从 `${FAE_HOST:-~/.fae}/agents/reviewer_config.json` 加载，system prompt
+从同目录的 `reviewer_prompt.txt` 加载。也可使用 `SingleAgentSource::Paths`
+显式指定两个文件。
 
 要求 `PlanRuntime`、`SingleAgentPlanBuilder`、`ModelRuntime`，并按实际能力注册
 `SessionRuntime`、`ToolsRuntime`、`SkillRuntime` 和 `McpRuntime`。Agent 最终文本保存为节点

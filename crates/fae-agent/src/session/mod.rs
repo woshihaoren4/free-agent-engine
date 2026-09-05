@@ -138,9 +138,6 @@ pub enum SessionEventData {
     TurnStarted {
         input: String,
     },
-    HistoryLoaded {
-        messages: Vec<SessionMessage>,
-    },
     UserInput {
         content: String,
     },
@@ -176,7 +173,6 @@ impl SessionEventData {
         match self {
             SessionEventData::NodeCompleted { .. } => "node_completed",
             SessionEventData::TurnStarted { .. } => "turn_started",
-            SessionEventData::HistoryLoaded { .. } => "history_loaded",
             SessionEventData::UserInput { .. } => "user_input",
             SessionEventData::ModelOutput { .. } => "model_output",
             SessionEventData::ModelReasoning { .. } => "model_reasoning",
@@ -201,7 +197,6 @@ impl SessionEventData {
                 serde_json::json!({ "output": output, "finished": finished })
             }
             Self::TurnStarted { input } => serde_json::json!({ "input": input }),
-            Self::HistoryLoaded { messages } => serde_json::json!({ "messages": messages }),
             Self::UserInput { content }
             | Self::ModelOutput { content }
             | Self::ModelReasoning { content }
@@ -259,9 +254,6 @@ enum KnownSessionEventData {
     TurnStarted {
         input: String,
     },
-    HistoryLoaded {
-        messages: Vec<SessionMessage>,
-    },
     UserInput {
         content: String,
     },
@@ -295,7 +287,6 @@ impl From<KnownSessionEventData> for SessionEventData {
                 Self::NodeCompleted { output, finished }
             }
             KnownSessionEventData::TurnStarted { input } => Self::TurnStarted { input },
-            KnownSessionEventData::HistoryLoaded { messages } => Self::HistoryLoaded { messages },
             KnownSessionEventData::UserInput { content } => Self::UserInput { content },
             KnownSessionEventData::ModelOutput { content } => Self::ModelOutput { content },
             KnownSessionEventData::ModelReasoning { content } => Self::ModelReasoning { content },
@@ -332,7 +323,6 @@ fn deserialize_event_data(value: Value) -> serde_json::Result<SessionEventData> 
         event_type.as_str(),
         "node_completed"
             | "turn_started"
-            | "history_loaded"
             | "user_input"
             | "model_output"
             | "model_reasoning"

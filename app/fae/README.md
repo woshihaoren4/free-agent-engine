@@ -6,28 +6,54 @@ and streamed model output in one stable TUI.
 
 ## Single agent
 
-Set the model and start an interactive session:
+Create `~/.fae/agents/fae_config.json`:
+
+```json
+{
+  "agent": {
+    "name": "fae",
+    "user_id": "local",
+    "session_id": "default",
+    "metadata": {}
+  },
+  "model": {
+    "model": "gpt-xxx",
+    "context_size": 32000,
+    "history_turns": 20,
+    "max_completion_tokens": 4096,
+    "temperature": null,
+    "max_tool_iterations": 8
+  },
+  "tools": ["read_file", "execute_command"],
+  "skills": [
+    {
+      "type": "name",
+      "value": "fae-agent"
+    },
+    {
+      "type": "name",
+      "value": "fae-workflow"
+    }
+  ],
+  "mcp_servers": []
+}
+```
+
+Put the system prompt in `~/.fae/agents/fae_prompt.txt`, then start an
+interactive session:
 
 ```bash
-export FAE_DEFAULT_MODEL=<model>
 cargo run -p fae
 ```
 
-Pass the first message directly:
+Select another agent ID or explicit files:
 
 ```bash
-cargo run -p fae -- "review the current workspace"
-```
-
-The explicit form supports the same options:
-
-```bash
+cargo run -p fae -- agent --agent-id reviewer "review this workspace"
 cargo run -p fae -- agent \
-  --session code-review \
-  --tool read_file \
-  --tool execute_command \
-  --skill weather \
-  "check today's release"
+  --agent-config ./reviewer.json \
+  --agent-prompt ./reviewer.txt \
+  "review this workspace"
 ```
 
 Available session commands are `/help`, `/status`, `/clear`, and `/exit`.

@@ -33,46 +33,17 @@ pub enum Command {
 
 #[derive(Debug, Clone, Args)]
 pub struct AgentArgs {
-    /// Model name (defaults to FAE_DEFAULT_MODEL)
-    #[arg(short, long, env = "FAE_DEFAULT_MODEL")]
-    pub model: Option<String>,
+    /// Agent ID loaded from FAE_HOME/agents
+    #[arg(long, default_value = "fae")]
+    pub agent_id: String,
 
-    #[arg(long, default_value = "local")]
-    pub user: String,
+    /// Explicit agent config path; requires --agent-prompt
+    #[arg(long, requires = "agent_prompt")]
+    pub agent_config: Option<PathBuf>,
 
-    /// Stable session identifier used for persisted chat history
-    #[arg(long)]
-    pub session: Option<String>,
-
-    #[arg(
-        long,
-        default_value = "You are a pragmatic coding agent. Work carefully, use tools when needed, and answer concisely."
-    )]
-    pub system_prompt: String,
-
-    /// Built-in tool exposed to the agent; may be repeated
-    #[arg(long = "tool", default_values = ["read_file", "execute_command"])]
-    pub tools: Vec<String>,
-
-    /// Skill name or path to a SKILL.md file; may be repeated
-    #[arg(long = "skill")]
-    pub skills: Vec<String>,
-
-    /// Configured MCP server name; may be repeated
-    #[arg(long = "mcp-server")]
-    pub mcp_servers: Vec<String>,
-
-    #[arg(long, default_value_t = 32_000)]
-    pub context_size: usize,
-
-    #[arg(long, default_value_t = 20)]
-    pub history_turns: usize,
-
-    #[arg(long, default_value_t = 4_096)]
-    pub max_completion_tokens: u32,
-
-    #[arg(long, default_value_t = 8)]
-    pub max_tool_iterations: usize,
+    /// Explicit agent prompt path; requires --agent-config
+    #[arg(long, requires = "agent_config")]
+    pub agent_prompt: Option<PathBuf>,
 
     /// Optional first message; omit it to start at the prompt
     #[arg(value_name = "PROMPT", num_args = 0.., trailing_var_arg = true)]
@@ -143,7 +114,7 @@ mod tests {
             panic!("expected agent command");
         };
         assert_eq!(agent.prompt, ["review", "this"]);
-        assert_eq!(agent.tools, ["read_file", "execute_command"]);
+        assert_eq!(agent.agent_id, "fae");
     }
 
     #[test]

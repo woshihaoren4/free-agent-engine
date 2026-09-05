@@ -459,29 +459,15 @@ impl WorkflowPlan {
                 }
                 .into_request()
             }
-            WorkflowAction::SingleAgent {
-                agent,
-                prompt,
-                model,
-                input,
-                tools,
-                skills,
-                mcp_servers,
-            } => {
-                let prompt = resolved_string(&self.values().resolve(&Value::String(prompt))?)?;
+            WorkflowAction::SingleAgent { source, input } => {
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (mut env, session) = SingleAgentEnv::new_with_session(
-                    agent,
-                    prompt,
-                    model,
+                let (env, session) = SingleAgentEnv::new_with_session(
+                    source,
                     input,
-                    tools,
                     self.session.clone(),
                     self.metadata.id.clone(),
                     self.current.clone(),
                 );
-                env.skills = skills;
-                env.mcp_servers = mcp_servers;
                 let child = self
                     .ctx
                     .get_engine()
@@ -755,29 +741,15 @@ impl DagWorkflowPlan {
                     PendingAction::Session,
                 )
             }
-            WorkflowAction::SingleAgent {
-                agent,
-                prompt,
-                model,
-                input,
-                tools,
-                skills,
-                mcp_servers,
-            } => {
-                let prompt = resolved_string(&self.values().resolve(&Value::String(prompt))?)?;
+            WorkflowAction::SingleAgent { source, input } => {
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (mut env, session) = SingleAgentEnv::new_with_session(
-                    agent,
-                    prompt,
-                    model,
+                let (env, session) = SingleAgentEnv::new_with_session(
+                    source,
                     input,
-                    tools,
                     self.session.clone(),
                     self.metadata.id.clone(),
                     node_id.to_string(),
                 );
-                env.skills = skills;
-                env.mcp_servers = mcp_servers;
                 let child = self
                     .ctx
                     .get_engine()
@@ -1132,10 +1104,7 @@ fn only_target(node_id: &str, field: &str, targets: &[String]) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ContextNull, SingleAgentInfo, SingleAgentModelConfig, WorkflowCondition,
-        WorkflowMetadataBuilder,
-    };
+    use crate::{ContextNull, WorkflowCondition, WorkflowMetadataBuilder};
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1729,23 +1698,8 @@ mod tests {
         builder.end("end", None).unwrap();
         let (_, session) = WorkflowEnv::new("single-agent-events", Value::Null);
         let (_, child_session) = SingleAgentEnv::new_with_session(
-            SingleAgentInfo {
-                name: "agent".to_string(),
-                user_id: "user".to_string(),
-                session_id: "session".to_string(),
-                metadata: HashMap::new(),
-            },
-            "",
-            SingleAgentModelConfig {
-                model: "model".to_string(),
-                context_size: 1024,
-                history_turns: 0,
-                max_completion_tokens: None,
-                temperature: None,
-                max_tool_iterations: 1,
-            },
+            crate::SingleAgentSource::AgentId("agent".to_string()),
             "input",
-            Vec::new(),
             session.clone(),
             "single-agent-events",
             "agent-node",

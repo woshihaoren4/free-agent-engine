@@ -1,13 +1,9 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use fae_agent::{
     Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SingleAgentEnv,
-    SingleAgentInfo, SingleAgentModelConfig, SkillQuery, TaskError, TaskReq, TaskResp, TaskType,
+    SingleAgentPlanBuilder, SingleAgentSource, TaskError, TaskReq, TaskResp, TaskType,
     WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::{
@@ -26,7 +22,9 @@ const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Some(Command::Agent(args)) => run_agent(args, cli.color, cli.no_alt_screen).await,
+        Some(Command::Agent(args)) => {
+            run_agent(args, cli.fae_home, cli.color, cli.no_alt_screen).await
+        }
         Some(Command::Workflow(args)) => {
             run_workflow(args, cli.fae_home, cli.color, cli.no_alt_screen).await
         }
@@ -36,17 +34,27 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
 
 async fn run_agent(
     args: AgentArgs,
+    fae_home: Option<PathBuf>,
     color: crate::args::ColorChoice,
     no_alt_screen: bool,
 ) -> anyhow::Result<()> {
-    let model = args
-        .model
-        .clone()
-        .filter(|model| !model.trim().is_empty())
-        .context("set FAE_DEFAULT_MODEL or pass --model")?;
-    let session_id = args.session.clone().unwrap_or_else(default_session_id);
-    let loader = FAEWorkflowMetadataLoader::new();
-    let engine = build_engine(loader).await;
+    let loader = match fae_home {
+        Some(home) => FAEWorkflowMetadataLoader::with_home_dir(expand_home(home)),
+        None => FAEWorkflowMetadataLoader::new(),
+    };
+    let source = match (args.agent_config.clone(), args.agent_prompt.clone()) {
+        (Some(config), Some(prompt)) => SingleAgentSource::Paths {
+            config: expand_home(config),
+            prompt: expand_home(prompt),
+        },
+        (None, None) => SingleAgentSource::AgentId(args.agent_id.clone()),
+        _ => unreachable!("clap requires agent config and prompt paths together"),
+    };
+    let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    let (config, _) = agent_builder.load_config(&source).await?;
+    let session_id = config.agent.session_id;
+    let model = config.model.model;
+    let engine = build_engine(loader, agent_builder).await;
 
     let mut ui = TerminalUi::new(Mode::Agent, &model, &session_id, color, no_alt_screen)?;
     let first_input = if args.prompt.is_empty() {
@@ -61,29 +69,7 @@ async fn run_agent(
         let Some(input) = first_input else {
             return Ok(());
         };
-        let skills = args.skills.iter().map(|skill| skill_query(skill)).collect();
-        let (env, session) = SingleAgentEnv::new(
-            SingleAgentInfo {
-                name: "fae".to_string(),
-                user_id: args.user.clone(),
-                session_id: session_id.clone(),
-                metadata: HashMap::new(),
-            },
-            args.system_prompt.clone(),
-            SingleAgentModelConfig {
-                model: model.clone(),
-                context_size: args.context_size,
-                history_turns: args.history_turns,
-                max_completion_tokens: Some(args.max_completion_tokens),
-                temperature: None,
-                max_tool_iterations: args.max_tool_iterations,
-            },
-            input,
-            args.tools.clone(),
-        );
-        let env = env
-            .with_skills(skills)
-            .with_mcp_servers(args.mcp_servers.clone());
+        let (env, session) = SingleAgentEnv::new(source, input);
         let execution = engine.launch(env).await?;
 
         if !ui.run_session(&session, Some(&execution)).await? {
@@ -120,7 +106,8 @@ async fn run_workflow(
         None => FAEWorkflowMetadataLoader::new(),
     };
     let input = parse_workflow_input(&args.input).await?;
-    let engine = build_engine(loader.clone()).await;
+    let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    let engine = build_engine(loader.clone(), agent_builder).await;
     let model = std::env::var("FAE_DEFAULT_MODEL").unwrap_or_else(|_| "workflow".to_string());
     let mut ui = TerminalUi::new(Mode::Workflow, model, &args.id, color, no_alt_screen)?;
     ui.push_system(format!(
@@ -178,15 +165,6 @@ async fn next_agent_input(
     }
 }
 
-fn skill_query(value: &str) -> SkillQuery {
-    let path = Path::new(value);
-    if path.exists() || value.ends_with("SKILL.md") || value.contains(std::path::MAIN_SEPARATOR) {
-        SkillQuery::Path(expand_home(path.to_path_buf()))
-    } else {
-        SkillQuery::Name(value.to_string())
-    }
-}
-
 async fn parse_workflow_input(input: &str) -> anyhow::Result<Value> {
     let (source, label) = if let Some(path) = input.strip_prefix('@') {
         anyhow::ensure!(!path.is_empty(), "workflow input path cannot be empty");
@@ -220,15 +198,10 @@ fn expand_home(path: PathBuf) -> PathBuf {
         .unwrap_or(path)
 }
 
-fn default_session_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("terminal-{timestamp}-{}", std::process::id())
-}
-
-async fn build_engine(loader: FAEWorkflowMetadataLoader) -> Engine {
+async fn build_engine(
+    loader: FAEWorkflowMetadataLoader,
+    agent_builder: SingleAgentPlanBuilder,
+) -> Engine {
     let mut builder = EngineBuilder::new();
     builder.add_runtime(PlanRuntime::new());
     builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
@@ -242,7 +215,7 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> Engine {
     tools.add_tool(Box::new(DefaultTools::default()));
     builder.add_runtime(tools);
 
-    builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+    builder.add_plan_builder(agent_builder);
     builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
     builder.build().await
 }
@@ -386,18 +359,6 @@ mod tests {
         assert_eq!(input, json!({"count": 3}));
     }
 
-    #[test]
-    fn treats_names_and_paths_as_distinct_skill_queries() {
-        assert_eq!(
-            skill_query("weather"),
-            SkillQuery::Name("weather".to_string())
-        );
-        assert!(matches!(
-            skill_query("./skills/review/SKILL.md"),
-            SkillQuery::Path(_)
-        ));
-    }
-
     #[tokio::test]
     async fn python_runtime_returns_json_value() {
         let output = execute_python(
@@ -419,7 +380,8 @@ mod tests {
 
         let loader = FAEWorkflowMetadataLoader::new();
         loader.add(workflow.build().unwrap()).unwrap();
-        let engine = build_engine(loader).await;
+        let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+        let engine = build_engine(loader, agent_builder).await;
         let (env, _) = WorkflowEnv::new("terminal-smoke-test", json!({"value": 42}));
         let (_, output) = engine.invoke::<_, Value>(env).await.unwrap();
         engine.exit().await.unwrap();

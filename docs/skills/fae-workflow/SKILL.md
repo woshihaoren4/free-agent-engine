@@ -142,7 +142,7 @@ cargo test -p examples --example workflow
 需要模型的完整示例通过以下方式运行：
 
 ```bash
-FAE_DEFAULT_MODEL=<model> cargo run -p examples --example workflow
+cargo run -p examples --example workflow
 ```
 
 ## 当前源码入口

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
@@ -49,40 +50,64 @@ pub struct SingleAgentModelConfig {
     pub max_tool_iterations: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SingleAgentConfig {
+    pub agent: SingleAgentInfo,
+    pub model: SingleAgentModelConfig,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<SkillQuery>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SingleAgentSource {
+    AgentId(String),
+    Paths { config: PathBuf, prompt: PathBuf },
+}
+
 const fn default_max_tool_iterations() -> usize {
     8
 }
 
 #[derive(Debug)]
 pub struct SingleAgentEnv {
-    pub agent: SingleAgentInfo,
-    pub prompt: String,
-    pub model: SingleAgentModelConfig,
+    pub source: SingleAgentSource,
     pub input: String,
-    pub tools: Vec<String>,
-    pub skills: Vec<SkillQuery>,
-    pub mcp_servers: Vec<String>,
     session: SingleAgentSession,
 }
 
 impl SingleAgentEnv {
-    pub fn new(
-        agent: SingleAgentInfo,
-        prompt: impl Into<String>,
-        model: SingleAgentModelConfig,
+    pub fn from_agent_id(
+        agent_id: impl Into<String>,
         input: impl Into<String>,
-        tools: Vec<String>,
     ) -> (Self, SingleAgentSession) {
+        Self::new(SingleAgentSource::AgentId(agent_id.into()), input)
+    }
+
+    pub fn from_paths(
+        config: impl Into<PathBuf>,
+        prompt: impl Into<PathBuf>,
+        input: impl Into<String>,
+    ) -> (Self, SingleAgentSession) {
+        Self::new(
+            SingleAgentSource::Paths {
+                config: config.into(),
+                prompt: prompt.into(),
+            },
+            input,
+        )
+    }
+
+    pub fn new(source: SingleAgentSource, input: impl Into<String>) -> (Self, SingleAgentSession) {
         let session = SingleAgentSession::new();
         (
             Self {
-                agent,
-                prompt: prompt.into(),
-                model,
+                source,
                 input: input.into(),
-                tools,
-                skills: Vec::new(),
-                mcp_servers: Vec::new(),
                 session: session.clone(),
             },
             session,
@@ -93,22 +118,9 @@ impl SingleAgentEnv {
         self.session.clone()
     }
 
-    pub fn with_skills(mut self, skills: Vec<SkillQuery>) -> Self {
-        self.skills = skills;
-        self
-    }
-
-    pub fn with_mcp_servers(mut self, mcp_servers: Vec<String>) -> Self {
-        self.mcp_servers = mcp_servers;
-        self
-    }
-
     pub fn new_with_session(
-        agent: SingleAgentInfo,
-        prompt: impl Into<String>,
-        model: SingleAgentModelConfig,
+        source: SingleAgentSource,
         input: impl Into<String>,
-        tools: Vec<String>,
         workflow_session: WorkflowSession,
         workflow_id: impl Into<String>,
         node_id: impl Into<String>,
@@ -116,13 +128,8 @@ impl SingleAgentEnv {
         let session = SingleAgentSession::new_in_workflow(workflow_session, workflow_id, node_id);
         (
             Self {
-                agent,
-                prompt: prompt.into(),
-                model,
+                source,
                 input: input.into(),
-                tools,
-                skills: Vec::new(),
-                mcp_servers: Vec::new(),
                 session: session.clone(),
             },
             session,
@@ -325,17 +332,91 @@ impl Session<String, SessionEvent> for SingleAgentSession {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SingleAgentPlanBuilder;
+#[derive(Debug, Clone)]
+pub struct SingleAgentPlanBuilder {
+    home_dir: PathBuf,
+}
+
+impl Default for SingleAgentPlanBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SingleAgentPlanBuilder {
+    pub fn new() -> Self {
+        Self::with_home_dir(default_fae_home())
+    }
+
+    pub fn with_home_dir(home_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            home_dir: home_dir.into(),
+        }
+    }
+
+    pub fn home_dir(&self) -> &Path {
+        &self.home_dir
+    }
+
+    pub async fn load_config(
+        &self,
+        source: &SingleAgentSource,
+    ) -> anyhow::Result<(SingleAgentConfig, String)> {
+        let (config_path, prompt_path, expected_agent_id) = match source {
+            SingleAgentSource::AgentId(agent_id) => {
+                validate_agent_id(agent_id)?;
+                let agents_dir = self.home_dir.join("agents");
+                (
+                    agents_dir.join(format!("{agent_id}_config.json")),
+                    agents_dir.join(format!("{agent_id}_prompt.txt")),
+                    Some(agent_id.as_str()),
+                )
+            }
+            SingleAgentSource::Paths { config, prompt } => (config.clone(), prompt.clone(), None),
+        };
+
+        let config_bytes = tokio::fs::read(&config_path).await.map_err(|error| {
+            anyhow::anyhow!(
+                "load single-agent config `{}`: {error}",
+                config_path.display()
+            )
+        })?;
+        let config: SingleAgentConfig = serde_json::from_slice(&config_bytes).map_err(|error| {
+            anyhow::anyhow!(
+                "parse single-agent config `{}`: {error}",
+                config_path.display()
+            )
+        })?;
+        validate_config(&config)?;
+        if let Some(agent_id) = expected_agent_id {
+            anyhow::ensure!(
+                config.agent.name == agent_id,
+                "agent config `{}` contains name `{}`, expected `{agent_id}`",
+                config_path.display(),
+                config.agent.name
+            );
+        }
+        let prompt = tokio::fs::read_to_string(&prompt_path)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "load single-agent prompt `{}`: {error}",
+                    prompt_path.display()
+                )
+            })?;
+        Ok((config, prompt))
+    }
+}
 
 #[async_trait::async_trait]
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
-        validate_env(&env)?;
-        let skills = resolve_skills(&rt, &env.skills).await?;
-        let prompt = prompt_with_skills(env.prompt, &skills);
-        let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &env.tools).await?;
-        let (mcp_definitions, mcp_routes) = resolve_mcp_tools(&rt, &env.mcp_servers).await?;
+        anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
+        let (config, prompt) = self.load_config(&env.source).await?;
+        let skills = resolve_skills(&rt, &config.skills).await?;
+        let prompt = prompt_with_skills(prompt, &skills);
+        let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &config.tools).await?;
+        let (mcp_definitions, mcp_routes) = resolve_mcp_tools(&rt, &config.mcp_servers).await?;
         for (name, route) in mcp_routes {
             anyhow::ensure!(
                 tool_routes.insert(name.clone(), route).is_none(),
@@ -344,9 +425,9 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         }
         tool_definitions.extend(mcp_definitions);
         let template = SingleAgentTemplate {
-            agent: env.agent,
+            agent: config.agent,
             prompt,
-            model: env.model,
+            model: config.model,
             tool_definitions,
             tool_routes,
         };
@@ -367,27 +448,67 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     }
 }
 
-fn validate_env(env: &SingleAgentEnv) -> anyhow::Result<()> {
+fn validate_config(config: &SingleAgentConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
-        !env.agent.name.trim().is_empty(),
+        !config.agent.name.trim().is_empty(),
         "agent name cannot be empty"
     );
     anyhow::ensure!(
-        !env.agent.user_id.trim().is_empty(),
+        !config.agent.user_id.trim().is_empty(),
         "user_id cannot be empty"
     );
     anyhow::ensure!(
-        !env.agent.session_id.trim().is_empty(),
+        !config.agent.session_id.trim().is_empty(),
         "session_id cannot be empty"
     );
-    anyhow::ensure!(!env.model.model.trim().is_empty(), "model cannot be empty");
-    anyhow::ensure!(env.model.context_size > 0, "context_size must be positive");
     anyhow::ensure!(
-        env.model.max_tool_iterations > 0,
+        !config.model.model.trim().is_empty(),
+        "model cannot be empty"
+    );
+    anyhow::ensure!(
+        config.model.context_size > 0,
+        "context_size must be positive"
+    );
+    anyhow::ensure!(
+        config.model.max_tool_iterations > 0,
         "max_tool_iterations must be positive"
     );
-    anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
     Ok(())
+}
+
+fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {
+    let mut components = Path::new(agent_id).components();
+    anyhow::ensure!(
+        !agent_id.is_empty()
+            && matches!(components.next(), Some(Component::Normal(_)))
+            && components.next().is_none(),
+        "agent id must be a single non-empty path component"
+    );
+    Ok(())
+}
+
+fn default_fae_home() -> PathBuf {
+    match std::env::var_os("FAE_HOST") {
+        Some(home) if !home.is_empty() => expand_home(PathBuf::from(home)),
+        _ => dirs::home_dir()
+            .map(|home| home.join(".fae"))
+            .unwrap_or_else(|| PathBuf::from(".fae")),
+    }
+}
+
+fn expand_home(path: PathBuf) -> PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path;
+    };
+    if path_str == "~" {
+        return dirs::home_dir().unwrap_or(path);
+    }
+    if let Some(rest) = path_str.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path
 }
 
 async fn resolve_tools(
@@ -965,13 +1086,6 @@ impl Plan for SingleAgentPlan {
                 let SessionResponse::History { messages, .. } = response.resp else {
                     anyhow::bail!("expected history query response");
                 };
-                self.emit(
-                    "session",
-                    SessionEventData::HistoryLoaded {
-                        messages: messages.clone(),
-                    },
-                )
-                .await?;
                 self.prepare_messages(&messages);
                 let pending = self.session.take_pending_inputs();
                 self.append_user_inputs(pending).await?;
@@ -1115,6 +1229,95 @@ mod tests {
     use async_openai::types::chat::{
         CreateChatCompletionResponse, FunctionCallStream, FunctionType,
     };
+
+    fn test_config() -> SingleAgentConfig {
+        SingleAgentConfig {
+            agent: SingleAgentInfo {
+                name: "reviewer".to_string(),
+                user_id: "test-user".to_string(),
+                session_id: "test-session".to_string(),
+                metadata: HashMap::new(),
+            },
+            model: SingleAgentModelConfig {
+                model: "test-model".to_string(),
+                context_size: 8_192,
+                history_turns: 10,
+                max_completion_tokens: Some(1_024),
+                temperature: Some(0.0),
+                max_tool_iterations: 4,
+            },
+            tools: vec!["read_file".to_string()],
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_loads_agent_id_from_home_agents_directory() {
+        let home = std::env::temp_dir().join(format!(
+            "fae-single-agent-builder-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let agents = home.join("agents");
+        tokio::fs::create_dir_all(&agents).await.unwrap();
+        tokio::fs::write(
+            agents.join("reviewer_config.json"),
+            serde_json::to_vec(&test_config()).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(agents.join("reviewer_prompt.txt"), "Review carefully.")
+            .await
+            .unwrap();
+
+        let builder = SingleAgentPlanBuilder::with_home_dir(&home);
+        let (config, prompt) = builder
+            .load_config(&SingleAgentSource::AgentId("reviewer".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(config.agent.name, "reviewer");
+        assert_eq!(config.model.model, "test-model");
+        assert_eq!(config.tools, ["read_file"]);
+        assert_eq!(prompt, "Review carefully.");
+        tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_loads_explicit_config_and_prompt_paths() {
+        let dir =
+            std::env::temp_dir().join(format!("fae-single-agent-paths-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let config_path = dir.join("custom.json");
+        let prompt_path = dir.join("prompt.txt");
+        tokio::fs::write(&config_path, serde_json::to_vec(&test_config()).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&prompt_path, "Custom prompt.")
+            .await
+            .unwrap();
+
+        let builder = SingleAgentPlanBuilder::with_home_dir("/unused");
+        let (config, prompt) = builder
+            .load_config(&SingleAgentSource::Paths {
+                config: config_path,
+                prompt: prompt_path,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(config.agent.session_id, "test-session");
+        assert_eq!(prompt, "Custom prompt.");
+        tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[test]
+    fn agent_id_rejects_path_components() {
+        assert!(validate_agent_id("../reviewer").is_err());
+        assert!(validate_agent_id("team/reviewer").is_err());
+        assert!(validate_agent_id("reviewer").is_ok());
+    }
 
     #[test]
     fn event_uses_common_envelope_and_nested_payload() {
@@ -1580,15 +1783,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(
-            kinds,
-            vec![
-                "turn_started",
-                "history_loaded",
-                "model_output",
-                "completed"
-            ]
-        );
+        assert_eq!(kinds, vec!["turn_started", "model_output", "completed"]);
     }
 
     fn test_template() -> SingleAgentTemplate {

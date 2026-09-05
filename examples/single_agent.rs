@@ -1,18 +1,9 @@
-use std::{
-    collections::HashMap,
-    io::{self, Write},
-    path::PathBuf,
-};
+use std::io::{self, Write};
 
-use fae_agent::{
-    Session, SessionEvent, SessionEventData, SingleAgentEnv, SingleAgentInfo,
-    SingleAgentModelConfig, SkillQuery,
-};
+use fae_agent::{Session, SessionEvent, SessionEventData, SingleAgentEnv};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let model = std::env::var("FAE_DEFAULT_MODEL")
-        .map_err(|_| anyhow::anyhow!("set FAE_DEFAULT_MODEL before running this example"))?;
     let engine = fae_engine::Engine::default().await;
 
     println!("Enter a message. Use /exit or /quit to stop.");
@@ -21,28 +12,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let (env, session) = SingleAgentEnv::new(
-        SingleAgentInfo {
-            name: "workspace-assistant".to_string(),
-            user_id: "example-user".to_string(),
-            session_id: "single-agent-example".to_string(),
-            metadata: HashMap::new(),
-        },
-        "Answer concisely. Use an available tool when it is needed.",
-        SingleAgentModelConfig {
-            model,
-            context_size: 32_000,
-            history_turns: 10,
-            max_completion_tokens: Some(4_096),
-            temperature: Some(1.0f32),
-            max_tool_iterations: 8,
-        },
-        first_input,
-        vec![fae_engine::READ_FILE.to_string(),fae_engine::EXECUTE_COMMAND.to_string()],
-    );
-    let weather_skill =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/skills/weather/SKILL.md");
-    let env = env.with_skills(vec![SkillQuery::Path(weather_skill)]);
+    let (env, session) = SingleAgentEnv::from_agent_id("workspace-assistant", first_input);
 
     let first_turn = engine.launch(env).await?;
     print_turn(&session).await?;
@@ -87,9 +57,6 @@ async fn print_turn(session: &impl Session<String, SessionEvent>) -> anyhow::Res
         match event.data {
             SessionEventData::TurnStarted { input } => {
                 println!("\n== Turn {turn_id} | {source} ==\nuser> {input}");
-            }
-            SessionEventData::HistoryLoaded { messages } => {
-                println!("history> loaded {} message(s)", messages.len());
             }
             SessionEventData::UserInput { content } => {
                 finish_stream(&mut streaming);

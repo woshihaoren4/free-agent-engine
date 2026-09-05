@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use fae_agent::{
-    SingleAgentInfo, SingleAgentModelConfig, WorkflowAction, WorkflowCompare, WorkflowCondition,
-    WorkflowMetadata, WorkflowMetadataBuilder,
+    SingleAgentSource, WorkflowAction, WorkflowCompare, WorkflowCondition, WorkflowMetadata,
+    WorkflowMetadataBuilder,
 };
 use fae_engine::{READ_FILE, WRITE_FILE};
 use serde_json::{Value, json};
@@ -75,9 +73,7 @@ pub const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 ///                                  |   end   |
 ///                                  +---------+
 /// ```
-pub fn build_release_review_workflow(
-    model: SingleAgentModelConfig,
-) -> anyhow::Result<WorkflowMetadata> {
+pub fn build_release_review_workflow() -> anyhow::Result<WorkflowMetadata> {
     let mut builder = WorkflowMetadataBuilder::new("release-readiness-review");
 
     builder.start("start", "select_policy")?;
@@ -142,12 +138,7 @@ pub fn build_release_review_workflow(
         "review_source",
         agent_action(
             "source-reviewer",
-            concat!(
-                "审查这份 Rust 源代码中可能影响发布的风险。请使用中文返回简洁的 JSON，",
-                "并包含 `summary`、`risks` 和 `recommendation` 字段。"
-            ),
             json!("策略：{$input.policy}\n路径：{$read_source.path}\n\n{$read_source.content}"),
-            model.clone(),
         ),
         "aggregate_reviews",
     )?;
@@ -155,12 +146,7 @@ pub fn build_release_review_workflow(
         "review_manifest",
         agent_action(
             "manifest-reviewer",
-            concat!(
-                "审查这份 Cargo 清单中可能影响发布的风险。请使用中文返回简洁的 JSON，",
-                "并包含 `summary`、`risks` 和 `recommendation` 字段。"
-            ),
             json!("策略：{$input.policy}\n路径：{$read_manifest.path}\n\n{$read_manifest.content}"),
-            model.clone(),
         ),
         "aggregate_reviews",
     )?;
@@ -216,16 +202,11 @@ pub fn build_release_review_workflow(
         "final_report",
         agent_action(
             "release-manager",
-            concat!(
-                "根据提供的审查结果生成简洁的中文发布就绪报告。",
-                "报告需说明检查策略、发布决策以及最重要的后续行动。"
-            ),
             json!({
                 "policy": "{$input.policy}",
                 "quality_gate": "{$aggregate_reviews}",
                 "remediation_requested": "{$input.run_remediation}"
             }),
-            model,
         ),
         "end",
     )?;
@@ -339,25 +320,10 @@ fn python_action(code: impl Into<String>, arguments: Value) -> WorkflowAction {
     }
 }
 
-fn agent_action(
-    name: &str,
-    prompt: &str,
-    input: Value,
-    model: SingleAgentModelConfig,
-) -> WorkflowAction {
+fn agent_action(name: &str, input: Value) -> WorkflowAction {
     WorkflowAction::SingleAgent {
-        agent: SingleAgentInfo {
-            name: name.to_string(),
-            user_id: "workflow-example".to_string(),
-            session_id: format!("workflow-example-{name}"),
-            metadata: HashMap::new(),
-        },
-        prompt: prompt.to_string(),
-        model,
+        source: SingleAgentSource::AgentId(name.to_string()),
         input,
-        tools: Vec::new(),
-        skills: Vec::new(),
-        mcp_servers: Vec::new(),
     }
 }
 
@@ -366,20 +332,9 @@ mod tests {
     use super::*;
     use fae_agent::WorkflowNode;
 
-    fn model() -> SingleAgentModelConfig {
-        SingleAgentModelConfig {
-            model: "test-model".to_string(),
-            context_size: 8_192,
-            history_turns: 1,
-            max_completion_tokens: Some(512),
-            temperature: Some(0.0),
-            max_tool_iterations: 1,
-        }
-    }
-
     #[test]
     fn metadata_covers_parallel_choice_loop_tools_agents_and_python() {
-        let workflow = build_release_review_workflow(model()).unwrap();
+        let workflow = build_release_review_workflow().unwrap();
 
         assert!(matches!(
             workflow.nodes["select_policy"],

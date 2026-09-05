@@ -7,8 +7,8 @@ use std::{
 
 use fae_agent::{
     Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEvent,
-    SessionEventData, SingleAgentModelConfig, TaskError, TaskReq, TaskResp, TaskType,
-    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
+    SessionEventData, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
+    WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::EngineBuilder;
 use serde_json::{Value, json};
@@ -149,7 +149,7 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
     tools.add_tool(Box::new(fae_engine::DefaultTools::default()));
     builder.add_runtime(tools);
 
-    builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder);
+    builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
     builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
     builder.build().await
 }
@@ -233,20 +233,10 @@ fn workflow_input(example_dir: &Path) -> Value {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let model = std::env::var("FAE_DEFAULT_MODEL")
-        .map_err(|_| anyhow::anyhow!("set FAE_DEFAULT_MODEL before running this example"))?;
-    let model_config = SingleAgentModelConfig {
-        model,
-        context_size: 32_000,
-        history_turns: 1,
-        max_completion_tokens: Some(1_024),
-        temperature: Some(0.0),
-        max_tool_iterations: 1,
-    };
     let input = workflow_input(Path::new(env!("CARGO_MANIFEST_DIR")));
     let loader = FAEWorkflowMetadataLoader::new();
     let engine = build_engine(loader.clone()).await;
-    loader.add(build_release_review_workflow(model_config)?)?;
+    loader.add(build_release_review_workflow()?)?;
     loader.add(workflow_metadata::build_remediation_workflow()?)?;
     let (env, session) = WorkflowEnv::new("release-readiness-review", input);
 

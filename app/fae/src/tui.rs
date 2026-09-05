@@ -6,8 +6,9 @@ use std::{
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event as TerminalEvent, EventStream, KeyCode,
-        KeyEvent, KeyEventKind, KeyModifiers,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{
@@ -30,6 +31,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::args::ColorChoice;
 
 const SPINNER: &[&str] = &["-", "\\", "|", "/"];
+const PAGE_SCROLL_LINES: u16 = 8;
+const MOUSE_SCROLL_LINES: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -197,7 +200,7 @@ impl TerminalUi {
         let mut stdout = io::stdout();
         let alternate_screen = !no_alt_screen;
         let terminal = (|| -> anyhow::Result<_> {
-            execute!(stdout, EnableBracketedPaste)?;
+            execute!(stdout, EnableBracketedPaste, EnableMouseCapture)?;
             if alternate_screen {
                 execute!(stdout, EnterAlternateScreen)?;
             }
@@ -222,7 +225,7 @@ impl TerminalUi {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, DisableBracketedPaste);
+                let _ = execute!(stdout, DisableMouseCapture, DisableBracketedPaste);
                 if alternate_screen {
                     let _ = execute!(stdout, LeaveAlternateScreen);
                 }
@@ -305,15 +308,12 @@ impl TerminalUi {
                     match (key.code, key.modifiers) {
                         (KeyCode::Enter | KeyCode::Esc, _)
                         | (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => return Ok(()),
-                        (KeyCode::PageUp, _) => {
-                            self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(8);
-                        }
-                        (KeyCode::PageDown, _) => {
-                            self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(8);
-                        }
+                        (KeyCode::PageUp, _) => self.scroll_up(PAGE_SCROLL_LINES),
+                        (KeyCode::PageDown, _) => self.scroll_down(PAGE_SCROLL_LINES),
                         _ => {}
                     }
                 }
+                TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
                 TerminalEvent::Resize(_, _) => {}
                 _ => {}
             }
@@ -337,6 +337,7 @@ impl TerminalUi {
                             }
                         }
                         TerminalEvent::Paste(content) => self.composer.insert(&content),
+                        TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
                         TerminalEvent::Resize(_, _) => {}
                         _ => {}
                     }
@@ -390,6 +391,7 @@ impl TerminalUi {
                             self.draw()?;
                             return Ok(false);
                         }
+                        TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
                         TerminalEvent::Resize(_, _) => {}
                         _ => {}
                     }
@@ -482,19 +484,8 @@ impl TerminalUi {
                     stream_id: None,
                 });
             }
-            SessionEventData::HistoryLoaded { messages } if !messages.is_empty() => {
-                self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::System,
-                    title: String::new(),
-                    content: format!("Loaded {} history messages", messages.len()),
-                    stream_id: None,
-                });
-            }
             SessionEventData::Completed { .. } => self.finish_stream(),
-            SessionEventData::HistoryLoaded { .. }
-            | SessionEventData::TurnStarted { .. }
-            | SessionEventData::UserInput { .. } => {}
+            SessionEventData::TurnStarted { .. } | SessionEventData::UserInput { .. } => {}
         }
         self.scroll_from_bottom = 0;
         terminal
@@ -561,12 +552,8 @@ impl TerminalUi {
             (KeyCode::Down, _) if !self.composer.text.contains('\n') => {
                 self.navigate_history(false);
             }
-            (KeyCode::PageUp, _) => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(8);
-            }
-            (KeyCode::PageDown, _) => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(8);
-            }
+            (KeyCode::PageUp, _) => self.scroll_up(PAGE_SCROLL_LINES),
+            (KeyCode::PageDown, _) => self.scroll_down(PAGE_SCROLL_LINES),
             _ => {}
         }
         None
@@ -607,15 +594,31 @@ impl TerminalUi {
             (KeyCode::Esc, _) => true,
             (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => true,
             (KeyCode::PageUp, _) => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(8);
+                self.scroll_up(PAGE_SCROLL_LINES);
                 false
             }
             (KeyCode::PageDown, _) => {
-                self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(8);
+                self.scroll_down(PAGE_SCROLL_LINES);
                 false
             }
             _ => false,
         }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(MOUSE_SCROLL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_down(MOUSE_SCROLL_LINES),
+            _ => {}
+        }
+    }
+
+    fn scroll_up(&mut self, lines: u16) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add(lines);
+    }
+
+    fn scroll_down(&mut self, lines: u16) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(lines);
     }
 
     fn draw(&mut self) -> anyhow::Result<()> {
@@ -657,7 +660,11 @@ impl Drop for TerminalUi {
             .alternate_screen
             .then(|| plain_transcript(&self.messages));
         let _ = self.terminal.show_cursor();
-        let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         if self.alternate_screen {
             let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         }
@@ -802,9 +809,9 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
     let hint = match view.state {
-        RunState::Running => " Esc interrupt   PgUp/PgDn scroll ",
-        RunState::Completed => " Enter close   PgUp/PgDn scroll ",
-        _ => " Enter send   Ctrl+J newline   PgUp/PgDn scroll   Ctrl+C quit ",
+        RunState::Running => " Esc interrupt   Wheel/PgUp/PgDn scroll ",
+        RunState::Completed => " Enter close   Wheel/PgUp/PgDn scroll ",
+        _ => " Enter send   Ctrl+J newline   Wheel/PgUp/PgDn scroll   Ctrl+C quit ",
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
