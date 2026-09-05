@@ -1,5 +1,5 @@
 use fae_agent::{
-    DefaultWorkflowMetadataLoader, WorkflowAction, WorkflowEnv, WorkflowMetadata,
+    FAEWorkflowMetadataLoader, WorkflowAction, WorkflowEnv, WorkflowMetadata,
     WorkflowMetadataBuilder,
 };
 use serde_json::{Value, json};
@@ -47,10 +47,12 @@ fn build_parent_workflow() -> anyhow::Result<WorkflowMetadata> {
 }
 
 async fn run() -> anyhow::Result<Value> {
-    let loader = DefaultWorkflowMetadataLoader::new();
+    let loader = FAEWorkflowMetadataLoader::new();
     let mut builder = fae_engine::EngineBuilder::new();
     builder.add_runtime(fae_engine::PlanRuntime::new());
-    builder.add_runtime(fae_engine::WorkflowRuntime::new());
+    builder.add_runtime(fae_engine::WorkflowRuntime::with_metadata_loader(
+        loader.clone(),
+    ));
     builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader.clone()));
     let engine = builder.build().await;
     loader.add(build_parent_workflow()?)?;

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
@@ -19,14 +20,32 @@ pub trait WorkflowMetadataLoader: std::fmt::Debug + Send + Sync + 'static {
     async fn load(&self, workflow_id: &str) -> anyhow::Result<WorkflowMetadata>;
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct DefaultWorkflowMetadataLoader {
+#[derive(Debug, Clone)]
+pub struct FAEWorkflowMetadataLoader {
     workflows: Arc<RwLock<HashMap<String, WorkflowMetadata>>>,
+    home_dir: PathBuf,
 }
 
-impl DefaultWorkflowMetadataLoader {
+impl Default for FAEWorkflowMetadataLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FAEWorkflowMetadataLoader {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_home_dir(default_fae_home())
+    }
+
+    pub fn with_home_dir(home_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            workflows: Arc::default(),
+            home_dir: home_dir.into(),
+        }
+    }
+
+    pub fn home_dir(&self) -> &Path {
+        &self.home_dir
     }
 
     pub fn add(&self, metadata: WorkflowMetadata) -> anyhow::Result<Option<WorkflowMetadata>> {
@@ -49,15 +68,72 @@ impl DefaultWorkflowMetadataLoader {
 }
 
 #[async_trait::async_trait]
-impl WorkflowMetadataLoader for DefaultWorkflowMetadataLoader {
+impl WorkflowMetadataLoader for FAEWorkflowMetadataLoader {
     async fn load(&self, workflow_id: &str) -> anyhow::Result<WorkflowMetadata> {
-        self.workflows
+        if let Some(metadata) = self
+            .workflows
             .read()
             .map_err(|_| anyhow::anyhow!("workflow metadata registry lock is poisoned"))?
             .get(workflow_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("workflow `{workflow_id}` is not registered"))
+        {
+            return Ok(metadata);
+        }
+
+        validate_workflow_id(workflow_id)?;
+        let path = self
+            .home_dir
+            .join("workflows")
+            .join(format!("{workflow_id}.json"));
+        let metadata = WorkflowMetadata::load_json(&path).await.map_err(|error| {
+            anyhow::anyhow!(
+                "load workflow `{workflow_id}` from `{}`: {error}",
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            metadata.id == workflow_id,
+            "workflow file `{}` contains id `{}`, expected `{workflow_id}`",
+            path.display(),
+            metadata.id
+        );
+        Ok(metadata)
     }
+}
+
+fn validate_workflow_id(workflow_id: &str) -> anyhow::Result<()> {
+    let mut components = Path::new(workflow_id).components();
+    anyhow::ensure!(
+        !workflow_id.is_empty()
+            && matches!(components.next(), Some(Component::Normal(_)))
+            && components.next().is_none(),
+        "workflow id must be a single non-empty path component"
+    );
+    Ok(())
+}
+
+fn default_fae_home() -> PathBuf {
+    match std::env::var_os("FAE_HOST") {
+        Some(home) if !home.is_empty() => expand_home(PathBuf::from(home)),
+        _ => dirs::home_dir()
+            .map(|home| home.join(".fae"))
+            .unwrap_or_else(|| PathBuf::from(".fae")),
+    }
+}
+
+fn expand_home(path: PathBuf) -> PathBuf {
+    let Some(path_str) = path.to_str() else {
+        return path;
+    };
+    if path_str == "~" {
+        return dirs::home_dir().unwrap_or(path);
+    }
+    if let Some(rest) = path_str.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path
 }
 
 #[async_trait::async_trait]
@@ -1064,8 +1140,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn default_loader_supports_runtime_add_replace_and_remove() {
-        let loader = DefaultWorkflowMetadataLoader::new();
+    async fn fae_loader_supports_runtime_add_replace_and_remove() {
+        let loader = FAEWorkflowMetadataLoader::new();
         let plan_builder = WorkflowPlanBuilder::new(loader.clone());
 
         for value in [1, 2] {
@@ -1093,8 +1169,63 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("is not registered")
+                .contains("load workflow `dynamic`")
         );
+    }
+
+    #[tokio::test]
+    async fn fae_loader_loads_workflow_from_home_directory() {
+        let home_dir =
+            std::env::temp_dir().join(format!("fae-workflow-loader-{}", wd_tools::uuid::v4()));
+        let workflows_dir = home_dir.join("workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await.unwrap();
+
+        let mut builder = WorkflowMetadataBuilder::new("from-disk");
+        builder.start("start", "end").unwrap();
+        builder.end("end", Some(json!("disk"))).unwrap();
+        builder
+            .build()
+            .unwrap()
+            .save_json(workflows_dir.join("from-disk.json"))
+            .await
+            .unwrap();
+
+        let loader = FAEWorkflowMetadataLoader::with_home_dir(&home_dir);
+        let metadata = loader.load("from-disk").await.unwrap();
+        assert_eq!(metadata.id, "from-disk");
+
+        tokio::fs::remove_dir_all(home_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fae_loader_prefers_registered_workflow_over_disk() {
+        let home_dir =
+            std::env::temp_dir().join(format!("fae-workflow-loader-{}", wd_tools::uuid::v4()));
+        let workflows_dir = home_dir.join("workflows");
+        tokio::fs::create_dir_all(&workflows_dir).await.unwrap();
+
+        for (output, save_to_disk) in [("disk", true), ("registered", false)] {
+            let mut builder = WorkflowMetadataBuilder::new("precedence");
+            builder.start("start", "end").unwrap();
+            builder.end("end", Some(json!(output))).unwrap();
+            let metadata = builder.build().unwrap();
+            if save_to_disk {
+                metadata
+                    .save_json(workflows_dir.join("precedence.json"))
+                    .await
+                    .unwrap();
+            } else {
+                let loader = FAEWorkflowMetadataLoader::with_home_dir(&home_dir);
+                loader.add(metadata).unwrap();
+                let loaded = loader.load("precedence").await.unwrap();
+                let WorkflowNode::End { output } = &loaded.nodes["end"] else {
+                    panic!("expected end node");
+                };
+                assert_eq!(output.as_ref(), Some(&json!("registered")));
+            }
+        }
+
+        tokio::fs::remove_dir_all(home_dir).await.unwrap();
     }
 
     #[tokio::test]

@@ -33,17 +33,17 @@ impl Engine {
 mod tests {
     use super::*;
     use fae_agent::{
-        Ctx, DefaultWorkflowMetadataLoader, EventType, Session, SessionEventData, TaskMeta,
-        TaskReq, TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction,
-        WorkflowEnv, WorkflowMetadataBuilder,
+        Ctx, EventType, FAEWorkflowMetadataLoader, Session, SessionEventData, TaskMeta, TaskReq,
+        TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction, WorkflowEnv,
+        WorkflowMetadataBuilder,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
 
-    async fn engine_with_workflow(loader: DefaultWorkflowMetadataLoader) -> Engine {
+    async fn engine_with_workflow(loader: FAEWorkflowMetadataLoader) -> Engine {
         let mut builder = EngineBuilder::new();
         builder.add_runtime(PlanRuntime::new());
-        builder.add_runtime(WorkflowRuntime::new());
+        builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(SessionRuntime::new());
         builder.add_runtime(SkillRuntime::new());
@@ -106,6 +106,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_workflow_runtime_queries_metadata_by_name_bits_ut() -> anyhow::Result<()> {
+        let mut metadata_builder = WorkflowMetadataBuilder::new("query-workflow");
+        metadata_builder.start("start", "end")?;
+        metadata_builder.end("end", Some(json!("done")))?;
+        let expected = metadata_builder.build()?;
+
+        let loader = FAEWorkflowMetadataLoader::new();
+        loader.add(expected.clone())?;
+        let engine = engine_with_workflow(loader).await;
+
+        let actual = engine
+            .rt()
+            .select::<String, fae_agent::WorkflowMetadata>(
+                TaskType::Workflow,
+                "query-workflow".to_string(),
+            )
+            .await?;
+
+        assert_eq!(actual.to_json()?, expected.to_json()?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_configured_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
         let mut builder = WorkflowMetadataBuilder::new("read-file-workflow");
         builder.start("start", "read")?;
@@ -125,7 +148,7 @@ mod tests {
         let input = json!({
             "path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")
         });
-        let loader = DefaultWorkflowMetadataLoader::new();
+        let loader = FAEWorkflowMetadataLoader::new();
         let engine = engine_with_workflow(loader.clone()).await;
         loader.add(builder.build()?)?;
         let (env, session) = WorkflowEnv::new("read-file-workflow", input);
@@ -162,7 +185,7 @@ mod tests {
             "end",
         )?;
         parent.end("end", Some(json!({"nested": "{$nested}"})))?;
-        let loader = DefaultWorkflowMetadataLoader::new();
+        let loader = FAEWorkflowMetadataLoader::new();
         let engine = engine_with_workflow(loader.clone()).await;
         loader.add(parent.build()?)?;
         loader.add(child.build()?)?;

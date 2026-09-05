@@ -1,23 +1,21 @@
 use fae_agent::{
-    Event, EventType, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType, WorkflowEnv,
-    to_plan_ty,
+    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, TaskError, TaskReq, TaskResp,
+    TaskType, WorkflowEnv, WorkflowMetadata, WorkflowMetadataLoader, to_plan_ty,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use wd_tools::channel::{Channel, Receiver, Sender};
 
 #[derive(Debug)]
 pub struct WorkflowRuntime {
+    metadata_loader: Arc<dyn WorkflowMetadataLoader>,
     event_sender: Sender<Event>,
     event_receiver: Receiver<Event>,
 }
 
 impl Default for WorkflowRuntime {
     fn default() -> Self {
-        let (event_sender, event_receiver) = Channel::new(1024);
-        Self {
-            event_sender,
-            event_receiver,
-        }
+        Self::with_metadata_loader(FAEWorkflowMetadataLoader::new())
     }
 }
 
@@ -26,6 +24,19 @@ impl WorkflowRuntime {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_metadata_loader(loader: impl WorkflowMetadataLoader) -> Self {
+        let (event_sender, event_receiver) = Channel::new(1024);
+        Self {
+            metadata_loader: Arc::new(loader),
+            event_sender,
+            event_receiver,
+        }
+    }
+
+    pub async fn query(&self, workflow_id: &str) -> fae_agent::Result<WorkflowMetadata> {
+        Ok(self.metadata_loader.load(workflow_id).await?)
     }
 
     async fn execute(task: TaskReq<WorkflowEnv>) -> fae_agent::Result<TaskResp<Value>> {
@@ -60,7 +71,7 @@ impl WorkflowRuntime {
 }
 
 #[async_trait::async_trait]
-impl RuntimeSelectExec<WorkflowEnv, Value, (), ()> for WorkflowRuntime {
+impl RuntimeSelectExec<WorkflowEnv, Value, String, WorkflowMetadata> for WorkflowRuntime {
     fn id(&self) -> &str {
         Self::ID
     }
@@ -73,11 +84,15 @@ impl RuntimeSelectExec<WorkflowEnv, Value, (), ()> for WorkflowRuntime {
         Ok(self.event_receiver.clone())
     }
 
-    async fn select(&self, ty: TaskType, _cond: ()) -> fae_agent::Result<()> {
+    async fn select(
+        &self,
+        ty: TaskType,
+        workflow_id: String,
+    ) -> fae_agent::Result<WorkflowMetadata> {
         if ty != TaskType::Workflow {
             return Err(fae_agent::Error::RuntimeNoSupport);
         }
-        Ok(())
+        self.query(&workflow_id).await
     }
 
     async fn spawn(&self, task: TaskReq<WorkflowEnv>) -> fae_agent::Result<()> {

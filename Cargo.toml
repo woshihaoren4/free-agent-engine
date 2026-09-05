@@ -8,7 +8,13 @@ readme = "README.md"
 
 [workspace]
 resolver = "3"
-members = ["crates/fae-agent", "crates/fae-engine", "examples", "crates/async-openai"]
+members = [
+    "app/fae",
+    "crates/fae-agent",
+    "crates/fae-engine",
+    "examples",
+    "crates/async-openai",
+]
 
 [workspace.dependencies]
 wd_log = "0.4.0"

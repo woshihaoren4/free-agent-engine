@@ -24,7 +24,7 @@ use crate::{
     PlanNext, RT, Session, SessionEvent, SessionEventChannel, SessionEventData, SessionMessage,
     SessionMessageRole, SessionRequest, SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq,
     TaskRequest, TaskResp, TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse,
-    WorkflowSession, common,
+    WorkflowSession,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,11 +397,9 @@ async fn resolve_tools(
     let mut definitions = Vec::with_capacity(tools.len());
     let mut routes = HashMap::with_capacity(tools.len());
     for tool_name in tools {
-        let mut condition: common::AnyType = Box::new(tool_name.clone());
-        let value = rt.select(TaskType::Tool, &mut condition).await?;
-        let value = *value.downcast::<Value>().map_err(|_| {
-            anyhow::anyhow!("tool `{tool_name}` description was not serde_json::Value")
-        })?;
+        let value = rt
+            .select::<_, Value>(TaskType::Tool, tool_name.clone())
+            .await?;
         let function = serde_json::from_value::<FunctionObject>(value).map_err(|error| {
             anyhow::anyhow!("invalid description for tool `{tool_name}`: {error}")
         })?;
@@ -425,11 +423,9 @@ async fn resolve_tools(
 async fn resolve_skills(rt: &RT, queries: &[SkillQuery]) -> anyhow::Result<Vec<SkillInfo>> {
     let mut skills = Vec::new();
     for query in queries {
-        let mut condition: common::AnyType = Box::new(query.clone());
-        let value = rt.select(TaskType::Skill, &mut condition).await?;
-        let mut found = *value
-            .downcast::<Vec<SkillInfo>>()
-            .map_err(|_| anyhow::anyhow!("skill query response was not Vec<SkillInfo>"))?;
+        let mut found = rt
+            .select::<_, Vec<SkillInfo>>(TaskType::Skill, query.clone())
+            .await?;
         skills.append(&mut found);
     }
     Ok(skills)
@@ -459,11 +455,9 @@ async fn resolve_mcp_tools(
     let mut definitions = Vec::new();
     let mut routes = HashMap::new();
     for server in servers {
-        let mut condition: common::AnyType = Box::new(McpQuery::new(server));
-        let value = rt.select(TaskType::Mcp, &mut condition).await?;
-        let tools = *value.downcast::<Vec<McpToolInfo>>().map_err(|_| {
-            anyhow::anyhow!("MCP server `{server}` query response was not Vec<McpToolInfo>")
-        })?;
+        let tools = rt
+            .select::<_, Vec<McpToolInfo>>(TaskType::Mcp, McpQuery::new(server))
+            .await?;
         for tool in tools {
             let model_name = tool.model_name();
             anyhow::ensure!(

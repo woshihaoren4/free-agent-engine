@@ -6,7 +6,7 @@ use std::{
 };
 
 use fae_agent::{
-    DefaultWorkflowMetadataLoader, Event, EventType, RuntimeSelectExec, Session, SessionEvent,
+    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEvent,
     SessionEventData, SingleAgentModelConfig, TaskError, TaskReq, TaskResp, TaskType,
     WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
@@ -135,10 +135,12 @@ async fn execute_python(code: &str, arguments: &Value) -> anyhow::Result<Value> 
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-async fn build_engine(loader: DefaultWorkflowMetadataLoader) -> fae_engine::Engine {
+async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
     let mut builder = EngineBuilder::new();
     builder.add_runtime(fae_engine::PlanRuntime::new());
-    builder.add_runtime(fae_engine::WorkflowRuntime::new());
+    builder.add_runtime(fae_engine::WorkflowRuntime::with_metadata_loader(
+        loader.clone(),
+    ));
     builder.add_runtime(fae_engine::ModelRuntime::new());
     builder.add_runtime(fae_engine::SessionRuntime::new());
     builder.add_runtime(PythonActionRuntime::default());
@@ -242,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
         max_tool_iterations: 1,
     };
     let input = workflow_input(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let loader = DefaultWorkflowMetadataLoader::new();
+    let loader = FAEWorkflowMetadataLoader::new();
     let engine = build_engine(loader.clone()).await;
     loader.add(build_release_review_workflow(model_config)?)?;
     loader.add(workflow_metadata::build_remediation_workflow()?)?;
@@ -276,7 +278,7 @@ mod tests {
             "counter_path": &counter_path,
             "rounds": 2
         });
-        let loader = DefaultWorkflowMetadataLoader::new();
+        let loader = FAEWorkflowMetadataLoader::new();
         let engine = build_engine(loader.clone()).await;
         loader.add(build_remediation_workflow()?)?;
         let (env, session) = WorkflowEnv::new("bounded-remediation-loop", input);

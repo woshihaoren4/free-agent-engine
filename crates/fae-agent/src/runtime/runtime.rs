@@ -80,6 +80,21 @@ impl RT {
             )
         })
     }
+
+    pub async fn select<Cond, Info>(&self, ty: TaskType, cond: Cond) -> anyhow::Result<Info>
+    where
+        Cond: Send + 'static,
+        Info: Send + 'static,
+    {
+        let mut cond: AnyType = Box::new(cond);
+        let info = self.0.select(ty, &mut cond).await?;
+        info.downcast::<Info>().map(|info| *info).map_err(|_| {
+            anyhow::anyhow!(
+                "runtime select response type does not match `{}`",
+                std::any::type_name::<Info>()
+            )
+        })
+    }
 }
 impl Deref for RT {
     type Target = dyn Runtime;
