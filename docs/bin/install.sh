@@ -3,6 +3,7 @@ set -euo pipefail
 
 BIN_NAME="${BIN_NAME:-fae}"
 BASE_URL="${FAE_INSTALL_BASE_URL:-https://woshihaoren4.github.io/free-agent-engine/bin}"
+SKILLS_BASE_URL="${FAE_SKILLS_BASE_URL:-${BASE_URL%/bin}/skills}"
 
 die() {
   echo "fae install: $*" >&2
@@ -59,7 +60,26 @@ sha256() {
   fi
 }
 
+expand_home() {
+  case "$1" in
+    "~") printf '%s\n' "${HOME}" ;;
+    "~/"*) printf '%s/%s\n' "${HOME}" "${1#\~/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 install_dir="${INSTALL_DIR:-}"
+fae_host="$(expand_home "${FAE_HOST:-${HOME}/.fae}")"
+skills_dir="$(expand_home "${FAE_SKILLS_DIR:-${fae_host}/skills}")"
+skill_files=(
+  "fae-agent/SKILL.md"
+  "fae-agent/references/agent-api.md"
+  "fae-agent/references/recipes.md"
+  "fae-workflow/SKILL.md"
+  "fae-workflow/references/recipes.md"
+  "fae-workflow/references/workflow-api.md"
+  "weather/SKILL.md"
+)
 
 if [[ -z "${install_dir}" ]]; then
   IFS=":" read -r -a path_dirs <<< "${PATH:-}"
@@ -85,8 +105,10 @@ script_path="${BASH_SOURCE[0]:-}"
 if [[ -n "${script_path}" && -f "${script_path}" ]]; then
   script_dir="$(cd -- "$(dirname -- "${script_path}")" && pwd)"
   local_bin="${script_dir}/${platform}/${BIN_NAME}"
+  local_skills_dir="${script_dir}/../skills"
 else
   local_bin=""
+  local_skills_dir=""
 fi
 
 if [[ -n "${local_bin}" && -f "${local_bin}" ]]; then
@@ -111,6 +133,20 @@ actual_hash="$(sha256 "${tmp_bin}")"
 [[ "${actual_hash}" == "${expected_hash}" ]] ||
   die "checksum verification failed for ${BIN_NAME}"
 
+tmp_skills_dir="${tmp_dir}/skills"
+for skill_file in "${skill_files[@]}"; do
+  tmp_skill="${tmp_skills_dir}/${skill_file}"
+  mkdir -p "$(dirname -- "${tmp_skill}")"
+  if [[ -n "${local_skills_dir}" && -f "${local_skills_dir}/${skill_file}" ]]; then
+    cp "${local_skills_dir}/${skill_file}" "${tmp_skill}"
+  else
+    download "${SKILLS_BASE_URL}/${skill_file}" "${tmp_skill}" ||
+      die "failed to download skill file ${skill_file}"
+  fi
+  [[ -s "${tmp_skill}" ]] ||
+    die "downloaded skill file is empty: ${skill_file}"
+done
+
 mkdir -p "${install_dir}" ||
   die "cannot create ${install_dir}; set INSTALL_DIR to a writable directory"
 [[ -w "${install_dir}" ]] ||
@@ -118,16 +154,25 @@ mkdir -p "${install_dir}" ||
 target="${install_dir}/${BIN_NAME}"
 install -m 755 "${tmp_bin}" "${target}"
 
+for skill_file in "${skill_files[@]}"; do
+  skill_target="${skills_dir}/${skill_file}"
+  mkdir -p "$(dirname -- "${skill_target}")" ||
+    die "cannot create skill directory under ${skills_dir}"
+  install -m 644 "${tmp_skills_dir}/${skill_file}" "${skill_target}" ||
+    die "cannot install skill file ${skill_target}"
+done
+
 echo "Installed ${BIN_NAME} to ${target} (checksum verified)"
+echo "Installed bundled skills to ${skills_dir}"
 
 if ! path_has "${install_dir}"; then
   echo "Notice: ${install_dir} is not in your current PATH."
   echo "Add it first, for example: export PATH=\"${install_dir}:\$PATH\""
 fi
 
-cat <<'EOF'
+cat <<EOF
 
-Configure ~/.fae/agents/fae_config.json and ~/.fae/agents/fae_prompt.txt,
+Configure ${fae_host}/agents/fae_config.json and fae_prompt.txt,
 then set OPENAI_API_KEY and run:
   fae
 EOF
