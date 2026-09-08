@@ -23,12 +23,12 @@ curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-
   | INSTALL_DIR="$HOME/bin" bash
 ```
 
-按照 [fae CLI 配置说明](app/fae/README.md) 创建
-`~/.fae/agents/fae_config.json` 和 `~/.fae/agents/fae_prompt.txt`，设置模型
-API Key 后启动：
+按照 [fae CLI 配置说明](app/fae/README.md) 初始化默认 Agent，设置模型 API
+Key 后启动：
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+fae init
 fae
 ```
 

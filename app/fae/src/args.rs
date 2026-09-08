@@ -25,10 +25,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Initialize an agent with all installed tools and skills
+    Init(InitArgs),
     /// Start an interactive single-agent session
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
     Workflow(WorkflowArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct InitArgs {
+    /// Agent ID written to FAE_HOME/agents
+    #[arg(long, default_value = "fae")]
+    pub agent_id: String,
+
+    /// Model used by the initialized agent
+    #[arg(long, env = "FAE_DEFAULT_MODEL", default_value = "gpt-4o-mini")]
+    pub model: String,
+
+    /// Replace an existing config and prompt
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -79,7 +96,7 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "agent" | "workflow" => return args,
+            "init" | "agent" | "workflow" => return args,
             "--fae-home" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
@@ -138,5 +155,17 @@ mod tests {
         };
         assert_eq!(args.id, "release");
         assert_eq!(args.input, r#"{"tag":"v1"}"#);
+    }
+
+    #[test]
+    fn parses_init_without_inserting_agent_mode() {
+        let cli = Cli::try_parse_from(with_default_agent(["fae", "init"].map(Into::into))).unwrap();
+
+        let Some(Command::Init(args)) = cli.command else {
+            panic!("expected init command");
+        };
+        assert_eq!(args.agent_id, "fae");
+        assert!(!args.model.is_empty());
+        assert!(!args.force);
     }
 }

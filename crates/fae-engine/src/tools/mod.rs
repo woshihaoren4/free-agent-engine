@@ -20,6 +20,15 @@ pub const LIST_DIRECTORY: &str = "list_directory";
 pub const APPLY_PATCH: &str = "apply_patch";
 pub const SEND_HTTP_REQUEST: &str = "send_http_request";
 pub const EXECUTE_PYTHON: &str = "execute_python";
+pub const DEFAULT_TOOL_NAMES: &[&str] = &[
+    EXECUTE_COMMAND,
+    READ_FILE,
+    WRITE_FILE,
+    LIST_DIRECTORY,
+    APPLY_PATCH,
+    SEND_HTTP_REQUEST,
+    EXECUTE_PYTHON,
+];
 
 pub fn register_default_tools(runtime: &mut ToolsRuntime) {
     runtime.add_tool(Box::new(DefaultTools::default()));
@@ -46,15 +55,7 @@ impl Tools for DefaultTools {
         match effective_tool_name(tool_name) {
             DEFAULT_CHANNEL => Ok(json!({
                 "channel": DEFAULT_CHANNEL,
-                "tools": [
-                    EXECUTE_COMMAND,
-                    READ_FILE,
-                    WRITE_FILE,
-                    LIST_DIRECTORY,
-                    APPLY_PATCH,
-                    SEND_HTTP_REQUEST,
-                    EXECUTE_PYTHON
-                ]
+                "tools": DEFAULT_TOOL_NAMES
             })),
             EXECUTE_COMMAND => self.execute_command.desc(ctx, tool_name).await,
             READ_FILE => self.read_file.desc(ctx, tool_name).await,

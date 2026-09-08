@@ -6,7 +6,23 @@ and streamed model output in one stable TUI.
 
 ## Single agent
 
-Create `~/.fae/agents/fae_config.json`:
+Initialize the default `fae` agent:
+
+```bash
+fae init
+```
+
+This creates `~/.fae/agents/fae_config.json` and
+`~/.fae/agents/fae_prompt.txt`, enabling every built-in tool and every skill
+currently installed under `~/.fae/skills`. Existing agent files are preserved;
+use `fae init --force` to replace them. Set `FAE_DEFAULT_MODEL` or pass
+`--model` to choose another model:
+
+```bash
+fae init --model gpt-5
+```
+
+The generated configuration has this shape:
 
 ```json
 {
@@ -17,14 +33,22 @@ Create `~/.fae/agents/fae_config.json`:
     "metadata": {}
   },
   "model": {
-    "model": "gpt-xxx",
+    "model": "gpt-4o-mini",
     "context_size": 32000,
     "history_turns": 20,
     "max_completion_tokens": 4096,
     "temperature": null,
     "max_tool_iterations": 8
   },
-  "tools": ["read_file", "execute_command"],
+  "tools": [
+    "execute_command",
+    "read_file",
+    "write_file",
+    "list_directory",
+    "apply_patch",
+    "send_http_request",
+    "execute_python"
+  ],
   "skills": [
     {
       "type": "name",
@@ -33,14 +57,18 @@ Create `~/.fae/agents/fae_config.json`:
     {
       "type": "name",
       "value": "fae-workflow"
+    },
+    {
+      "type": "name",
+      "value": "weather"
     }
   ],
   "mcp_servers": []
 }
 ```
 
-Put the system prompt in `~/.fae/agents/fae_prompt.txt`, then start an
-interactive session:
+Customize the generated system prompt if needed, then start an interactive
+session:
 
 ```bash
 cargo run -p fae

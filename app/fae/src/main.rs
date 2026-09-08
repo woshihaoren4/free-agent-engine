@@ -1,5 +1,6 @@
 mod app;
 mod args;
+mod init;
 mod tui;
 
 #[tokio::main]

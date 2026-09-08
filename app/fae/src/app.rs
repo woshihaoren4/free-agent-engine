@@ -8,13 +8,14 @@ use fae_agent::{
 };
 use fae_engine::{
     DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime, SessionRuntime,
-    SkillRuntime, ToolsRuntime, WorkflowRuntime,
+    SkillRuntime, ToolsRuntime, WorkflowRuntime, default_fae_host,
 };
 use serde_json::Value;
 use wd_tools::channel::{Channel, Receiver, Sender};
 
 use crate::{
     args::{AgentArgs, Cli, Command, WorkflowArgs},
+    init::initialize,
     tui::{Mode, PromptAction, TerminalUi},
 };
 
@@ -22,6 +23,28 @@ const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        Some(Command::Init(args)) => {
+            let home = cli
+                .fae_home
+                .map(expand_home)
+                .unwrap_or_else(default_fae_host);
+            let result = initialize(&home, &args).await?;
+            println!("Initialized agent `{}`.", args.agent_id);
+            println!("Config: {}", result.config_path.display());
+            println!("Prompt: {}", result.prompt_path.display());
+            println!(
+                "Enabled {} tools and {} installed skills.",
+                fae_engine::DEFAULT_TOOL_NAMES.len(),
+                result.skill_count
+            );
+            if result.skill_count == 0 {
+                println!(
+                    "No installed skills found in {}.",
+                    home.join("skills").display()
+                );
+            }
+            Ok(())
+        }
         Some(Command::Agent(args)) => {
             run_agent(args, cli.fae_home, cli.color, cli.no_alt_screen).await
         }
@@ -202,13 +225,14 @@ async fn build_engine(
     loader: FAEWorkflowMetadataLoader,
     agent_builder: SingleAgentPlanBuilder,
 ) -> Engine {
+    let home_dir = loader.home_dir().to_path_buf();
     let mut builder = EngineBuilder::new();
     builder.add_runtime(PlanRuntime::new());
     builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
     builder.add_runtime(ModelRuntime::new());
-    builder.add_runtime(SessionRuntime::new());
-    builder.add_runtime(SkillRuntime::new());
-    builder.add_runtime(McpRuntime::new());
+    builder.add_runtime(SessionRuntime::with_host_dir(&home_dir));
+    builder.add_runtime(SkillRuntime::with_host_dir(&home_dir));
+    builder.add_runtime(McpRuntime::with_mcp_dir(home_dir.join("mcp")));
     builder.add_runtime(PythonActionRuntime::default());
 
     let mut tools = ToolsRuntime::new();

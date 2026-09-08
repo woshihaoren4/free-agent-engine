@@ -172,7 +172,7 @@ fi
 
 cat <<EOF
 
-Configure ${fae_host}/agents/fae_config.json and fae_prompt.txt,
-then set OPENAI_API_KEY and run:
+Initialize the default agent, set OPENAI_API_KEY, and run:
+  fae init
   fae
 EOF
