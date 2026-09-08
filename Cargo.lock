@@ -757,9 +757,11 @@ name = "examples"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-openai",
  "async-trait",
  "fae-agent",
  "fae-engine",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",

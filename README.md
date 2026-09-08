@@ -13,20 +13,46 @@ fae引擎内置了一个实战案例，即fae的cli，你可以快速安装并�
 ```bash
 curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-engine/bin/install.sh | bash
 ```
-设置模型和参数
+
+当前发布包支持 Apple Silicon macOS（`arm64`）和 64 位 Linux
+（`x86_64`）。安装器会校验下载文件的 SHA-256，并默认安装到 `PATH`
+中的可写目录或 `~/.local/bin`。也可以通过 `INSTALL_DIR` 指定安装目录：
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-engine/bin/install.sh \
+  | INSTALL_DIR="$HOME/bin" bash
+```
+
+按照 [fae CLI 配置说明](app/fae/README.md) 创建
+`~/.fae/agents/fae_config.json` 和 `~/.fae/agents/fae_prompt.txt`，设置模型
+API Key 后启动：
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-export FAE_DEFAULT_MODEL="gpt-xxx"
+fae
 ```
 
-然后初始化并启动：
+### 发布 CLI
+
+在 macOS 上安装 Rust、[Zig](https://ziglang.org/) 和
+[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)，然后执行：
 
 ```bash
-fae init
-fae agent --chat
+./scripts/build-fae-ctl.sh
 ```
 
+脚本使用 `Cargo.lock` 编译 release 版本，并更新以下 GitHub Pages 文件：
+
+```text
+docs/bin/mac/fae
+docs/bin/mac/fae.sha256
+docs/bin/linux/fae
+docs/bin/linux/fae.sha256
+```
+
+提交这些产物以及 `docs/bin/install.sh` 并推送到 GitHub。仓库的 GitHub
+Pages Source 需要设置为当前发布分支的 `/docs` 目录；Pages 部署完成后，
+上面的安装命令即可使用。
 
 ## 快速开始
 
@@ -74,8 +100,8 @@ async fn main() -> anyhow::Result<()> {
 ## TODO
 
 - [x] agent 任务的并行分发
-- [ ] 多计划执行
-- [ ] workflow
+- [x] 多计划执行
+- [x] workflow
 - [ ] hook规范化
-- [ ] 多session通信改造
+- [x] 多session通信改造
 - [ ] 消息规范化

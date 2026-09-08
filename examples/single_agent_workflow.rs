@@ -1,46 +1,546 @@
-//! Single-agent behavior implemented as a workflow.
+//! A single-agent turn implemented directly by workflow nodes.
 //!
 //! ```text
-//!                  workflow: single-agent-workflow
-//!                 +--------------------------------------+
-//!                 |                                      |
-//! user input ---->| [start]                              |
-//!                 |    |                                 |
-//!                 |    v                                 |
-//!                 | [assistant]                          |
-//!                 | SingleAgent("workspace-assistant")   |
-//!                 |    |                                 |
-//!                 |    v                                 |
-//! final text <----| [end]                                |
-//!                 |                                      |
-//!                 +--------------------------------------+
+//! main workflow
+//!
+//! +-------+   +---------------+   +--------------+   +---------------+
+//! | start |-->| prepare_agent |-->| load_history |-->| initial_model |
+//! +-------+   +---------------+   +--------------+   +-------+-------+
+//!                                                               |
+//!                                                        +------v------+
+//!                                 +--------------------->|  tool_loop  |
+//!                                 |                      +------+------+
+//!                                 | has tool calls              | no calls
+//!                                 |                             v
+//!                         +-------+----------+             +----------+
+//!                         | tool_iteration   |             | finalize |
+//!                         | (child workflow) |             +----+-----+
+//!                         +------------------+                  |
+//!                                                               v
+//!                                                        +--------------+
+//!                                                        | save_history |
+//!                                                        +------+-------+
+//!                                                               |
+//!                                                          +----v----+
+//!                                                          |   end   |
+//!                                                          +---------+
+//!
+//! tool_iteration child workflow
+//!
+//! +-------+   +---------------+   +------------+   +-----+
+//! | start |-->| execute_tools |-->| call_model |-->| end |
+//! +-------+   +---------------+   +------------+   +-----+
 //! ```
+//!
+//! The example uses agent ID `fae` by default. Pass another ID as the first
+//! command-line argument to load a different agent configuration.
 
-use std::io::{self, Write};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+};
 
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequest, FunctionObject,
+};
 use fae_agent::{
-    FAEWorkflowMetadataLoader, Session, SessionEvent, SessionEventData, SingleAgentSource,
-    WorkflowAction, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
+    Ctx, FAEWorkflowMetadataLoader, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
+    Session, SessionEvent, SessionEventData, SessionMessage, SessionMessageRole, SessionRequest,
+    SessionResponse, SingleAgentConfig, SingleAgentPlanBuilder, SingleAgentSource, SkillInfo,
+    TaskMeta, TaskReq, TaskType, ToolRequest, ToolRespItem, ToolResponse, Tools, WorkflowAction,
+    WorkflowCondition, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
 };
 use fae_engine::EngineBuilder;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const WORKFLOW_ID: &str = "single-agent-workflow";
-const AGENT_ID: &str = "workspace-assistant";
+const TOOL_ITERATION_WORKFLOW_ID: &str = "single-agent-tool-iteration";
+const DEFAULT_AGENT_ID: &str = "fae";
+const AGENT_WORKFLOW_TOOL_CHANNEL: &str = "agent_workflow";
+const WORKFLOW_MAX_TOOL_ITERATIONS: usize = 64;
 
-fn build_workflow() -> anyhow::Result<WorkflowMetadata> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ToolRoute {
+    Tool { tool_name: String },
+    Mcp { server: String, tool_name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentSetup {
+    config: SingleAgentConfig,
+    prompt: String,
+    tool_definitions: Vec<ChatCompletionTools>,
+    tool_routes: HashMap<String, ToolRoute>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentState {
+    setup: AgentSetup,
+    messages: Vec<ChatCompletionRequestMessage>,
+    tool_calls: Vec<ChatCompletionMessageToolCalls>,
+    final_output: String,
+    tool_iterations: usize,
+    has_tool_calls: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct InitialModelInput {
+    setup: AgentSetup,
+    history: SessionResponse,
+    input: String,
+}
+
+#[derive(Debug, Default)]
+struct AgentWorkflowTools;
+
+#[async_trait::async_trait]
+impl Tools for AgentWorkflowTools {
+    fn channel(&self) -> &str {
+        AGENT_WORKFLOW_TOOL_CHANNEL
+    }
+
+    async fn desc(&self, _ctx: &Ctx, tool_name: &str) -> anyhow::Result<Value> {
+        anyhow::bail!("internal workflow tool `{tool_name}` is not exposed to the model")
+    }
+
+    async fn exec(&self, ctx: &Ctx, request: ToolRequest) -> anyhow::Result<ToolResponse> {
+        let action = request
+            .tool_name
+            .strip_prefix(&format!("{AGENT_WORKFLOW_TOOL_CHANNEL}__"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("invalid agent workflow tool `{}`", request.tool_name)
+            })?;
+        let payload: Value = serde_json::from_str(&request.arguments)?;
+        let rt = ctx.get_engine().rt();
+
+        let output = match action {
+            "prepare_agent" => {
+                let agent_id = required_string(&payload, "agent_id")?;
+                serde_json::to_value(prepare_agent(&rt, agent_id).await?)?
+            }
+            "initial_model" => {
+                let input: InitialModelInput = serde_json::from_value(payload)?;
+                serde_json::to_value(initial_model(&rt, ctx.clone(), input).await?)?
+            }
+            "execute_tools" => {
+                let state: AgentState = serde_json::from_value(payload)?;
+                serde_json::to_value(execute_tools(&rt, ctx.clone(), state).await?)?
+            }
+            "call_model" => {
+                let state: AgentState = serde_json::from_value(payload)?;
+                serde_json::to_value(call_model(&rt, ctx.clone(), state).await?)?
+            }
+            "finalize" => {
+                let state: AgentState = serde_json::from_value(payload)?;
+                anyhow::ensure!(
+                    !state.has_tool_calls,
+                    "cannot finalize while model tool calls are pending"
+                );
+                serde_json::to_value(state)?
+            }
+            _ => anyhow::bail!("unsupported agent workflow action `{action}`"),
+        };
+
+        Ok(ToolResponse::with_result(serde_json::to_string(&output)?))
+    }
+}
+
+fn build_single_agent_workflow() -> anyhow::Result<WorkflowMetadata> {
     let mut builder = WorkflowMetadataBuilder::new(WORKFLOW_ID);
-    builder.start("start", "assistant")?;
+    builder.start("start", "prepare_agent")?;
     builder.execute(
-        "assistant",
-        WorkflowAction::SingleAgent {
-            source: SingleAgentSource::AgentId(AGENT_ID.to_string()),
-            input: json!("{$input}"),
+        "prepare_agent",
+        agent_step("prepare_agent", json!({ "agent_id": "{$input.agent_id}" })),
+        "load_history",
+    )?;
+    builder.execute(
+        "load_history",
+        WorkflowAction::Session {
+            request: SessionRequest::Query {
+                user: "{$prepare_agent.config.agent.user_id}".to_string(),
+                session_id: "{$prepare_agent.config.agent.session_id}".to_string(),
+                limit: None,
+                offset: None,
+            },
+        },
+        "initial_model",
+    )?;
+    builder.execute(
+        "initial_model",
+        agent_step(
+            "initial_model",
+            json!({
+                "setup": "{$prepare_agent}",
+                "history": "{$load_history}",
+                "input": "{$input.message}"
+            }),
+        ),
+        "tool_loop",
+    )?;
+    builder.loop_node(
+        "tool_loop",
+        WorkflowCondition::Truthy {
+            value: json!("{$last.has_tool_calls}"),
+        },
+        "tool_iteration",
+        "finalize",
+        WORKFLOW_MAX_TOOL_ITERATIONS,
+    )?;
+    builder.execute(
+        "tool_iteration",
+        WorkflowAction::Workflow {
+            workflow_id: TOOL_ITERATION_WORKFLOW_ID.to_string(),
+            input: json!("{$last}"),
+        },
+        "tool_loop",
+    )?;
+    builder.execute(
+        "finalize",
+        agent_step("finalize", json!("{$last}")),
+        "save_history",
+    )?;
+    builder.execute(
+        "save_history",
+        WorkflowAction::Session {
+            request: SessionRequest::Add {
+                user: "{$finalize.setup.config.agent.user_id}".to_string(),
+                session_id: "{$finalize.setup.config.agent.session_id}".to_string(),
+                messages: vec![
+                    SessionMessage::user("{$input.message}"),
+                    SessionMessage::assistant("{$finalize.final_output}"),
+                ],
+            },
         },
         "end",
     )?;
-    builder.end("end", Some(json!("{$assistant}")))?;
+    builder.end("end", Some(json!("{$finalize.final_output}")))?;
     builder.build()
+}
+
+fn build_tool_iteration_workflow() -> anyhow::Result<WorkflowMetadata> {
+    let mut builder = WorkflowMetadataBuilder::new(TOOL_ITERATION_WORKFLOW_ID);
+    builder.start("start", "execute_tools")?;
+    builder.execute(
+        "execute_tools",
+        agent_step("execute_tools", json!("{$input}")),
+        "call_model",
+    )?;
+    builder.execute(
+        "call_model",
+        agent_step("call_model", json!("{$execute_tools}")),
+        "end",
+    )?;
+    builder.end("end", Some(json!("{$call_model}")))?;
+    builder.build()
+}
+
+fn agent_step(action: &str, payload: Value) -> WorkflowAction {
+    WorkflowAction::Tool {
+        tool_name: format!("{AGENT_WORKFLOW_TOOL_CHANNEL}__{action}"),
+        arguments: payload,
+    }
+}
+
+async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<AgentSetup> {
+    let source = SingleAgentSource::AgentId(agent_id.to_string());
+    let (config, mut prompt) = SingleAgentPlanBuilder::new().load_config(&source).await?;
+
+    let mut skills = Vec::new();
+    for query in &config.skills {
+        skills.extend(
+            rt.select::<_, Vec<SkillInfo>>(TaskType::Skill, query.clone())
+                .await?,
+        );
+    }
+    if !skills.is_empty() {
+        prompt.push_str("\n\n## Available Skills\n");
+        prompt.push_str("Read the matching SKILL.md file before applying a skill.\n");
+        for skill in skills {
+            prompt.push_str(&format!(
+                "- {}: {} (path: {})\n",
+                skill.name,
+                skill.description,
+                skill.path.display()
+            ));
+        }
+    }
+
+    let mut tool_definitions = Vec::new();
+    let mut tool_routes = HashMap::new();
+    for tool_name in &config.tools {
+        let description = rt
+            .select::<_, Value>(TaskType::Tool, tool_name.clone())
+            .await?;
+        let function: FunctionObject = serde_json::from_value(description)?;
+        anyhow::ensure!(
+            tool_routes
+                .insert(
+                    function.name.clone(),
+                    ToolRoute::Tool {
+                        tool_name: tool_name.clone()
+                    }
+                )
+                .is_none(),
+            "duplicate model tool name `{}`",
+            function.name
+        );
+        tool_definitions.push(ChatCompletionTools::Function(ChatCompletionTool {
+            function,
+        }));
+    }
+
+    for server in &config.mcp_servers {
+        let tools = rt
+            .select::<_, Vec<McpToolInfo>>(TaskType::Mcp, McpQuery::new(server))
+            .await?;
+        for tool in tools {
+            let model_name = tool.model_name();
+            anyhow::ensure!(
+                tool_routes
+                    .insert(
+                        model_name.clone(),
+                        ToolRoute::Mcp {
+                            server: tool.server,
+                            tool_name: tool.name,
+                        }
+                    )
+                    .is_none(),
+                "duplicate model tool name `{model_name}`"
+            );
+            tool_definitions.push(ChatCompletionTools::Function(ChatCompletionTool {
+                function: FunctionObject {
+                    name: model_name,
+                    description: (!tool.description.is_empty()).then_some(tool.description),
+                    parameters: Some(tool.input_schema),
+                    strict: None,
+                },
+            }));
+        }
+    }
+
+    Ok(AgentSetup {
+        config,
+        prompt,
+        tool_definitions,
+        tool_routes,
+    })
+}
+
+async fn initial_model(
+    rt: &fae_agent::RT,
+    ctx: fae_agent::Ctx,
+    input: InitialModelInput,
+) -> anyhow::Result<AgentState> {
+    let SessionResponse::History {
+        messages: history, ..
+    } = input.history
+    else {
+        anyhow::bail!("load_history did not return session history");
+    };
+
+    let mut messages = Vec::new();
+    if !input.setup.prompt.is_empty() {
+        messages.push(ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessage {
+                content: input.setup.prompt.clone().into(),
+                ..Default::default()
+            },
+        ));
+    }
+    let history_limit = input.setup.config.model.history_turns.saturating_mul(2);
+    for message in &history[history.len().saturating_sub(history_limit)..] {
+        messages.push(session_message_to_chat(message));
+    }
+    messages.push(ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessage {
+            content: input.input.clone().into(),
+            ..Default::default()
+        },
+    ));
+    trim_messages_to_context(&mut messages, input.setup.config.model.context_size);
+
+    let state = AgentState {
+        setup: input.setup,
+        messages,
+        tool_calls: Vec::new(),
+        final_output: String::new(),
+        tool_iterations: 0,
+        has_tool_calls: false,
+    };
+    call_model(rt, ctx, state).await
+}
+
+async fn call_model(
+    rt: &fae_agent::RT,
+    ctx: fae_agent::Ctx,
+    mut state: AgentState,
+) -> anyhow::Result<AgentState> {
+    let model = &state.setup.config.model;
+    let request = CreateChatCompletionRequest {
+        model: model.model.clone(),
+        messages: state.messages.clone(),
+        stream: Some(false),
+        max_completion_tokens: model.max_completion_tokens,
+        temperature: model.temperature,
+        tools: (!state.setup.tool_definitions.is_empty())
+            .then(|| state.setup.tool_definitions.clone()),
+        safety_identifier: Some(state.setup.config.agent.user_id.clone()),
+        ..Default::default()
+    };
+    let response = rt
+        .exec::<_, ModelResponse>(TaskReq {
+            ctx,
+            meta: TaskMeta {
+                ty: TaskType::Model,
+                ..Default::default()
+            },
+            req: request,
+        })
+        .await?
+        .resp
+        .into_completed()
+        .ok_or_else(|| anyhow::anyhow!("agent workflow expected a non-streaming model response"))?;
+    let choice = response
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("model returned no choices"))?;
+    let content = choice.message.content.unwrap_or_default();
+    let tool_calls = choice.message.tool_calls.unwrap_or_default();
+
+    state.messages.push(ChatCompletionRequestMessage::Assistant(
+        ChatCompletionRequestAssistantMessage {
+            content: (!content.is_empty()).then_some(
+                ChatCompletionRequestAssistantMessageContent::Text(content.clone()),
+            ),
+            tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
+            ..Default::default()
+        },
+    ));
+    state.has_tool_calls = !tool_calls.is_empty();
+    state.tool_calls = tool_calls;
+    if !state.has_tool_calls {
+        state.final_output = content.clone();
+    }
+    Ok(state)
+}
+
+async fn execute_tools(
+    rt: &fae_agent::RT,
+    ctx: fae_agent::Ctx,
+    mut state: AgentState,
+) -> anyhow::Result<AgentState> {
+    state.tool_iterations += 1;
+    anyhow::ensure!(
+        state.tool_iterations <= state.setup.config.model.max_tool_iterations,
+        "model exceeded max_tool_iterations ({})",
+        state.setup.config.model.max_tool_iterations
+    );
+
+    for call in std::mem::take(&mut state.tool_calls) {
+        let ChatCompletionMessageToolCalls::Function(call) = call else {
+            anyhow::bail!("custom tool calls are not supported");
+        };
+        let route = state
+            .setup
+            .tool_routes
+            .get(&call.function.name)
+            .ok_or_else(|| {
+                anyhow::anyhow!("model requested unavailable tool `{}`", call.function.name)
+            })?;
+        let output = match route {
+            ToolRoute::Tool { tool_name } => {
+                let mut response = rt
+                    .exec::<_, ToolResponse>(TaskReq {
+                        ctx: ctx.clone(),
+                        meta: TaskMeta {
+                            ty: TaskType::Tool,
+                            ..Default::default()
+                        },
+                        req: ToolRequest::new(tool_name.clone(), call.function.arguments.clone()),
+                    })
+                    .await?
+                    .resp;
+                loop {
+                    match response.next().await? {
+                        ToolRespItem::Streaming(_) => {}
+                        ToolRespItem::Completed(output) => break output,
+                    }
+                }
+            }
+            ToolRoute::Mcp { server, tool_name } => {
+                rt.exec::<_, McpResponse>(TaskReq {
+                    ctx: ctx.clone(),
+                    meta: TaskMeta {
+                        ty: TaskType::Mcp,
+                        ..Default::default()
+                    },
+                    req: McpRequest::new(
+                        server.clone(),
+                        tool_name.clone(),
+                        call.function.arguments.clone(),
+                    ),
+                })
+                .await?
+                .resp
+                .output
+            }
+        };
+        state.messages.push(ChatCompletionRequestMessage::Tool(
+            ChatCompletionRequestToolMessage {
+                content: ChatCompletionRequestToolMessageContent::Text(output),
+                tool_call_id: call.id,
+            },
+        ));
+    }
+    state.has_tool_calls = false;
+    Ok(state)
+}
+
+fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMessage {
+    match message.role {
+        SessionMessageRole::User => {
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: message.content.clone().into(),
+                ..Default::default()
+            })
+        }
+        SessionMessageRole::Assistant => {
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: Some(message.content.clone().into()),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+fn trim_messages_to_context(messages: &mut Vec<ChatCompletionRequestMessage>, context_size: usize) {
+    let estimated_tokens = |message: &ChatCompletionRequestMessage| {
+        serde_json::to_string(message)
+            .map(|json| json.chars().count().div_ceil(4).max(1))
+            .unwrap_or(1)
+    };
+    while messages.len() > 2 && messages.iter().map(estimated_tokens).sum::<usize>() > context_size
+    {
+        let remove_at = usize::from(matches!(
+            messages.first(),
+            Some(ChatCompletionRequestMessage::System(_))
+        ));
+        messages.remove(remove_at);
+    }
+}
+
+fn required_string<'a>(value: &'a Value, field: &str) -> anyhow::Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing string field `{field}`"))
 }
 
 async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
@@ -55,129 +555,79 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
 
     let mut tools = fae_engine::ToolsRuntime::new();
     tools.add_tool(Box::new(fae_engine::DefaultTools::default()));
+    tools.add_tool(Box::new(AgentWorkflowTools));
     builder.add_runtime(tools);
 
-    builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
     builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
     builder.build().await
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let input = read_user_input()?;
+    let agent_id = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string());
     let loader = FAEWorkflowMetadataLoader::new();
-    loader.add(build_workflow()?)?;
+    loader.add(build_single_agent_workflow()?)?;
+    loader.add(build_tool_iteration_workflow()?)?;
     let engine = build_engine(loader).await;
-    let (env, session) = WorkflowEnv::new(WORKFLOW_ID, Value::String(input));
 
-    let execution = engine.launch(env).await?;
-    print_session(&session).await?;
-    let output = execution.result::<Value>().await?;
+    println!("Enter a message. Use /exit or /quit to stop.");
+    while let Some(input) = read_user_input()? {
+        let (env, session) = WorkflowEnv::new(
+            WORKFLOW_ID,
+            json!({
+                "agent_id": &agent_id,
+                "message": input
+            }),
+        );
 
-    println!("\nworkflow output> {}", display_value(&output));
+        let execution = engine.launch(env).await?;
+        print_session(&session).await?;
+        let output = execution.result::<Value>().await?;
+        println!("\nassistant> {}", display_value(&output));
+    }
     engine.exit().await?;
     Ok(())
 }
 
-fn read_user_input() -> anyhow::Result<String> {
+fn read_user_input() -> anyhow::Result<Option<String>> {
     loop {
         print!("user> ");
         io::stdout().flush()?;
 
         let mut input = String::new();
-        anyhow::ensure!(
-            io::stdin().read_line(&mut input)? != 0,
-            "standard input closed before a message was entered"
-        );
-
+        if io::stdin().read_line(&mut input)? == 0 {
+            println!();
+            return Ok(None);
+        }
         let input = input.trim();
+        if matches!(input, "/exit" | "/quit") {
+            return Ok(None);
+        }
         if !input.is_empty() {
-            return Ok(input.to_string());
+            return Ok(Some(input.to_string()));
         }
     }
 }
 
 async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Result<()> {
-    let mut streaming = None;
-
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
-        let turn_id = event.turn_id.unwrap_or_default();
-        let source = event.source;
-
         match event.data {
-            SessionEventData::TurnStarted { input } => {
-                println!("\n== Turn {turn_id} | {source} ==\nuser> {input}");
-            }
-            SessionEventData::UserInput { content } => {
-                finish_stream(&mut streaming);
-                println!("user> {content}");
-            }
-            SessionEventData::ModelReasoning { content } => {
-                begin_stream(&mut streaming, "reasoning");
-                print!("{content}");
-                io::stdout().flush()?;
-            }
-            SessionEventData::ModelOutput { content } => {
-                begin_stream(&mut streaming, "assistant");
-                print!("{content}");
-                io::stdout().flush()?;
-            }
-            SessionEventData::ToolCall { arguments, .. } => {
-                finish_stream(&mut streaming);
-                println!("tool call> {source}\n{}", pretty_json(&arguments));
-            }
-            SessionEventData::ToolOutput {
-                output, completed, ..
-            } => {
-                finish_stream(&mut streaming);
-                let status = if completed { "completed" } else { "streaming" };
-                println!("tool result> {source} [{status}]\n{}", pretty_json(&output));
-            }
-            SessionEventData::Completed { .. } => {
-                finish_stream(&mut streaming);
-                println!("== Turn {turn_id} completed ==");
+            SessionEventData::NodeCompleted { .. } => {
+                println!("completed> {}", event.node_id.as_deref().unwrap_or("-"));
             }
             SessionEventData::Failed { error } => {
-                finish_stream(&mut streaming);
                 eprintln!("workflow failed> {error}");
             }
-            SessionEventData::Custom {
-                event_type,
-                content,
-            } => {
-                finish_stream(&mut streaming);
-                println!("{event_type}> {content}");
-            }
-            SessionEventData::NodeCompleted { .. } => {}
+            _ => {}
         }
-
         if terminal {
             break;
         }
     }
-    finish_stream(&mut streaming);
     Ok(())
-}
-
-fn begin_stream(streaming: &mut Option<&'static str>, kind: &'static str) {
-    if *streaming != Some(kind) {
-        finish_stream(streaming);
-        print!("{kind}> ");
-        *streaming = Some(kind);
-    }
-}
-
-fn finish_stream(streaming: &mut Option<&'static str>) {
-    if streaming.take().is_some() {
-        println!();
-    }
-}
-
-fn pretty_json(value: &str) -> String {
-    serde_json::from_str::<Value>(value)
-        .and_then(|value| serde_json::to_string_pretty(&value))
-        .unwrap_or_else(|_| value.to_string())
 }
 
 fn display_value(value: &Value) -> String {
@@ -190,29 +640,34 @@ fn display_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fae_agent::WorkflowNode;
 
     #[test]
-    fn workflow_wraps_single_agent_output() -> anyhow::Result<()> {
-        let workflow = build_workflow()?;
+    fn workflow_expands_single_agent_stages_without_single_agent_action() -> anyhow::Result<()> {
+        let workflow = build_single_agent_workflow()?;
 
-        assert!(matches!(
-            &workflow.nodes["assistant"],
-            fae_agent::WorkflowNode::Execute {
-                action: WorkflowAction::SingleAgent {
-                    source: SingleAgentSource::AgentId(agent_id),
-                    input,
-                },
-                next,
-            } if agent_id == AGENT_ID
-                && input == &json!("{$input}")
-                && next == &["end"]
-        ));
-        assert!(matches!(
-            &workflow.nodes["end"],
-            fae_agent::WorkflowNode::End {
-                output: Some(output)
-            } if output == &json!("{$assistant}")
-        ));
+        assert!(workflow.nodes.contains_key("load_history"));
+        assert!(workflow.nodes.contains_key("initial_model"));
+        assert!(workflow.nodes.contains_key("tool_loop"));
+        assert!(workflow.nodes.contains_key("save_history"));
+        assert!(workflow.nodes.values().all(|node| match node {
+            WorkflowNode::Execute { action, .. } => matches!(
+                action,
+                WorkflowAction::Session { .. }
+                    | WorkflowAction::Workflow { .. }
+                    | WorkflowAction::Tool { .. }
+            ),
+            _ => true,
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn tool_iteration_is_an_explicit_child_workflow() -> anyhow::Result<()> {
+        let workflow = build_tool_iteration_workflow()?;
+
+        assert!(workflow.nodes.contains_key("execute_tools"));
+        assert!(workflow.nodes.contains_key("call_model"));
         Ok(())
     }
 }

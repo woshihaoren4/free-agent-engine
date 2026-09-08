@@ -744,7 +744,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
         .wrap(Wrap { trim: false })
         .block(Block::default().padding(Padding::horizontal(1)));
     let width = area.width.saturating_sub(2);
-    let total_lines = transcript_line_count(view.messages, width as usize);
+    let total_lines = paragraph.line_count(width).min(u16::MAX as usize) as u16;
     let max_scroll = total_lines.saturating_sub(area.height);
     let scroll = max_scroll.saturating_sub(view.scroll_from_bottom.min(max_scroll));
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
@@ -902,29 +902,6 @@ fn plain_transcript(messages: &[Message]) -> String {
         .join("\n\n")
 }
 
-fn transcript_line_count(messages: &[Message], width: usize) -> u16 {
-    if messages.is_empty() {
-        return 2;
-    }
-    let width = width.max(1);
-    messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| {
-            let spacing = usize::from(index > 0);
-            let heading_width = message.title.width().saturating_add(2);
-            let heading_lines = heading_width.max(1).div_ceil(width);
-            let content_lines: usize = message
-                .content
-                .lines()
-                .map(|line| line.width().saturating_add(2).max(1).div_ceil(width))
-                .sum();
-            spacing + heading_lines + content_lines
-        })
-        .sum::<usize>()
-        .min(u16::MAX as usize) as u16
-}
-
 fn color(enabled: bool, value: Color) -> Color {
     if enabled { value } else { Color::Reset }
 }
@@ -1056,6 +1033,41 @@ mod tests {
         assert!(content.contains("A response that remains visible"));
         assert!(content.contains("Message"));
         assert!(content.contains("Enter send"));
+    }
+
+    #[test]
+    fn transcript_scrolls_to_last_word_wrapped_line() {
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let messages = vec![Message {
+            kind: MessageKind::Assistant,
+            title: "Assistant".to_string(),
+            content: "1234567890 1234567890 FINAL_END".to_string(),
+            stream_id: None,
+        }];
+        let composer = Composer::default();
+
+        terminal
+            .draw(|frame| {
+                draw_frame(
+                    frame,
+                    ViewModel {
+                        color: false,
+                        mode: Mode::Agent,
+                        model: "model",
+                        subject: "session",
+                        cwd: "/workspace",
+                        state: RunState::Idle,
+                        spinner: 0,
+                        messages: &messages,
+                        composer: &composer,
+                        scroll_from_bottom: 0,
+                    },
+                )
+            })
+            .unwrap();
+
+        assert!(terminal.backend().to_string().contains("FINAL_END"));
     }
 
     #[test]

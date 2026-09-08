@@ -32,44 +32,54 @@ path_has() {
   esac
 }
 
-install_dir="${INSTALL_DIR:-}"
-install_candidates=()
+download() {
+  local url="$1"
+  local output="$2"
 
-add_install_candidate() {
-  local candidate="$1"
-  local existing
-  [[ -n "${candidate}" ]] || return 0
-  if [[ "${#install_candidates[@]}" -gt 0 ]]; then
-    for existing in "${install_candidates[@]}"; do
-      [[ "${existing}" != "${candidate}" ]] || return 0
-    done
+  if command -v curl >/dev/null 2>&1; then
+    if [[ "${url}" == https://* ]]; then
+      curl --proto '=https' --tlsv1.2 -fsSL "${url}" -o "${output}"
+    else
+      curl -fsSL "${url}" -o "${output}"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "${output}" "${url}"
+  else
+    die "curl or wget is required"
   fi
-  install_candidates+=("${candidate}")
 }
 
-if [[ -n "${install_dir}" ]]; then
-  add_install_candidate "${install_dir}"
-else
-  # Prefer system-wide locations first. The installer can use sudo later if needed.
-  add_install_candidate "/usr/local/bin"
-  add_install_candidate "/usr/bin"
-  if [[ "${platform}" == "mac" ]] && { [[ -d "/opt/homebrew/bin" ]] || path_has "/opt/homebrew/bin"; }; then
-    add_install_candidate "/opt/homebrew/bin"
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    die "sha256sum or shasum is required to verify the download"
   fi
-  add_install_candidate "${HOME}/.local/bin"
-  add_install_candidate "${HOME}/bin"
+}
 
+install_dir="${INSTALL_DIR:-}"
+
+if [[ -z "${install_dir}" ]]; then
   IFS=":" read -r -a path_dirs <<< "${PATH:-}"
   for candidate in "${path_dirs[@]}"; do
-    if [[ -n "${candidate}" && -d "${candidate}" && -w "${candidate}" ]]; then
-      add_install_candidate "${candidate}"
+    if [[ -n "${candidate}" && -d "${candidate}" && -w "${candidate}" ]] &&
+      { [[ "${candidate}" == "${HOME}/"* ]] ||
+        [[ "${candidate}" == "/usr/local/bin" ]] ||
+        [[ "${candidate}" == "/opt/homebrew/bin" ]]; }; then
+      install_dir="${candidate}"
+      break
     fi
   done
+
+  install_dir="${install_dir:-${HOME}/.local/bin}"
 fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 tmp_bin="${tmp_dir}/${BIN_NAME}"
+tmp_checksum="${tmp_dir}/${BIN_NAME}.sha256"
 
 script_path="${BASH_SOURCE[0]:-}"
 if [[ -n "${script_path}" && -f "${script_path}" ]]; then
@@ -81,57 +91,34 @@ fi
 
 if [[ -n "${local_bin}" && -f "${local_bin}" ]]; then
   cp "${local_bin}" "${tmp_bin}"
+  local_checksum="${local_bin}.sha256"
+  [[ -f "${local_checksum}" ]] ||
+    die "checksum file not found: ${local_checksum}"
+  cp "${local_checksum}" "${tmp_checksum}"
 else
   url="${BASE_URL}/${platform}/${BIN_NAME}"
-  downloaded=0
-  if command -v wget >/dev/null 2>&1; then
-    if wget -qO "${tmp_bin}" "${url}"; then
-      downloaded=1
-    fi
-  fi
-  if [[ "${downloaded}" -ne 1 ]] && command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "${url}" -o "${tmp_bin}"; then
-      downloaded=1
-    fi
-  fi
-  if [[ "${downloaded}" -ne 1 ]]; then
-    die "failed to download ${url} with wget or curl"
-  fi
+  echo "Downloading ${url}"
+  download "${url}" "${tmp_bin}" ||
+    die "failed to download ${url}"
+  download "${url}.sha256" "${tmp_checksum}" ||
+    die "failed to download ${url}.sha256"
 fi
 
-try_install() {
-  local candidate="$1"
-  local target="${candidate}/${BIN_NAME}"
+expected_hash="$(awk 'NF { print $1; exit }' "${tmp_checksum}")"
+[[ "${expected_hash}" =~ ^[[:xdigit:]]{64}$ ]] ||
+  die "invalid checksum received for ${BIN_NAME}"
+actual_hash="$(sha256 "${tmp_bin}")"
+[[ "${actual_hash}" == "${expected_hash}" ]] ||
+  die "checksum verification failed for ${BIN_NAME}"
 
-  if [[ -d "${candidate}" && -w "${candidate}" ]]; then
-    install -m 755 "${tmp_bin}" "${target}"
-  elif mkdir -p "${candidate}" 2>/dev/null && [[ -w "${candidate}" ]]; then
-    install -m 755 "${tmp_bin}" "${target}"
-  elif command -v sudo >/dev/null 2>&1; then
-    if sudo mkdir -p "${candidate}" && sudo install -m 755 "${tmp_bin}" "${target}"; then
-      return 0
-    fi
-    return 1
-  else
-    return 1
-  fi
-}
+mkdir -p "${install_dir}" ||
+  die "cannot create ${install_dir}; set INSTALL_DIR to a writable directory"
+[[ -w "${install_dir}" ]] ||
+  die "${install_dir} is not writable; set INSTALL_DIR to a writable directory"
+target="${install_dir}/${BIN_NAME}"
+install -m 755 "${tmp_bin}" "${target}"
 
-installed=0
-for candidate in "${install_candidates[@]}"; do
-  target="${candidate}/${BIN_NAME}"
-  if try_install "${candidate}"; then
-    install_dir="${candidate}"
-    installed=1
-    break
-  fi
-done
-
-if [[ "${installed}" -ne 1 ]]; then
-  die "cannot install ${BIN_NAME}; set INSTALL_DIR to a writable directory in PATH"
-fi
-
-echo "Installed ${BIN_NAME} to ${target}"
+echo "Installed ${BIN_NAME} to ${target} (checksum verified)"
 
 if ! path_has "${install_dir}"; then
   echo "Notice: ${install_dir} is not in your current PATH."
@@ -140,11 +127,7 @@ fi
 
 cat <<'EOF'
 
-Before running fae, set:
-  export OPENAI_API_KEY="sk-..."
-  export FAE_DEFAULT_MODEL="gpt-..."
-
-Then initialize and start:
-  fae --ws main init
-  fae --ws main agent --chat
+Configure ~/.fae/agents/fae_config.json and ~/.fae/agents/fae_prompt.txt,
+then set OPENAI_API_KEY and run:
+  fae
 EOF

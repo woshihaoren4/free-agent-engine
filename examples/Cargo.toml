@@ -7,12 +7,14 @@ publish = false
 [dependencies]
 fae-engine = { path = "../crates/fae-engine" }
 fae-agent = { path = "../crates/fae-agent" }
+async-openai = { path = "../crates/async-openai", features = ["full"] }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 wd_log = { workspace = true }
 wd_tools = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [[example]]
