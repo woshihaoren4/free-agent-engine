@@ -10,11 +10,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::args::InitArgs;
 
-const DEFAULT_PROMPT: &str = "You are FAE, a pragmatic coding agent. Inspect the workspace, use the available tools and skills when useful, and complete the user's request end to end.\n";
-
 pub struct InitResult {
     pub config_path: PathBuf,
-    pub prompt_path: PathBuf,
     pub skill_count: usize,
 }
 
@@ -25,21 +22,12 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
     let agents_dir = home.join("agents");
     let skills_dir = home.join("skills");
     let config_path = agents_dir.join(format!("{}_config.json", args.agent_id));
-    let prompt_path = agents_dir.join(format!("{}_prompt.txt", args.agent_id));
 
     if !args.force {
-        let conflicts: Vec<_> = [&config_path, &prompt_path]
-            .into_iter()
-            .filter(|path| path.exists())
-            .collect();
         anyhow::ensure!(
-            conflicts.is_empty(),
-            "refusing to overwrite {}; use --force to replace the agent",
-            conflicts
-                .iter()
-                .map(|path| format!("`{}`", path.display()))
-                .collect::<Vec<_>>()
-                .join(", ")
+            !config_path.exists(),
+            "refusing to overwrite `{}`; use --force to replace the agent config",
+            config_path.display()
         );
     }
 
@@ -83,23 +71,15 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
     config_bytes.push(b'\n');
 
     if args.force {
-        tokio::fs::write(&prompt_path, DEFAULT_PROMPT)
-            .await
-            .with_context(|| format!("write `{}`", prompt_path.display()))?;
         tokio::fs::write(&config_path, config_bytes)
             .await
             .with_context(|| format!("write `{}`", config_path.display()))?;
     } else {
-        write_new(&prompt_path, DEFAULT_PROMPT.as_bytes()).await?;
-        if let Err(error) = write_new(&config_path, &config_bytes).await {
-            let _ = tokio::fs::remove_file(&prompt_path).await;
-            return Err(error);
-        }
+        write_new(&config_path, &config_bytes).await?;
     }
 
     Ok(InitResult {
         config_path,
-        prompt_path,
         skill_count: skills.len(),
     })
 }
@@ -195,13 +175,13 @@ mod tests {
             ]
         );
         assert_eq!(result.skill_count, 2);
-        assert!(result.prompt_path.is_file());
+        assert!(!home.join("agents/fae_prompt.txt").exists());
 
         tokio::fs::remove_dir_all(home).await.unwrap();
     }
 
     #[tokio::test]
-    async fn refuses_to_overwrite_existing_agent() {
+    async fn refuses_to_overwrite_existing_config_without_touching_prompt() {
         let home = std::env::temp_dir().join(format!(
             "fae-cli-init-conflict-{}-{}",
             std::process::id(),
@@ -210,6 +190,9 @@ mod tests {
         let agents = home.join("agents");
         tokio::fs::create_dir_all(&agents).await.unwrap();
         tokio::fs::write(agents.join("fae_config.json"), "existing")
+            .await
+            .unwrap();
+        tokio::fs::write(agents.join("fae_prompt.txt"), "custom prompt")
             .await
             .unwrap();
 
@@ -226,7 +209,29 @@ mod tests {
         .unwrap();
 
         assert!(error.to_string().contains("--force"));
-        assert!(!agents.join("fae_prompt.txt").exists());
+        assert_eq!(
+            tokio::fs::read_to_string(agents.join("fae_prompt.txt"))
+                .await
+                .unwrap(),
+            "custom prompt"
+        );
+
+        initialize(
+            &home,
+            &InitArgs {
+                agent_id: "fae".to_string(),
+                model: "replacement-model".to_string(),
+                force: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(agents.join("fae_prompt.txt"))
+                .await
+                .unwrap(),
+            "custom prompt"
+        );
         tokio::fs::remove_dir_all(home).await.unwrap();
     }
 }

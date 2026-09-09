@@ -4,6 +4,7 @@ set -euo pipefail
 BIN_NAME="${BIN_NAME:-fae}"
 BASE_URL="${FAE_INSTALL_BASE_URL:-https://woshihaoren4.github.io/free-agent-engine/bin}"
 SKILLS_BASE_URL="${FAE_SKILLS_BASE_URL:-${BASE_URL%/bin}/skills}"
+AGENT_PROMPT_URL="${FAE_AGENT_PROMPT_URL:-${BASE_URL%/bin}/agents/fae_prompt.txt}"
 
 die() {
   echo "fae install: $*" >&2
@@ -71,6 +72,7 @@ expand_home() {
 install_dir="${INSTALL_DIR:-}"
 fae_host="$(expand_home "${FAE_HOST:-${HOME}/.fae}")"
 skills_dir="$(expand_home "${FAE_SKILLS_DIR:-${fae_host}/skills}")"
+agents_dir="${fae_host}/agents"
 skill_files=(
   "fae-agent/SKILL.md"
   "fae-agent/references/agent-api.md"
@@ -106,9 +108,11 @@ if [[ -n "${script_path}" && -f "${script_path}" ]]; then
   script_dir="$(cd -- "$(dirname -- "${script_path}")" && pwd)"
   local_bin="${script_dir}/${platform}/${BIN_NAME}"
   local_skills_dir="${script_dir}/../skills"
+  local_agent_prompt="${script_dir}/../agents/fae_prompt.txt"
 else
   local_bin=""
   local_skills_dir=""
+  local_agent_prompt=""
 fi
 
 if [[ -n "${local_bin}" && -f "${local_bin}" ]]; then
@@ -147,6 +151,16 @@ for skill_file in "${skill_files[@]}"; do
     die "downloaded skill file is empty: ${skill_file}"
 done
 
+tmp_agent_prompt="${tmp_dir}/fae_prompt.txt"
+if [[ -n "${local_agent_prompt}" && -f "${local_agent_prompt}" ]]; then
+  cp "${local_agent_prompt}" "${tmp_agent_prompt}"
+else
+  download "${AGENT_PROMPT_URL}" "${tmp_agent_prompt}" ||
+    die "failed to download default agent prompt"
+fi
+[[ -s "${tmp_agent_prompt}" ]] ||
+  die "default agent prompt is empty"
+
 mkdir -p "${install_dir}" ||
   die "cannot create ${install_dir}; set INSTALL_DIR to a writable directory"
 [[ -w "${install_dir}" ]] ||
@@ -161,6 +175,17 @@ for skill_file in "${skill_files[@]}"; do
   install -m 644 "${tmp_skills_dir}/${skill_file}" "${skill_target}" ||
     die "cannot install skill file ${skill_target}"
 done
+
+agent_prompt_target="${agents_dir}/fae_prompt.txt"
+mkdir -p "${agents_dir}" ||
+  die "cannot create agent directory ${agents_dir}"
+if [[ -e "${agent_prompt_target}" ]]; then
+  echo "Preserved existing agent prompt at ${agent_prompt_target}"
+else
+  install -m 644 "${tmp_agent_prompt}" "${agent_prompt_target}" ||
+    die "cannot install agent prompt ${agent_prompt_target}"
+  echo "Installed default agent prompt to ${agent_prompt_target}"
+fi
 
 echo "Installed ${BIN_NAME} to ${target} (checksum verified)"
 echo "Installed bundled skills to ${skills_dir}"

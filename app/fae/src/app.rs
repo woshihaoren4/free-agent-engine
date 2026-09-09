@@ -31,7 +31,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let result = initialize(&home, &args).await?;
             println!("Initialized agent `{}`.", args.agent_id);
             println!("Config: {}", result.config_path.display());
-            println!("Prompt: {}", result.prompt_path.display());
             println!(
                 "Enabled {} tools and {} installed skills.",
                 fae_engine::DEFAULT_TOOL_NAMES.len(),
@@ -45,6 +44,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some(Command::Uninstall) => {
+            let executable = std::env::current_exe().context("locate current fae executable")?;
+            uninstall(&executable).await?;
+            println!("Removed {}.", executable.display());
+            Ok(())
+        }
         Some(Command::Agent(args)) => {
             run_agent(args, cli.fae_home, cli.color, cli.no_alt_screen).await
         }
@@ -53,6 +58,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         None => unreachable!("default agent command is inserted before parsing"),
     }
+}
+
+async fn uninstall(executable: &std::path::Path) -> anyhow::Result<()> {
+    tokio::fs::remove_file(executable)
+        .await
+        .with_context(|| format!("remove fae executable `{}`", executable.display()))
 }
 
 async fn run_agent(
@@ -381,6 +392,26 @@ mod tests {
             .unwrap();
         tokio::fs::remove_file(path).await.unwrap();
         assert_eq!(input, json!({"count": 3}));
+    }
+
+    #[tokio::test]
+    async fn uninstall_removes_only_the_executable() {
+        let dir = std::env::temp_dir().join(format!(
+            "fae-uninstall-{}-{}",
+            std::process::id(),
+            wd_tools::uuid::v4()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let executable = dir.join("fae");
+        let config = dir.join("fae_config.json");
+        tokio::fs::write(&executable, "binary").await.unwrap();
+        tokio::fs::write(&config, "{}").await.unwrap();
+
+        uninstall(&executable).await.unwrap();
+
+        assert!(!executable.exists());
+        assert!(config.exists());
+        tokio::fs::remove_dir_all(dir).await.unwrap();
     }
 
     #[tokio::test]

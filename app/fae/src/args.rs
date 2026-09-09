@@ -27,6 +27,8 @@ pub struct Cli {
 pub enum Command {
     /// Initialize an agent with all installed tools and skills
     Init(InitArgs),
+    /// Remove the currently running fae executable
+    Uninstall,
     /// Start an interactive single-agent session
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
@@ -43,7 +45,7 @@ pub struct InitArgs {
     #[arg(long, env = "FAE_DEFAULT_MODEL", default_value = "gpt-4o-mini")]
     pub model: String,
 
-    /// Replace an existing config and prompt
+    /// Replace an existing agent config
     #[arg(long)]
     pub force: bool,
 }
@@ -96,7 +98,7 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "init" | "agent" | "workflow" => return args,
+            "init" | "uninstall" | "agent" | "workflow" => return args,
             "--fae-home" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
@@ -167,5 +169,13 @@ mod tests {
         assert_eq!(args.agent_id, "fae");
         assert!(!args.model.is_empty());
         assert!(!args.force);
+    }
+
+    #[test]
+    fn parses_uninstall_without_inserting_agent_mode() {
+        let cli =
+            Cli::try_parse_from(with_default_agent(["fae", "uninstall"].map(Into::into))).unwrap();
+
+        assert!(matches!(cli.command, Some(Command::Uninstall)));
     }
 }

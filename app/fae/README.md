@@ -12,11 +12,10 @@ Initialize the default `fae` agent:
 fae init
 ```
 
-This creates `~/.fae/agents/fae_config.json` and
-`~/.fae/agents/fae_prompt.txt`, enabling every built-in tool and every skill
-currently installed under `~/.fae/skills`. Existing agent files are preserved;
-use `fae init --force` to replace them. Set `FAE_DEFAULT_MODEL` or pass
-`--model` to choose another model:
+This creates `~/.fae/agents/fae_config.json`, enabling every built-in tool and
+every skill currently installed under `~/.fae/skills`. Existing configs are
+preserved; use `fae init --force` to replace one. Set `FAE_DEFAULT_MODEL` or
+pass `--model` to choose another model:
 
 ```bash
 fae init --model gpt-5
@@ -67,8 +66,10 @@ The generated configuration has this shape:
 }
 ```
 
-Customize the generated system prompt if needed, then start an interactive
-session:
+The install script places the bundled
+[`fae_prompt.txt`](../../docs/agents/fae_prompt.txt) at
+`~/.fae/agents/fae_prompt.txt` without replacing an existing prompt. Customize
+it if needed, then start an interactive session:
 
 ```bash
 cargo run -p fae
@@ -101,6 +102,17 @@ the interface in terminal scrollback:
 ```bash
 cargo run -p fae -- --no-alt-screen
 ```
+
+## Uninstall
+
+Remove the currently running `fae` executable:
+
+```bash
+fae uninstall
+```
+
+This leaves `FAE_HOST` and all agent configs, prompts, skills, workflows, and
+session data unchanged.
 
 ## Workflow
 
