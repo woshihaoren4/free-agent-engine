@@ -15,13 +15,9 @@ curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-
 ```
 
 当前发布包支持 Apple Silicon macOS（`arm64`）和 64 位 Linux
-（`x86_64`）。安装器会校验下载文件的 SHA-256，并默认安装到 `PATH`
-中的可写目录或 `~/.local/bin`。也可以通过 `INSTALL_DIR` 指定安装目录：
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSfL https://woshihaoren4.github.io/free-agent-engine/bin/install.sh \
-  | INSTALL_DIR="$HOME/bin" bash
-```
+（`x86_64`）。安装器会校验下载文件的 SHA-256，并将 `fae` 安装到系统
+`PATH` 目录 `/usr/local/bin`。目录不可写时，安装器会自动通过 `sudo`
+请求管理员权限，无需额外配置 `PATH`。
 
 按照 [fae CLI 配置说明](app/fae/README.md) 初始化默认 Agent，设置模型 API
 Key 后启动：

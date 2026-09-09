@@ -138,21 +138,3 @@ cargo check --workspace
 cargo test -p examples --example parent_child_workflow
 cargo test -p examples --example workflow
 ```
-
-需要模型的完整示例通过以下方式运行：
-
-```bash
-cargo run -p examples --example workflow
-```
-
-## 当前源码入口
-
-- `crates/fae-agent/src/workflow/definition.rs`
-- `crates/fae-agent/src/workflow/builder.rs`
-- `crates/fae-agent/src/workflow/value.rs`
-- `crates/fae-agent/src/workflow/plan.rs`
-- `crates/fae-agent/src/workflow/session.rs`
-- `crates/fae-engine/src/engine_rt/workflow_runtime.rs`
-- `examples/workflow_metadata.rs`
-- `examples/workflow.rs`
-- `examples/parent_child_workflow.rs`

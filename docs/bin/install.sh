@@ -27,13 +27,6 @@ case "${os}" in
     ;;
 esac
 
-path_has() {
-  case ":${PATH:-}:" in
-    *":$1:"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 download() {
   local url="$1"
   local output="$2"
@@ -69,7 +62,7 @@ expand_home() {
   esac
 }
 
-install_dir="${INSTALL_DIR:-}"
+install_dir="/usr/local/bin"
 fae_host="$(expand_home "${FAE_HOST:-${HOME}/.fae}")"
 skills_dir="$(expand_home "${FAE_SKILLS_DIR:-${fae_host}/skills}")"
 agents_dir="${fae_host}/agents"
@@ -82,21 +75,6 @@ skill_files=(
   "fae-workflow/references/workflow-api.md"
   "weather/SKILL.md"
 )
-
-if [[ -z "${install_dir}" ]]; then
-  IFS=":" read -r -a path_dirs <<< "${PATH:-}"
-  for candidate in "${path_dirs[@]}"; do
-    if [[ -n "${candidate}" && -d "${candidate}" && -w "${candidate}" ]] &&
-      { [[ "${candidate}" == "${HOME}/"* ]] ||
-        [[ "${candidate}" == "/usr/local/bin" ]] ||
-        [[ "${candidate}" == "/opt/homebrew/bin" ]]; }; then
-      install_dir="${candidate}"
-      break
-    fi
-  done
-
-  install_dir="${install_dir:-${HOME}/.local/bin}"
-fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
@@ -161,12 +139,19 @@ fi
 [[ -s "${tmp_agent_prompt}" ]] ||
   die "default agent prompt is empty"
 
-mkdir -p "${install_dir}" ||
-  die "cannot create ${install_dir}; set INSTALL_DIR to a writable directory"
-[[ -w "${install_dir}" ]] ||
-  die "${install_dir} is not writable; set INSTALL_DIR to a writable directory"
 target="${install_dir}/${BIN_NAME}"
-install -m 755 "${tmp_bin}" "${target}"
+if [[ -d "${install_dir}" && -w "${install_dir}" ]]; then
+  install -m 755 "${tmp_bin}" "${target}"
+elif [[ "$(id -u)" -eq 0 ]]; then
+  mkdir -p "${install_dir}"
+  install -m 755 "${tmp_bin}" "${target}"
+elif command -v sudo >/dev/null 2>&1; then
+  echo "Installing ${BIN_NAME} to ${install_dir} requires administrator privileges."
+  sudo mkdir -p "${install_dir}"
+  sudo install -m 755 "${tmp_bin}" "${target}"
+else
+  die "administrator privileges are required to install ${target}; sudo is not available"
+fi
 
 for skill_file in "${skill_files[@]}"; do
   skill_target="${skills_dir}/${skill_file}"
@@ -189,11 +174,6 @@ fi
 
 echo "Installed ${BIN_NAME} to ${target} (checksum verified)"
 echo "Installed bundled skills to ${skills_dir}"
-
-if ! path_has "${install_dir}"; then
-  echo "Notice: ${install_dir} is not in your current PATH."
-  echo "Add it first, for example: export PATH=\"${install_dir}:\$PATH\""
-fi
 
 cat <<EOF
 

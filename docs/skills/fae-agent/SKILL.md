@@ -138,22 +138,3 @@ cargo check --workspace --all-targets
 ```
 
 若修改 CLI 或示例，再运行：
-
-```bash
-cargo test -p fae
-cargo check -p examples --all-targets
-```
-
-## 当前源码入口
-
-- `crates/fae-agent/src/plan/single_agent.rs`
-- `crates/fae-agent/src/session/mod.rs`
-- `crates/fae-agent/src/skill.rs`
-- `crates/fae-agent/src/mcp.rs`
-- `crates/fae-engine/src/engine_rt/model_runtime.rs`
-- `crates/fae-engine/src/engine_rt/session_runtime.rs`
-- `crates/fae-engine/src/engine_rt/skill_runtime.rs`
-- `crates/fae-engine/src/engine_rt/mcp_runtime.rs`
-- `crates/fae-engine/src/lib.rs`
-- `examples/single_agent.rs`
-- `app/fae/src/app.rs`
