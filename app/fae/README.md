@@ -35,7 +35,7 @@ The generated configuration has this shape:
     "model": "gpt-4o-mini",
     "context_size": 32000,
     "history_turns": 20,
-    "max_completion_tokens": 4096,
+    "max_completion_tokens": 65536,
     "temperature": null,
     "max_tool_iterations": 8
   },

@@ -77,7 +77,7 @@ ${FAE_HOST:-~/.fae}/
     "model": "gpt-5",
     "context_size": 32000,
     "history_turns": 20,
-    "max_completion_tokens": 4096,
+    "max_completion_tokens": 65536,
     "temperature": 0.2,
     "max_tool_iterations": 8
   },
@@ -114,7 +114,7 @@ ${FAE_HOST:-~/.fae}/
 | `model.model` | 非空；必须是当前模型服务可用的模型名 |
 | `model.context_size` | 可省略，默认 `32000`；显式值必须大于 0，超限时先压缩上下文 |
 | `model.history_turns` | 可为 0；控制读取多少轮历史 |
-| `model.max_completion_tokens` | 可省略或为 `null` |
+| `model.max_completion_tokens` | 可省略，默认 `65536`；设为 `null` 时不向模型传递该限制 |
 | `model.temperature` | 可省略或为 `null` |
 | `model.max_tool_iterations` | 可省略，默认 8；显式值必须大于 0 |
 

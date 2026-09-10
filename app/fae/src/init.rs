@@ -56,7 +56,7 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
             model: args.model.clone(),
             context_size: 32_000,
             history_turns: 20,
-            max_completion_tokens: Some(4_096),
+            max_completion_tokens: Some(65_536),
             temperature: None,
             max_tool_iterations: 8,
         },
@@ -160,6 +160,7 @@ mod tests {
 
         assert_eq!(config.agent.name, "fae");
         assert_eq!(config.model.model, "test-model");
+        assert_eq!(config.model.max_completion_tokens, Some(65_536));
         assert_eq!(
             config.tools,
             DEFAULT_TOOL_NAMES

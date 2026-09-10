@@ -77,7 +77,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
     "model": "gpt-5",
     "context_size": 32000,
     "history_turns": 20,
-    "max_completion_tokens": 4096,
+    "max_completion_tokens": 65536,
     "temperature": 0.2,
     "max_tool_iterations": 8
   },

@@ -13,7 +13,7 @@ use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTools,
-    CreateChatCompletionRequest, FunctionCall, FunctionObject,
+    CreateChatCompletionRequest, FinishReason, FunctionCall, FunctionObject,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,7 +44,7 @@ pub struct SingleAgentModelConfig {
     #[serde(default = "default_context_size")]
     pub context_size: usize,
     pub history_turns: usize,
-    #[serde(default)]
+    #[serde(default = "default_max_completion_tokens")]
     pub max_completion_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -77,6 +77,10 @@ const fn default_max_tool_iterations() -> usize {
 
 const fn default_context_size() -> usize {
     32_000
+}
+
+const fn default_max_completion_tokens() -> Option<u32> {
+    Some(65_536)
 }
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
@@ -946,7 +950,11 @@ impl SingleAgentPlan {
     async fn consume_model(
         &mut self,
         response: ModelResponse,
-    ) -> anyhow::Result<(String, Vec<ChatCompletionMessageToolCalls>)> {
+    ) -> anyhow::Result<(
+        String,
+        Vec<ChatCompletionMessageToolCalls>,
+        Option<FinishReason>,
+    )> {
         match response {
             ModelResponse::Completed(response) => {
                 let choice = response
@@ -954,6 +962,7 @@ impl SingleAgentPlan {
                     .into_iter()
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("model returned no choices"))?;
+                let finish_reason = choice.finish_reason;
                 let content = choice.message.content.unwrap_or_default();
                 if !content.is_empty() {
                     self.emit(
@@ -964,14 +973,22 @@ impl SingleAgentPlan {
                     )
                     .await?;
                 }
-                Ok((content, choice.message.tool_calls.unwrap_or_default()))
+                Ok((
+                    content,
+                    choice.message.tool_calls.unwrap_or_default(),
+                    finish_reason,
+                ))
             }
             ModelResponse::Streaming(mut stream) => {
                 let mut content = String::new();
                 let mut tool_calls = BTreeMap::<u32, ToolCallAccumulator>::new();
+                let mut finish_reason = None;
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;
                     for choice in chunk.choices {
+                        if choice.finish_reason.is_some() {
+                            finish_reason = choice.finish_reason;
+                        }
                         if let Some(delta) = choice.delta.content.filter(|delta| !delta.is_empty())
                         {
                             content.push_str(&delta);
@@ -1001,14 +1018,35 @@ impl SingleAgentPlan {
                     .into_values()
                     .map(ToolCallAccumulator::finish)
                     .collect::<anyhow::Result<Vec<_>>>()?;
-                Ok((content, tool_calls))
+                Ok((content, tool_calls, finish_reason))
             }
         }
     }
 
     async fn handle_model_response(&mut self, response: ModelResponse) -> anyhow::Result<PlanNext> {
-        let (content, tool_calls) = self.consume_model(response).await?;
+        let (content, tool_calls, finish_reason) = self.consume_model(response).await?;
+        match finish_reason {
+            Some(FinishReason::Length) => anyhow::bail!(
+                "model output reached max_completion_tokens before producing a complete answer; \
+                 increase model.max_completion_tokens or reduce the request context"
+            ),
+            Some(FinishReason::ContentFilter) => {
+                anyhow::bail!("model output was blocked by the content filter")
+            }
+            Some(FinishReason::FunctionCall) => {
+                anyhow::bail!("legacy model function calls are not supported")
+            }
+            Some(FinishReason::ToolCalls) if tool_calls.is_empty() => {
+                anyhow::bail!("model stopped for tool calls but returned no tool calls")
+            }
+            Some(FinishReason::Stop | FinishReason::ToolCalls) | None => {}
+        }
+
         if tool_calls.is_empty() {
+            anyhow::ensure!(
+                !content.trim().is_empty(),
+                "model completed without assistant output"
+            );
             self.final_output = content.clone();
             self.messages.push(ChatCompletionRequestMessage::Assistant(
                 ChatCompletionRequestAssistantMessage {
@@ -1410,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn model_config_defaults_context_size_to_32k() {
+    fn model_config_uses_default_limits() {
         let config: SingleAgentModelConfig = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "history_turns": 10
@@ -1418,6 +1456,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.context_size, 32_000);
+        assert_eq!(config.max_completion_tokens, Some(65_536));
     }
 
     #[tokio::test]
@@ -2064,6 +2103,45 @@ mod tests {
             }
         }
         assert_eq!(kinds, vec!["turn_started", "model_output", "completed"]);
+    }
+
+    #[tokio::test]
+    async fn length_limited_response_does_not_save_empty_assistant_message() {
+        let session = CommonSession::new();
+        session.activate_turn().unwrap();
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "complete a long task".to_string(),
+            1,
+            session,
+        );
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {"content": null, "role": "assistant"},
+                "finish_reason": "length"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))
+        .unwrap();
+
+        let error = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("max_completion_tokens"));
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![SessionMessage::user("complete a long task")]
+        );
+        assert!(plan.final_output.is_empty());
     }
 
     fn test_template() -> SingleAgentTemplate {
