@@ -103,6 +103,7 @@ impl SessionOutput {
 pub enum SessionMessageRole {
     User,
     Assistant,
+    Summary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -122,6 +123,13 @@ impl SessionMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: SessionMessageRole::Assistant,
+            content: content.into(),
+        }
+    }
+
+    pub fn summary(content: impl Into<String>) -> Self {
+        Self {
+            role: SessionMessageRole::Summary,
             content: content.into(),
         }
     }

@@ -12,8 +12,8 @@ description: "Creates and runs FAE workflows from JSON configuration. Invoke whe
 - 默认交付 Workflow JSON，不编写 Rust Builder 代码。
 - 配置文件放在 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
 - 文件名、配置中的 `id`、运行命令中的 workflow ID 必须一致。
-- 优先复用 `fae` 已注册的 `tool`、`workflow`、`single_agent`、`session` 和
-  `python` action。
+- 优先复用 `fae` 已注册的 `tool`、`workflow`、`single_agent`、`session`、`python`
+  action 和 `workflow.compression` custom action。
 - 仅当用户需要新的 `custom` action，或要把 Workflow 嵌入其他 Rust 应用时，才修改代码和
   runtime。
 

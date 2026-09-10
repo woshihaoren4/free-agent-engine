@@ -517,6 +517,12 @@ fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMes
                 ..Default::default()
             })
         }
+        SessionMessageRole::Summary => {
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: format!("Compressed conversation context:\n{}", message.content).into(),
+                ..Default::default()
+            })
+        }
     }
 }
 

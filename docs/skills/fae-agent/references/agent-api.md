@@ -112,7 +112,7 @@ ${FAE_HOST:-~/.fae}/
 | 字段 | 规则 |
 | --- | --- |
 | `model.model` | 非空；必须是当前模型服务可用的模型名 |
-| `model.context_size` | 必须大于 0 |
+| `model.context_size` | 可省略，默认 `32000`；显式值必须大于 0，超限时先压缩上下文 |
 | `model.history_turns` | 可为 0；控制读取多少轮历史 |
 | `model.max_completion_tokens` | 可省略或为 `null` |
 | `model.temperature` | 可省略或为 `null` |
@@ -120,6 +120,10 @@ ${FAE_HOST:-~/.fae}/
 
 `max_tool_iterations` 用于限制单轮连续工具调用，避免 Agent 无限循环。只有确认任务确实需要更多
 步骤时才提高。
+
+上下文压缩通过内置 `workflow.compression` runtime 调用同一个模型完成。压缩结果会以
+`summary` 角色追加到 session JSONL；后续加载历史时从最新的 `summary` 开始，更早的消息不再
+加入模型上下文。
 
 ### 可选能力字段
 

@@ -7,8 +7,8 @@ use fae_agent::{
     WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::{
-    DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime, SessionRuntime,
-    SkillRuntime, ToolsRuntime, WorkflowRuntime, default_fae_host,
+    CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
+    SessionRuntime, SkillRuntime, ToolsRuntime, WorkflowRuntime, default_fae_host,
 };
 use serde_json::Value;
 use wd_tools::channel::{Channel, Receiver, Sender};
@@ -243,6 +243,7 @@ async fn build_engine(
     builder.add_runtime(PlanRuntime::new());
     builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
     builder.add_runtime(ModelRuntime::new());
+    builder.add_runtime(CompressionRuntime::default());
     builder.add_runtime(SessionRuntime::with_host_dir(&home_dir));
     builder.add_runtime(SkillRuntime::with_host_dir(&home_dir));
     builder.add_runtime(McpRuntime::with_mcp_dir(home_dir.join("mcp")));

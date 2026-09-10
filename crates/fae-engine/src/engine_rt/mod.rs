@@ -1,3 +1,4 @@
+mod compression_runtime;
 mod engine_runtime;
 mod mcp_runtime;
 mod model_runtime;
@@ -7,6 +8,7 @@ mod skill_runtime;
 mod tools_runtime;
 mod workflow_runtime;
 
+pub use compression_runtime::*;
 pub use engine_runtime::*;
 pub use mcp_runtime::*;
 pub use model_runtime::*;

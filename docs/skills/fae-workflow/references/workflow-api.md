@@ -342,6 +342,23 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
 
 ### Custom
 
+`fae` 内置 `workflow.compression`，它通过默认 Model Runtime 压缩文本：
+
+```json
+{
+  "type": "custom",
+  "task_type": "workflow.compression",
+  "request": {
+    "text": "{$input.text}"
+  }
+}
+```
+
+`request` 也可以直接是字符串。节点输出是模型返回的压缩文本。模型读取
+`FAE_DEFAULT_MODEL`，未设置时使用 `gpt-4o-mini`。
+
+其他自定义 runtime：
+
 ```json
 {
   "type": "custom",
@@ -352,8 +369,9 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
 }
 ```
 
-`custom` 不会自动执行。只有宿主已经注册完全匹配 `task_type` 的 runtime 时才能使用。标准
-`fae` CLI 不会为项目自定义 task type 自动注册 runtime。
+除内置的 `workflow.compression` 外，`custom` 不会自动执行。只有宿主已经注册完全匹配
+`task_type` 的 runtime 时才能使用。标准 `fae` CLI 不会为项目自定义 task type 自动注册
+runtime。
 
 ## 6. 值模板
 

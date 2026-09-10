@@ -15,6 +15,7 @@ impl Engine {
         builder.add_runtime(PlanRuntime::new());
         builder.add_runtime(WorkflowRuntime::new());
         builder.add_runtime(ModelRuntime::new());
+        builder.add_runtime(CompressionRuntime::default());
         builder.add_runtime(SessionRuntime::new());
         builder.add_runtime(SkillRuntime::new());
         builder.add_runtime(McpRuntime::new());
@@ -45,6 +46,7 @@ mod tests {
         builder.add_runtime(PlanRuntime::new());
         builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
         builder.add_runtime(ModelRuntime::new());
+        builder.add_runtime(CompressionRuntime::default());
         builder.add_runtime(SessionRuntime::new());
         builder.add_runtime(SkillRuntime::new());
         builder.add_runtime(McpRuntime::new());

@@ -25,7 +25,8 @@ use crate::{
     PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput, SessionInputData,
     SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel, SessionRequest,
     SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse,
-    TaskType, ToolRequest, ToolRespItem, ToolResponse,
+    TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowActionRequest,
+    WorkflowActionResponse,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +41,7 @@ pub struct SingleAgentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleAgentModelConfig {
     pub model: String,
+    #[serde(default = "default_context_size")]
     pub context_size: usize,
     pub history_turns: usize,
     #[serde(default)]
@@ -72,6 +74,12 @@ pub enum SingleAgentSource {
 const fn default_max_tool_iterations() -> usize {
     8
 }
+
+const fn default_context_size() -> usize {
+    32_000
+}
+
+pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
 
 #[derive(Debug)]
 pub struct SingleAgentEnv {
@@ -729,6 +737,7 @@ struct PendingCall {
 #[derive(Debug)]
 enum SingleAgentStage {
     History,
+    Compression,
     Model,
     Tools { remaining: usize },
     Save,
@@ -811,8 +820,8 @@ impl SingleAgentPlan {
         )
     }
 
-    fn model_task(&mut self) -> anyhow::Result<TaskRequest> {
-        let mut request = CreateChatCompletionRequest {
+    fn model_request(&self) -> CreateChatCompletionRequest {
+        CreateChatCompletionRequest {
             model: self.template.model.model.clone(),
             messages: self.messages.clone(),
             stream: Some(true),
@@ -822,8 +831,54 @@ impl SingleAgentPlan {
                 .then(|| self.template.tool_definitions.clone()),
             safety_identifier: Some(self.template.agent.user_id.clone()),
             ..Default::default()
-        };
-        request.stream = Some(true);
+        }
+    }
+
+    fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
+        let request = self.model_request();
+        if estimated_tokens(&request) > self.template.model.context_size {
+            let content = serde_json::to_string(
+                &request
+                    .messages
+                    .iter()
+                    .filter(|message| !matches!(message, ChatCompletionRequestMessage::System(_)))
+                    .collect::<Vec<_>>(),
+            )?;
+            self.stage = SingleAgentStage::Compression;
+            return Ok(self.task(
+                TaskType::Any(COMPRESSION_TASK_TYPE.to_string()),
+                WorkflowActionRequest {
+                    action: "compression".to_string(),
+                    payload: serde_json::json!({
+                        "text": content,
+                        "model": self.template.model.model,
+                    }),
+                },
+            ));
+        }
+
+        self.stage = SingleAgentStage::Model;
+        Ok(self.task(TaskType::Model, request))
+    }
+
+    fn apply_compression(&mut self, content: String) -> anyhow::Result<TaskRequest> {
+        anyhow::ensure!(
+            !content.trim().is_empty(),
+            "compression runtime returned empty content"
+        );
+        let content = content.trim().to_string();
+        self.messages
+            .retain(|message| matches!(message, ChatCompletionRequestMessage::System(_)));
+        self.messages.push(summary_chat_message(&content));
+        self.unsaved_messages.push(SessionMessage::summary(content));
+
+        let request = self.model_request();
+        anyhow::ensure!(
+            estimated_tokens(&request) <= self.template.model.context_size,
+            "compressed model request still exceeds context_size ({})",
+            self.template.model.context_size
+        );
+        self.stage = SingleAgentStage::Model;
         Ok(self.task(TaskType::Model, request))
     }
 
@@ -856,7 +911,6 @@ impl SingleAgentPlan {
             ));
             self.unsaved_messages.push(SessionMessage::user(input));
         }
-        trim_messages_to_context(&mut self.messages, self.template.model.context_size);
         Ok(())
     }
 
@@ -872,26 +926,14 @@ impl SingleAgentPlan {
         }
 
         let history_limit = self.template.model.history_turns.saturating_mul(2);
-        let start = history.len().saturating_sub(history_limit);
+        let history_start = history.len().saturating_sub(history_limit);
+        let summary_start = history
+            .iter()
+            .rposition(|message| message.role == SessionMessageRole::Summary)
+            .unwrap_or(0);
+        let start = history_start.max(summary_start);
         for message in &history[start..] {
-            match message.role {
-                SessionMessageRole::User => {
-                    self.messages.push(ChatCompletionRequestMessage::User(
-                        ChatCompletionRequestUserMessage {
-                            content: message.content.clone().into(),
-                            ..Default::default()
-                        },
-                    ));
-                }
-                SessionMessageRole::Assistant => {
-                    self.messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: Some(message.content.clone().into()),
-                            ..Default::default()
-                        },
-                    ));
-                }
-            }
+            self.messages.push(session_message_to_chat(message));
         }
         self.messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
@@ -899,7 +941,6 @@ impl SingleAgentPlan {
                 ..Default::default()
             },
         ));
-        trim_messages_to_context(&mut self.messages, self.template.model.context_size);
     }
 
     async fn consume_model(
@@ -981,8 +1022,7 @@ impl SingleAgentPlan {
             let pending = self.session.take_pending_inputs();
             if !pending.is_empty() {
                 self.append_user_inputs(pending).await?;
-                self.stage = SingleAgentStage::Model;
-                return Ok(PlanNext::Tasks(vec![self.model_task()?]));
+                return Ok(PlanNext::Tasks(vec![self.next_model_task()?]));
             }
 
             self.stage = SingleAgentStage::Save;
@@ -1137,8 +1177,7 @@ impl SingleAgentPlan {
         if *remaining == 0 {
             let pending = self.session.take_pending_inputs();
             self.append_user_inputs(pending).await?;
-            self.stage = SingleAgentStage::Model;
-            Ok(PlanNext::Tasks(vec![self.model_task()?]))
+            Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
         } else {
             Ok(PlanNext::Tasks(Vec::new()))
         }
@@ -1181,8 +1220,20 @@ impl Plan for SingleAgentPlan {
                 self.prepare_messages(&messages);
                 let pending = self.session.take_pending_inputs();
                 self.append_user_inputs(pending).await?;
-                self.stage = SingleAgentStage::Model;
-                Ok(PlanNext::Tasks(vec![self.model_task()?]))
+                Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
+            }
+            SingleAgentStage::Compression => {
+                let response =
+                    TaskResp::<WorkflowActionResponse>::try_from_response(&mut task_result)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("expected WorkflowActionResponse after compression")
+                        })?;
+                let content = response.resp.output.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("compression runtime returned a non-string output")
+                })?;
+                Ok(PlanNext::Tasks(vec![
+                    self.apply_compression(content.to_string())?,
+                ]))
             }
             SingleAgentStage::Model => {
                 let response = TaskResp::<ModelResponse>::try_from_response(&mut task_result)
@@ -1221,8 +1272,7 @@ impl Plan for SingleAgentPlan {
 
                 if let Some(pending) = self.session.finish_or_take_pending() {
                     self.append_user_inputs(pending).await?;
-                    self.stage = SingleAgentStage::Model;
-                    Ok(PlanNext::Tasks(vec![self.model_task()?]))
+                    Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
                 } else {
                     self.finish_on_drop = true;
                     self.emit(
@@ -1299,19 +1349,34 @@ impl ToolCallAccumulator {
     }
 }
 
-fn trim_messages_to_context(messages: &mut Vec<ChatCompletionRequestMessage>, context_size: usize) {
-    let estimated_tokens = |message: &ChatCompletionRequestMessage| {
-        serde_json::to_string(message)
-            .map(|json| json.chars().count().div_ceil(4).max(1))
-            .unwrap_or(1)
-    };
-    while messages.len() > 2 && messages.iter().map(estimated_tokens).sum::<usize>() > context_size
-    {
-        let remove_at = usize::from(matches!(
-            messages.first(),
-            Some(ChatCompletionRequestMessage::System(_))
-        ));
-        messages.remove(remove_at);
+fn estimated_tokens(value: &impl Serialize) -> usize {
+    serde_json::to_string(value)
+        .map(|json| json.chars().count().div_ceil(4).max(1))
+        .unwrap_or(1)
+}
+
+fn summary_chat_message(content: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+        content: format!("Compressed conversation context:\n{content}").into(),
+        ..Default::default()
+    })
+}
+
+fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMessage {
+    match &message.role {
+        SessionMessageRole::User => {
+            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                content: message.content.clone().into(),
+                ..Default::default()
+            })
+        }
+        SessionMessageRole::Assistant => {
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: Some(message.content.clone().into()),
+                ..Default::default()
+            })
+        }
+        SessionMessageRole::Summary => summary_chat_message(&message.content),
     }
 }
 
@@ -1342,6 +1407,17 @@ mod tests {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn model_config_defaults_context_size_to_32k() {
+        let config: SingleAgentModelConfig = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "history_turns": 10
+        }))
+        .unwrap();
+
+        assert_eq!(config.context_size, 32_000);
     }
 
     #[tokio::test]
@@ -1472,37 +1548,100 @@ mod tests {
     }
 
     #[test]
-    fn context_limit_keeps_system_and_latest_user_message() {
-        let mut messages = vec![
-            ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                content: "system".into(),
-                ..Default::default()
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: "old question".into(),
-                ..Default::default()
-            }),
-            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                content: Some("old answer".into()),
-                ..Default::default()
-            }),
-            ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: "latest question".into(),
-                ..Default::default()
-            }),
-        ];
+    fn oversized_context_requests_compression_before_model() {
+        let mut template = test_template();
+        template.model.context_size = 1;
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            template,
+            "a long input that exceeds the configured context".to_string(),
+            1,
+            CommonSession::new(),
+        );
+        plan.prepare_messages(&[]);
 
-        trim_messages_to_context(&mut messages, 1);
+        let mut task = plan.next_model_task().unwrap();
 
-        assert_eq!(messages.len(), 2);
+        assert!(matches!(plan.stage, SingleAgentStage::Compression));
+        assert_eq!(
+            task.meta.ty,
+            TaskType::Any(COMPRESSION_TASK_TYPE.to_string())
+        );
+        let request = TaskReq::<WorkflowActionRequest>::try_from_request(&mut task).unwrap();
+        assert_eq!(request.req.action, "compression");
+        assert_eq!(request.req.payload["model"], "test-model");
+        assert!(
+            request.req.payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("long input")
+        );
+    }
+
+    #[test]
+    fn compressed_content_replaces_context_and_is_saved() {
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "current question".to_string(),
+            1,
+            CommonSession::new(),
+        );
+        plan.prepare_messages(&[
+            SessionMessage::user("old question"),
+            SessionMessage::assistant("old answer"),
+        ]);
+
+        let mut task = plan
+            .apply_compression("condensed history and current question".to_string())
+            .unwrap();
+
+        assert!(matches!(plan.stage, SingleAgentStage::Model));
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![
+                SessionMessage::user("current question"),
+                SessionMessage::summary("condensed history and current question")
+            ]
+        );
+        let request = TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut task).unwrap();
+        assert_eq!(request.req.messages.len(), 2);
         assert!(matches!(
-            messages.first(),
+            request.req.messages.first(),
             Some(ChatCompletionRequestMessage::System(_))
         ));
         assert!(matches!(
-            messages.last(),
-            Some(ChatCompletionRequestMessage::User(_))
+            request.req.messages.last(),
+            Some(ChatCompletionRequestMessage::User(message))
+                if serde_json::to_string(&message.content)
+                    .unwrap()
+                    .contains("condensed history")
         ));
+    }
+
+    #[test]
+    fn history_loading_stops_at_latest_summary() {
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "latest question".to_string(),
+            1,
+            CommonSession::new(),
+        );
+
+        plan.prepare_messages(&[
+            SessionMessage::user("discarded question"),
+            SessionMessage::assistant("discarded answer"),
+            SessionMessage::summary("compressed history"),
+            SessionMessage::assistant("answer after summary"),
+        ]);
+
+        let serialized = serde_json::to_string(&plan.messages).unwrap();
+        assert!(!serialized.contains("discarded question"));
+        assert!(!serialized.contains("discarded answer"));
+        assert!(serialized.contains("compressed history"));
+        assert!(serialized.contains("answer after summary"));
+        assert!(serialized.contains("latest question"));
     }
 
     #[test]
