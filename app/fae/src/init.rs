@@ -54,7 +54,7 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
         },
         model: SingleAgentModelConfig {
             model: args.model.clone(),
-            context_size: 32_000,
+            trigger_compression_size: 32_000,
             history_turns: 20,
             max_completion_tokens: Some(65_536),
             temperature: None,

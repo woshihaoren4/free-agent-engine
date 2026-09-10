@@ -363,7 +363,10 @@ async fn initial_model(
             ..Default::default()
         },
     ));
-    trim_messages_to_context(&mut messages, input.setup.config.model.context_size);
+    trim_messages_to_context(
+        &mut messages,
+        input.setup.config.model.trigger_compression_size,
+    );
 
     let state = AgentState {
         setup: input.setup,
@@ -526,13 +529,17 @@ fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMes
     }
 }
 
-fn trim_messages_to_context(messages: &mut Vec<ChatCompletionRequestMessage>, context_size: usize) {
+fn trim_messages_to_context(
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+    trigger_compression_size: usize,
+) {
     let estimated_tokens = |message: &ChatCompletionRequestMessage| {
         serde_json::to_string(message)
             .map(|json| json.chars().count().div_ceil(4).max(1))
             .unwrap_or(1)
     };
-    while messages.len() > 2 && messages.iter().map(estimated_tokens).sum::<usize>() > context_size
+    while messages.len() > 2
+        && messages.iter().map(estimated_tokens).sum::<usize>() > trigger_compression_size
     {
         let remove_at = usize::from(matches!(
             messages.first(),

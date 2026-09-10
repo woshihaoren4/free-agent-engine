@@ -41,8 +41,8 @@ pub struct SingleAgentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleAgentModelConfig {
     pub model: String,
-    #[serde(default = "default_context_size")]
-    pub context_size: usize,
+    #[serde(default = "default_trigger_compression_size")]
+    pub trigger_compression_size: usize,
     pub history_turns: usize,
     #[serde(default = "default_max_completion_tokens")]
     pub max_completion_tokens: Option<u32>,
@@ -72,15 +72,15 @@ pub enum SingleAgentSource {
 }
 
 const fn default_max_tool_iterations() -> usize {
-    8
+    32
 }
 
-const fn default_context_size() -> usize {
+const fn default_trigger_compression_size() -> usize {
     32_000
 }
 
 const fn default_max_completion_tokens() -> Option<u32> {
-    Some(65_536)
+    Some(32_000)
 }
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
@@ -561,8 +561,8 @@ fn validate_config(config: &SingleAgentConfig) -> anyhow::Result<()> {
         "model cannot be empty"
     );
     anyhow::ensure!(
-        config.model.context_size > 0,
-        "context_size must be positive"
+        config.model.trigger_compression_size > 0,
+        "trigger_compression_size must be positive"
     );
     anyhow::ensure!(
         config.model.max_tool_iterations > 0,
@@ -840,7 +840,7 @@ impl SingleAgentPlan {
 
     fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
         let request = self.model_request();
-        if estimated_tokens(&request) > self.template.model.context_size {
+        if estimated_tokens(&request) > self.template.model.trigger_compression_size {
             let content = serde_json::to_string(
                 &request
                     .messages
@@ -878,9 +878,9 @@ impl SingleAgentPlan {
 
         let request = self.model_request();
         anyhow::ensure!(
-            estimated_tokens(&request) <= self.template.model.context_size,
-            "compressed model request still exceeds context_size ({})",
-            self.template.model.context_size
+            estimated_tokens(&request) <= self.template.model.trigger_compression_size,
+            "compressed model request still exceeds trigger_compression_size ({})",
+            self.template.model.trigger_compression_size
         );
         self.stage = SingleAgentStage::Model;
         Ok(self.task(TaskType::Model, request))
@@ -1435,7 +1435,7 @@ mod tests {
             },
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
-                context_size: 8_192,
+                trigger_compression_size: 8_192,
                 history_turns: 10,
                 max_completion_tokens: Some(1_024),
                 temperature: Some(0.0),
@@ -1455,8 +1455,23 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(config.context_size, 32_000);
-        assert_eq!(config.max_completion_tokens, Some(65_536));
+        assert_eq!(config.trigger_compression_size, 32_000);
+        assert_eq!(config.max_completion_tokens, Some(32_000));
+    }
+
+    #[test]
+    fn model_config_uses_trigger_compression_size_field() {
+        let config: SingleAgentModelConfig = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "trigger_compression_size": 16_000,
+            "history_turns": 10
+        }))
+        .unwrap();
+
+        assert_eq!(config.trigger_compression_size, 16_000);
+        let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["trigger_compression_size"], 16_000);
+        assert!(value.get("context_size").is_none());
     }
 
     #[tokio::test]
@@ -1589,7 +1604,7 @@ mod tests {
     #[test]
     fn oversized_context_requests_compression_before_model() {
         let mut template = test_template();
-        template.model.context_size = 1;
+        template.model.trigger_compression_size = 1;
         let mut plan = SingleAgentPlan::new(
             Ctx::null(),
             template,
@@ -2155,7 +2170,7 @@ mod tests {
             prompt: "be concise".to_string(),
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
-                context_size: 1_024,
+                trigger_compression_size: 1_024,
                 history_turns: 2,
                 max_completion_tokens: None,
                 temperature: None,

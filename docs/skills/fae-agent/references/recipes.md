@@ -111,7 +111,7 @@ fae agent --agent-id implementer
 {
   "model": {
     "model": "gpt-5",
-    "context_size": 64000,
+    "trigger_compression_size": 64000,
     "history_turns": 10,
     "max_completion_tokens": 8192,
     "temperature": 0.1,
@@ -322,7 +322,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 - 检查是否保留 `agent` 和 `model` 两个完整对象。
 - 检查 `skills` 是否使用 `{"type","value"}`，而不是纯字符串。
 - 检查 `agent.name` 是否与运行时 Agent ID 相同。
-- 检查 `context_size` 和 `max_tool_iterations` 是否大于 0。
+- 检查 `trigger_compression_size` 和 `max_tool_iterations` 是否大于 0。
 
 ### 模型不可用
 

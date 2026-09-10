@@ -33,7 +33,7 @@ The generated configuration has this shape:
   },
   "model": {
     "model": "gpt-4o-mini",
-    "context_size": 32000,
+    "trigger_compression_size": 32000,
     "history_turns": 20,
     "max_completion_tokens": 65536,
     "temperature": null,
