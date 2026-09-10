@@ -1,60 +1,65 @@
-# FAE Agent API
+# FAE Agent 配置参考
 
-## 1. 核心类型
+本文说明如何使用 `fae` 命令和磁盘配置创建、修改及运行 Agent。
 
-| 类型 | 职责 |
-| --- | --- |
-| `SingleAgentInfo` | Agent 名称、用户、会话 ID 和 metadata |
-| `SingleAgentModelConfig` | 模型、上下文、历史和工具迭代限制 |
-| `SingleAgentConfig` | JSON 中的完整静态配置 |
-| `SingleAgentSource` | 通过 agent ID 或显式路径定位配置与 prompt |
-| `SingleAgentEnv` | 一次执行的配置来源、输入和 session |
-| `SingleAgentPlanBuilder` | 加载配置并构造 `SingleAgentPlan` |
-| `CommonSession` | 提交后续输入并接收流式事件 |
+## 1. 创建 Agent
 
-## 2. 配置来源
+创建默认 `fae` Agent：
 
-### Agent ID
-
-```rust
-let (env, session) =
-    SingleAgentEnv::from_agent_id("reviewer", "Review Cargo.toml");
+```bash
+fae init
 ```
 
-默认路径：
+指定 Agent ID 和模型：
+
+```bash
+fae init --agent-id reviewer --model gpt-5
+```
+
+在自定义 home 中创建：
+
+```bash
+fae --fae-home /path/to/fae-home init --agent-id reviewer --model gpt-5
+```
+
+`--model` 省略时优先读取 `FAE_DEFAULT_MODEL`，否则默认使用 `gpt-4o-mini`。
+
+若 config 已存在，`fae init` 会拒绝覆盖。确认需要重建后使用：
+
+```bash
+fae init --agent-id reviewer --model gpt-5 --force
+```
+
+`--force` 只替换 `<agent-id>_config.json`，不会创建或覆盖 `<agent-id>_prompt.txt`。
+
+## 2. 文件位置
+
+Agent ID 为 `reviewer` 时：
 
 ```text
 ${FAE_HOST:-~/.fae}/agents/reviewer_config.json
 ${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt
 ```
 
-agent ID 必须是单个非空路径组件，不能使用 `../reviewer`、`team/reviewer` 等路径。配置中的
-`agent.name` 必须等于请求的 agent ID。
+相关目录：
 
-### 显式路径
-
-```rust
-let (env, session) = SingleAgentEnv::from_paths(
-    "/opt/fae/reviewer.json",
-    "/opt/fae/reviewer.txt",
-    "Review Cargo.toml",
-);
+```text
+${FAE_HOST:-~/.fae}/
+├── agents/
+├── memory/
+├── mcp/
+├── skills/
+└── workflows/
 ```
 
-显式路径不要求文件名后缀，也不要求 `agent.name` 与文件名一致。库接口不会展开 `~`；调用方应传入
-已经解析的路径。
+规则：
 
-通用构造方式：
+- Agent ID 必须是单个非空路径组件，不能包含 `/`、`\` 或 `..`。
+- 按 ID 加载时，config 中的 `agent.name` 必须等于 Agent ID。
+- config 必须是合法 JSON。
+- prompt 必须是纯文本文件。
 
-```rust
-let source = SingleAgentSource::Paths {
-    config: config_path,
-    prompt: prompt_path,
-};
-let (env, session) = SingleAgentEnv::new(source, input);
-```
-
-## 3. JSON 配置
+## 3. Agent Config
 
 完整结构：
 
@@ -69,7 +74,7 @@ let (env, session) = SingleAgentEnv::new(source, input);
     }
   },
   "model": {
-    "model": "gpt-xxx",
+    "model": "gpt-5",
     "context_size": 32000,
     "history_turns": 20,
     "max_completion_tokens": 4096,
@@ -78,187 +83,284 @@ let (env, session) = SingleAgentEnv::new(source, input);
   },
   "tools": ["read_file", "execute_command"],
   "skills": [
-    { "type": "name", "value": "weather" },
-    { "type": "path", "value": "/opt/fae/skills/review/SKILL.md" }
+    {
+      "type": "name",
+      "value": "fae-agent"
+    },
+    {
+      "type": "path",
+      "value": "/workspace/skills/reviewer/SKILL.md"
+    }
   ],
   "mcp_servers": ["maps"]
 }
 ```
 
-字段规则：
+### Agent 字段
 
 | 字段 | 规则 |
 | --- | --- |
-| `agent.name` | 非空；按 ID 加载时必须与 ID 相同 |
-| `agent.user_id` | 非空；用于会话历史路径 |
-| `agent.session_id` | 非空；用于会话历史路径 |
-| `agent.metadata` | 可省略，默认为空对象 |
-| `model.model` | 非空，必须可被 `ModelRuntime` 使用 |
-| `model.context_size` | 大于 0 |
-| `model.history_turns` | 可为 0；每轮按 user/assistant 两条消息读取 |
+| `agent.name` | 非空；按 ID 运行时必须与 Agent ID 相同 |
+| `agent.user_id` | 非空；参与确定会话历史路径 |
+| `agent.session_id` | 非空；参与确定会话历史路径 |
+| `agent.metadata` | 可省略，默认为空对象；用于保存业务标签 |
+
+修改 `user_id` 或 `session_id` 会切换到另一份持久化历史。需要保持上下文时，不要随意更改。
+
+### Model 字段
+
+| 字段 | 规则 |
+| --- | --- |
+| `model.model` | 非空；必须是当前模型服务可用的模型名 |
+| `model.context_size` | 必须大于 0 |
+| `model.history_turns` | 可为 0；控制读取多少轮历史 |
 | `model.max_completion_tokens` | 可省略或为 `null` |
 | `model.temperature` | 可省略或为 `null` |
 | `model.max_tool_iterations` | 可省略，默认 8；显式值必须大于 0 |
-| `tools` | 可省略，默认为空数组 |
-| `skills` | 可省略，默认为空数组 |
-| `mcp_servers` | 可省略，默认为空数组 |
 
-system prompt 必须保存在独立文本文件中。Builder 会在 prompt 后附加已解析 Skill 的名称、描述与
-`SKILL.md` 路径。
+`max_tool_iterations` 用于限制单轮连续工具调用，避免 Agent 无限循环。只有确认任务确实需要更多
+步骤时才提高。
 
-## 4. Builder
+### 可选能力字段
 
-默认 home：
+| 字段 | 含义 | 省略值 |
+| --- | --- | --- |
+| `tools` | Agent 可直接调用的内置工具 | `[]` |
+| `skills` | 注入到 Agent 上下文的 Skill | `[]` |
+| `mcp_servers` | Agent 可访问的 MCP server | `[]` |
 
-```rust
-let builder = SingleAgentPlanBuilder::new();
+## 4. System Prompt
+
+`reviewer_prompt.txt` 只保存 Agent 的长期行为约束，例如：
+
+```text
+You are a code reviewer.
+
+Focus on correctness, regressions, security, and missing tests.
+Inspect relevant files before reaching conclusions.
+Report findings by severity and include precise file references.
+Keep the final summary concise.
 ```
 
-测试或嵌入场景使用隔离目录：
+建议包含：
 
-```rust
-let builder = SingleAgentPlanBuilder::with_home_dir(temp_dir);
-assert_eq!(builder.home_dir(), temp_dir.as_ref());
-```
+- Agent 的角色和主要目标。
+- 必须执行的步骤和质量标准。
+- 禁止事项和权限边界。
+- 输出语言、结构和详略要求。
+- 使用 Tool、Skill 或 MCP 的判断原则。
 
-预检配置：
+不要包含：
 
-```rust
-let source = SingleAgentSource::AgentId("reviewer".into());
-let (config, prompt) = builder.load_config(&source).await?;
-```
+- 某一次任务的具体输入。
+- 密钥、token 或其他敏感信息。
+- 与 config 重复的模型名、会话 ID 或能力列表。
+- 无法通过当前 Tool、Skill 或 MCP 实现的承诺。
 
-`load_config` 会读取并反序列化文件、校验必填字段和数值，并检查 ID 与 `agent.name`。Tool、
-Skill 和 MCP 是否真实存在，要到 plan 构建阶段通过对应 runtime 查询后才能确定。
+修改 prompt 后重新启动 `fae agent`，新会话运行会读取最新内容。
 
-注册自定义 builder：
+## 5. 内置 Tool
 
-```rust
-let mut engine = EngineBuilder::new();
-engine.add_runtime(PlanRuntime::new());
-engine.add_runtime(ModelRuntime::new());
-engine.add_runtime(SessionRuntime::with_host_dir(&home));
-engine.add_plan_builder(SingleAgentPlanBuilder::with_home_dir(&home));
-```
-
-同一个 engine 中所有依赖磁盘的 runtime 应使用同一个 home，避免 agent 配置、会话和 Skill
-来自不同目录。
-
-## 5. Runtime 依赖
-
-| 配置能力 | 必需组件 |
-| --- | --- |
-| 基础模型调用 | `PlanRuntime`、`ModelRuntime`、`SessionRuntime`、`SingleAgentPlanBuilder` |
-| `tools` 非空 | 能按工具名查询和执行的 `ToolsRuntime` |
-| `skills` 非空 | `SkillRuntime` |
-| `mcp_servers` 非空 | `McpRuntime` |
-
-`Engine::default().await` 已注册上述默认组件、`DefaultTools` 和 SingleAgent builder。
-
-自定义 engine 示例：
-
-```rust
-let mut builder = EngineBuilder::new();
-builder.add_runtime(PlanRuntime::new());
-builder.add_runtime(ModelRuntime::new());
-builder.add_runtime(SessionRuntime::new());
-builder.add_runtime(SkillRuntime::new());
-builder.add_runtime(McpRuntime::new());
-
-let mut tools = ToolsRuntime::new();
-tools.add_tool(Box::new(DefaultTools::default()));
-builder.add_runtime(tools);
-
-builder.add_plan_builder(SingleAgentPlanBuilder::new());
-let engine = builder.build().await;
-```
-
-## 6. Tool、Skill 与 MCP 路由
-
-### Tool
-
-配置中的每个 `tools` 名称会通过 `TaskType::Tool` 查询函数定义。模型返回的函数名会映射回配置的
-runtime 工具名。多个工具不能暴露相同的模型函数名。
-
-### Skill
-
-`SkillQuery` JSON 使用 tagged 结构：
+`fae init` 默认启用：
 
 ```json
-{ "type": "name", "value": "weather" }
+[
+  "execute_command",
+  "read_file",
+  "write_file",
+  "list_directory",
+  "apply_patch",
+  "send_http_request",
+  "execute_python"
+]
 ```
 
-名称查询默认定位到 `${FAE_HOST:-~/.fae}/skills/<name>/SKILL.md`。路径查询可指向一个
-`SKILL.md` 或包含多个 Skill 的目录。
+按最小权限原则删除不需要的工具。例如只读审查 Agent 可保留：
 
-Skill 不会自动变成函数工具。Builder 只将 Skill metadata 和路径加入 system prompt，由模型按需
-读取和遵循。
-
-### MCP
-
-`mcp_servers` 中的名称由 `McpRuntime` 从 FAE home 的 `mcp` 目录查找。每个 MCP 工具向模型暴露
-为 `<server>__<tool_name>`，避免不同 server 的普通工具名冲突。该名称仍不能与普通 Tool 暴露的
-函数名重复。
-
-## 7. 会话与多轮
-
-首次执行：
-
-```rust
-let (env, session) = SingleAgentEnv::from_agent_id("reviewer", first_input);
-let execution = engine.launch(env).await?;
-consume_turn(&session).await?;
-execution.result::<()>().await?;
-```
-
-后续轮次复用同一个 session：
-
-```rust
-session
-    .call(SessionInput::NewChat(
-        "Now propose a fix.".into(),
-    ))
-    .await?;
-consume_turn(&session).await?;
-```
-
-注意：
-
-- session 在首次 plan 构建时绑定 engine；绑定前调用 `call` 会失败。
-- `SessionInput::Supplement` 将输入追加到仍在运行的当前轮次。
-- `SessionInput::NewChat` 会等待当前轮次退出，然后启动新轮次。
-- `user_id` 与 `session_id` 对应持久化文件
-  `${FAE_HOST:-~/.fae}/memory/<user_id>/session/<session_id>.jsonl`。
-- 每轮完成后保存 user 与 assistant 消息。
-
-## 8. 事件
-
-`SessionOutput` 提供父计划、当前计划、节点、runtime、事件类型和 JSON 输出。
-可通过 `event.event_data()?` 恢复为 `SessionEventData`：
-
-| 事件 | 含义 |
-| --- | --- |
-| `TurnStarted` | 新一轮开始 |
-| `UserInput` | 活跃轮次吸收了追加输入 |
-| `ModelReasoning` | 流式 reasoning 增量 |
-| `ModelOutput` | 流式正文增量 |
-| `ToolCall` | 模型发起 Tool 或 MCP 调用 |
-| `ToolOutput` | 工具流式或最终输出 |
-| `Completed` | 当前轮完成 |
-| `Failed` | 当前轮失败 |
-
-独立 SingleAgent 中，`Completed` 和 `Failed` 是终止事件，可使用 `event.is_terminal()` 判断。
-嵌入 workflow 后事件还会带 `workflow_id` 与 `node_id`；此时 Agent 的轮次结束不等于整个
-workflow 结束。
-
-## 9. Workflow 中使用
-
-```rust
-WorkflowAction::SingleAgent {
-    source: SingleAgentSource::AgentId("reviewer".into()),
-    input: json!("Review: {$input.content}"),
+```json
+{
+  "tools": ["read_file", "list_directory"]
 }
 ```
 
-Workflow 会创建绑定到父 `CommonSession` 的 child session，并转发 Agent 事件。引擎必须同时
-注册 `WorkflowPlanBuilder` 与 `SingleAgentPlanBuilder`，且其 home 配置应保持一致。
+工具名必须与 `fae` 注册名称完全一致。模型是否调用工具还取决于模型能力、prompt 和具体任务。
+
+## 6. Skill
+
+按名称加载已安装 Skill：
+
+```json
+{
+  "skills": [
+    {
+      "type": "name",
+      "value": "fae-agent"
+    }
+  ]
+}
+```
+
+对应默认路径：
+
+```text
+${FAE_HOST:-~/.fae}/skills/fae-agent/SKILL.md
+```
+
+按路径加载：
+
+```json
+{
+  "skills": [
+    {
+      "type": "path",
+      "value": "/workspace/skills/reviewer/SKILL.md"
+    }
+  ]
+}
+```
+
+`fae init` 只收集初始化当时已经安装在 `<home>/skills/` 下的 Skill。之后新增或删除 Skill 时，
+手工同步 config，或确认可接受重置其他配置后使用 `fae init --force` 重新生成。
+
+Skill 提供工作指引，不会自动赋予工具能力。Skill 依赖的工具仍需出现在 `tools` 或
+`mcp_servers` 中。
+
+## 7. MCP
+
+Agent config 通过 server 名称启用 MCP：
+
+```json
+{
+  "mcp_servers": ["maps"]
+}
+```
+
+名称必须与 `${FAE_HOST:-~/.fae}/mcp/` 下 MCP 配置中的 `mcpServers` key 一致：
+
+```json
+{
+  "mcpServers": {
+    "maps": {
+      "command": "maps-mcp-server",
+      "args": [],
+      "env": {}
+    }
+  }
+}
+```
+
+远程 MCP 示例：
+
+```json
+{
+  "mcpServers": {
+    "maps": {
+      "url": "https://example.test/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MAPS_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+不要把真实 token 写入共享配置或提交到仓库。Agent 可见的 MCP 工具名通常为
+`<server>__<tool>`。
+
+## 8. 运行 Agent
+
+交互运行：
+
+```bash
+fae agent --agent-id reviewer
+```
+
+直接提交第一条消息：
+
+```bash
+fae agent --agent-id reviewer "review this workspace"
+```
+
+`fae` 不带子命令时等价于运行默认 `fae` Agent：
+
+```bash
+fae
+fae "summarize the current workspace"
+```
+
+使用显式 config 和 prompt：
+
+```bash
+fae agent \
+  --agent-config /path/to/reviewer_config.json \
+  --agent-prompt /path/to/reviewer_prompt.txt \
+  "review this workspace"
+```
+
+两项显式路径必须同时提供。保留终端滚动记录：
+
+```bash
+fae --no-alt-screen agent --agent-id reviewer
+```
+
+禁用颜色：
+
+```bash
+fae --color never agent --agent-id reviewer
+```
+
+会话内命令：
+
+| 命令 | 用途 |
+| --- | --- |
+| `/help` | 显示命令 |
+| `/status` | 显示模型和 session |
+| `/clear` | 清空当前界面内容 |
+| `/exit`、`/quit` | 退出 |
+
+`/clear` 只清空界面，不删除磁盘会话历史。
+
+## 9. 会话历史
+
+历史默认保存在：
+
+```text
+${FAE_HOST:-~/.fae}/memory/<user_id>/session/<session_id>.jsonl
+```
+
+`history_turns` 控制新一轮读取的历史轮数。排查上下文问题时检查：
+
+- `user_id` 和 `session_id` 是否仍是预期值。
+- 是否切换了 `FAE_HOST` 或 `--fae-home`。
+- `history_turns` 是否为 0 或过小。
+- 历史文件是否存在且属于当前 Agent。
+
+不同用途的 Agent 应使用不同 `session_id`，避免不相关上下文互相污染。
+
+## 10. 验证配置
+
+当前 `fae` 没有独立的 Agent config validate 子命令。使用最小请求完成加载和连接验证：
+
+```bash
+fae agent --agent-id reviewer "Reply with OK only."
+```
+
+需要验证 Tool：
+
+```bash
+fae agent --agent-id reviewer "List the current directory using an available tool."
+```
+
+需要验证 Skill：
+
+```bash
+fae agent --agent-id reviewer "List the skills available to you and use fae-agent guidance."
+```
+
+需要验证 MCP：
+
+```bash
+fae agent --agent-id reviewer "List the tools available from the maps MCP server."
+```
+
+验证请求应最小且无破坏性。确认读取能力后，再测试写文件、执行命令或外部请求。

@@ -1,380 +1,485 @@
-# FAE Workflow Recipes
+# FAE Workflow 配置配方
+
+以下配方均以 `${FAE_HOST:-~/.fae}/workflows/` 为根目录。复制完整 JSON 后，修改 ID、节点和业务
+参数，不要改成 Rust Builder。
 
 ## 1. 串行 Tool Workflow
 
-```rust
-fn build_read_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut builder = WorkflowMetadataBuilder::new("read-workflow");
-    builder.start("start", "read")?;
-    builder.execute(
-        "read",
-        WorkflowAction::Tool {
-            tool_name: READ_FILE.to_string(),
-            arguments: json!({
-                "path": "{$input.path}",
-                "max_bytes": 8192
-            }),
-        },
-        "end",
-    )?;
-    builder.end(
-        "end",
-        Some(json!({
-            "path": "{$read.path}",
-            "content": "{$read.content}",
-            "truncated": "{$read.truncated}"
-        })),
-    )?;
-    builder.build()
+保存为 `read-file.json`：
+
+```json
+{
+  "version": 1,
+  "id": "read-file",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["read"]
+    },
+    "read": {
+      "type": "execute",
+      "action": {
+        "type": "tool",
+        "tool_name": "read_file",
+        "arguments": {
+          "path": "{$input.path}",
+          "max_bytes": 8192
+        }
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": {
+        "path": "{$read.path}",
+        "content": "{$read.content}",
+        "truncated": "{$read.truncated}"
+      }
+    }
+  }
 }
 ```
 
-适合需要确定顺序和前一步输出的流程。优先显式定义 end output。
+运行：
+
+```bash
+fae workflow read-file --input '{"path":"Cargo.toml"}'
+```
+
+适合步骤固定、后一步依赖前一步输出的流程。
 
 ## 2. 条件分支
 
-```rust
-let mut builder = WorkflowMetadataBuilder::new("approval");
-builder.start("start", "route")?;
-builder.decision(
-    "route",
-    WorkflowCondition::Compare {
-        left: json!("{$input.score}"),
-        op: WorkflowCompare::Ge,
-        right: json!(80),
+保存为 `score-route.json`：
+
+```json
+{
+  "version": 1,
+  "id": "score-route",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["route"]
     },
-    "approved",
-    "rejected",
-)?;
-builder.execute("approved", approved_action, "end")?;
-builder.execute("rejected", rejected_action, "end")?;
-builder.end(
-    "end",
-    Some(json!({
-        "approved": "{$route}",
-        "input": "{$input}"
-    })),
-)?;
+    "route": {
+      "type": "decision",
+      "condition": {
+        "type": "compare",
+        "left": "{$input.score}",
+        "op": "ge",
+        "right": 80
+      },
+      "on_true": ["approved"],
+      "on_false": ["rejected"]
+    },
+    "approved": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"approved\": True, \"reason\": \"score accepted\"}"
+      },
+      "next": ["end"]
+    },
+    "rejected": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"approved\": False, \"reason\": \"score too low\"}"
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end"
+    }
+  }
+}
 ```
 
-不要在 end 中无条件引用只在一个分支执行的节点。可直接读取 decision 节点的布尔输出，或让两个
-分支输出统一结构并在汇合节点中处理。
+```bash
+fae workflow score-route --input '{"score":86}'
+```
+
+两个分支都输出相同结构，因此可以安全使用 end 的隐式分支结果。若分支输出结构不同，应在每个
+分支后做归一化；不要在 end 中引用只会执行其中一个的节点。
 
 ## 3. 并行 Fan-out 与 Join
 
-```rust
-let mut builder = WorkflowMetadataBuilder::new("parallel-review");
-builder.start("start", ["review_code", "review_manifest"])?;
-builder.execute("review_code", code_action, "summarize")?;
-builder.execute("review_manifest", manifest_action, "summarize")?;
-builder.execute(
-    "summarize",
-    WorkflowAction::Custom {
-        task_type: "review.summary".into(),
-        request: json!({
-            "code": "{$review_code}",
-            "manifest": "{$review_manifest}"
-        }),
+保存为 `parallel-inspect.json`：
+
+```json
+{
+  "version": 1,
+  "id": "parallel-inspect",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["read_source", "read_manifest"]
     },
-    "end",
-)?;
-builder.end("end", Some(json!("{$summarize}")))?;
+    "read_source": {
+      "type": "execute",
+      "action": {
+        "type": "tool",
+        "tool_name": "read_file",
+        "arguments": {
+          "path": "{$input.source_path}",
+          "max_bytes": 16384
+        }
+      },
+      "next": ["summarize"]
+    },
+    "read_manifest": {
+      "type": "execute",
+      "action": {
+        "type": "tool",
+        "tool_name": "read_file",
+        "arguments": {
+          "path": "{$input.manifest_path}",
+          "max_bytes": 8192
+        }
+      },
+      "next": ["summarize"]
+    },
+    "summarize": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"source_bytes\": len(arguments[\"source\"]), \"manifest_bytes\": len(arguments[\"manifest\"])}",
+        "arguments": {
+          "source": "{$read_source.content}",
+          "manifest": "{$read_manifest.content}"
+        }
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": "{$summarize}"
+    }
+  }
+}
 ```
 
-`summarize` 有两个前驱，因此只有两个分支都完成后才执行。分支返回顺序不保证与提交顺序一致，
-不要依赖完成顺序。
-
-可在任意 `Execute` 后 fan-out：
-
-```rust
-builder.execute("load", load_action, ["left", "right"])?;
+```bash
+fae workflow parallel-inspect --input \
+  '{"source_path":"src/main.rs","manifest_path":"Cargo.toml"}'
 ```
 
-条件也可以一次选择多个目标：
-
-```rust
-builder.decision("route", condition, ["check_a", "check_b"], ["skip"])?;
-```
+`summarize` 有两个前驱，只有两个活跃分支都完成后才执行。并行分支中使用明确节点 ID，不使用
+`{$last}`。
 
 ## 4. 有界循环
 
-```rust
-let mut builder = WorkflowMetadataBuilder::new("bounded-retry");
-builder.start("start", "initialize")?;
-builder.execute(
-    "initialize",
-    state_action(json!({ "remaining": "{$input.rounds}" })),
-    "retry",
-)?;
-builder.loop_node(
-    "retry",
-    WorkflowCondition::Compare {
-        left: json!("{$last.remaining}"),
-        op: WorkflowCompare::Gt,
-        right: json!(0),
+保存为 `bounded-countdown.json`：
+
+```json
+{
+  "version": 1,
+  "id": "bounded-countdown",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["initialize"]
     },
-    "decrement",
-    "end",
-    10,
-)?;
-builder.execute(
-    "decrement",
-    state_action(json!({
-        "remaining": "{$last.remaining}",
-        "iteration": "{$loop.retry.iteration}"
-    })),
-    "retry",
-)?;
-builder.end(
-    "end",
-    Some(json!({
-        "iterations": "{$loop.retry.iteration}",
-        "state": "{$last}"
-    })),
-)?;
+    "initialize": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"remaining\": arguments[\"rounds\"], \"completed\": 0}",
+        "arguments": {
+          "rounds": "{$input.rounds}"
+        }
+      },
+      "next": ["retry"]
+    },
+    "retry": {
+      "type": "loop",
+      "condition": {
+        "type": "compare",
+        "left": "{$last.remaining}",
+        "op": "gt",
+        "right": 0
+      },
+      "body": "decrement",
+      "next": "end",
+      "max_iterations": 10
+    },
+    "decrement": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"remaining\": arguments[\"remaining\"] - 1, \"completed\": arguments[\"iteration\"]}",
+        "arguments": {
+          "remaining": "{$last.remaining}",
+          "iteration": "{$loop.retry.iteration}"
+        }
+      },
+      "next": ["retry"]
+    },
+    "end": {
+      "type": "end",
+      "output": "{$last}"
+    }
+  }
+}
+```
+
+```bash
+fae workflow bounded-countdown --input '{"rounds":3}'
 ```
 
 循环注意事项：
 
-- 初始化 action 必须先生成条件需要的状态。
+- 进入 loop 前先生成条件需要的状态。
+- `max_iterations` 是故障保护，不能小于合法输入需要的最大次数。
 - 循环体必须返回 loop 节点。
-- `max_iterations` 是故障保护，不是期望次数；应根据输入设置合理上限。
-- Loop 不能与 fan-out 或多前驱 join 出现在同一个 workflow。需要二者时拆成父子 workflow。
-- 当循环可能零次执行时，`{$loop.retry.iteration}` 尚不存在。若 end 必须支持零次，避免直接引用
-  iteration，或在进入 loop 前生成可用的默认状态。
+- 输入为零时 `{$loop.retry.iteration}` 不存在，因此 end 使用 `{$last}`，兼容零次循环。
+- 同一配置不能同时使用 loop 和 fan-out；需要组合时拆成父子 workflow。
 
 ## 5. 父子 Workflow
 
-```rust
-fn child() -> anyhow::Result<WorkflowMetadata> {
-    let mut child = WorkflowMetadataBuilder::new("validate-order");
-    child.start("start", "end")?;
-    child.end(
-        "end",
-        Some(json!({
-            "order_id": "{$input.order_id}",
-            "status": "validated"
-        })),
-    )?;
-    child.build()
-}
+先保存子流程 `validate-order.json`：
 
-fn parent() -> anyhow::Result<WorkflowMetadata> {
-    let mut parent = WorkflowMetadataBuilder::new("process-order");
-    parent.start("start", "validate")?;
-    parent.execute(
-        "validate",
-        WorkflowAction::Workflow {
-            workflow_id: "validate-order".into(),
-            input: json!({ "order_id": "{$input.order.id}" }),
-        },
-        "end",
-    )?;
-    parent.end("end", Some(json!("{$validate}")))?;
-    parent.build()
-}
-
-loader.add(parent()?)?;
-loader.add(child()?)?;
-```
-
-父子流程共享同一 loader。为了组合并行和循环，可让 DAG 父流程调用包含 Loop 的顺序子流程。
-
-## 6. 从磁盘加载
-
-生成并保存：
-
-```rust
-let metadata = build_workflow()?;
-let root = std::env::var_os("FAE_HOST")
-    .map(PathBuf::from)
-    .unwrap_or_else(|| dirs::home_dir().unwrap().join(".fae"));
-let directory = root.join("workflows");
-tokio::fs::create_dir_all(&directory).await?;
-metadata
-    .save_json(directory.join(format!("{}.json", metadata.id)))
-    .await?;
-```
-
-运行时不需要预先 `add`：
-
-```rust
-let loader = FAEWorkflowMetadataLoader::new();
-let (env, _) = WorkflowEnv::new("workflow-id", input);
-```
-
-测试中使用隔离目录：
-
-```rust
-let loader = FAEWorkflowMetadataLoader::with_home_dir(temp_dir);
-```
-
-## 7. 自定义 Action Runtime
-
-Python 与 Custom action 都通过 `WorkflowActionRequest` / `WorkflowActionResponse` 扩展协议执行：
-
-```rust
-#[derive(Debug)]
-struct ActionRuntime {
-    event_sender: Sender<Event>,
-    event_receiver: Receiver<Event>,
-}
-
-#[async_trait::async_trait]
-impl RuntimeSelectExec<WorkflowActionRequest, WorkflowActionResponse, (), ()>
-    for ActionRuntime
+```json
 {
-    fn id(&self) -> &str {
-        "workflow.action"
+  "version": 1,
+  "id": "validate-order",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["validate"]
+    },
+    "validate": {
+      "type": "execute",
+      "action": {
+        "type": "python",
+        "code": "result = {\"order_id\": arguments[\"order_id\"], \"valid\": bool(arguments[\"order_id\"])}",
+        "arguments": {
+          "order_id": "{$input.order_id}"
+        }
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": "{$validate}"
     }
-
-    fn tys(&self) -> Vec<TaskType> {
-        vec![TaskType::Any("workflow.action".to_string())]
-    }
-
-    async fn watch(&self) -> fae_agent::Result<Receiver<Event>> {
-        Ok(self.event_receiver.clone())
-    }
-
-    async fn exec(
-        &self,
-        task: TaskReq<WorkflowActionRequest>,
-    ) -> fae_agent::Result<TaskResp<WorkflowActionResponse>> {
-        let output = execute_action(&task.req.action, &task.req.payload).await?;
-        Ok(TaskResp {
-            ctx: task.ctx,
-            meta: task.meta,
-            resp: WorkflowActionResponse { output },
-        })
-    }
-
-    async fn spawn(
-        &self,
-        task: TaskReq<WorkflowActionRequest>,
-    ) -> fae_agent::Result<()> {
-        // 按 RuntimeSelectExec 契约异步执行，并向 event_sender 发送
-        // EventType::TaskResult 或 EventType::TaskError。
-        todo!()
-    }
+  }
 }
 ```
 
-action 的 `task_type` 必须与 runtime 的 `TaskType::Any(...)` 完全一致。完整 spawn 实现参考
-`examples/workflow.rs` 的 `PythonActionRuntime`。
+再保存父流程 `process-order.json`：
 
-## 8. 实时事件与结果
-
-当 workflow 包含 SingleAgent 或耗时 action 时：
-
-```rust
-let (env, session) = WorkflowEnv::new("workflow-id", input);
-let execution = engine.launch(env).await?;
-
-let events = async {
-    while let Some(event) = session.answer().await? {
-        match event.event_data()? {
-            SessionEventData::ModelOutput { content } => print!("{content}"),
-            SessionEventData::NodeCompleted { output, .. } => {
-                println!("{}: {output}", event.node_id.as_deref().unwrap_or("-"));
-            }
-            SessionEventData::Failed { error } => eprintln!("{error}"),
-            _ => {}
+```json
+{
+  "version": 1,
+  "id": "process-order",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["validate"]
+    },
+    "validate": {
+      "type": "execute",
+      "action": {
+        "type": "workflow",
+        "workflow_id": "validate-order",
+        "input": {
+          "order_id": "{$input.order.id}"
         }
-        if event.is_terminal() {
-            break;
-        }
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": {
+        "order": "{$validate}"
+      }
     }
-    anyhow::Ok(())
-};
-
-let (output, ()) = tokio::try_join!(execution.result::<Value>(), events)?;
-```
-
-不要先调用 `invoke().await` 再开始消费实时事件；那只能在执行完成后读取积压事件。测试可以用
-`tokio::try_join!` 并发执行 `invoke` 与事件消费。
-
-## 9. 测试模式
-
-metadata 单元测试：
-
-```rust
-#[test]
-fn workflow_is_valid() -> anyhow::Result<()> {
-    let workflow = build_workflow()?;
-    assert_eq!(workflow.id, "workflow-id");
-    assert!(workflow.nodes.contains_key("end"));
-
-    let json = workflow.to_json()?;
-    WorkflowMetadata::from_json(&json)?;
-    Ok(())
+  }
 }
 ```
 
-集成执行测试：
+```bash
+fae workflow process-order --input '{"order":{"id":"order-42"}}'
+```
 
-```rust
-#[tokio::test]
-async fn workflow_returns_expected_output() -> anyhow::Result<()> {
-    let loader = FAEWorkflowMetadataLoader::new();
-    loader.add(build_workflow()?)?;
-    let engine = build_test_engine(loader).await;
+两个文件必须位于同一个 `FAE_HOST/workflows/`。父子配置适合复用子流程，以及隔离不能共存的
+并行图和 loop。
 
-    let (env, session) = WorkflowEnv::new("workflow-id", json!({ "value": 42 }));
-    let (_, output) = engine.invoke::<_, Value>(env).await?;
-    assert_eq!(output, json!({ "value": 42 }));
+## 6. Single Agent 节点
 
-    let mut terminal_seen = false;
-    while let Some(event) = session.answer().await? {
-        if event.is_terminal() {
-            terminal_seen = true;
-            break;
-        }
+前提是 `${FAE_HOST}/agents/reviewer_config.json` 和 `reviewer_prompt.txt` 已存在。保存为
+`agent-review.json`：
+
+```json
+{
+  "version": 1,
+  "id": "agent-review",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["review"]
+    },
+    "review": {
+      "type": "execute",
+      "action": {
+        "type": "single_agent",
+        "source": {
+          "agent_id": "reviewer"
+        },
+        "input": "Review the following content and return concise findings:\n{$input.content}"
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": {
+        "review": "{$review}"
+      }
     }
-    assert!(terminal_seen);
-    engine.exit().await?;
-    Ok(())
+  }
 }
 ```
 
-避免在 metadata 测试中调用真实模型、网络服务或外部 Python。为 Custom action 注册确定性的
-fixture runtime。
+```bash
+fae workflow agent-review --input @review-input.json
+```
 
-## 10. 排错清单
+Agent 的最终文本是 `review` 节点输出。其模型和工具事件会实时显示在 workflow TUI 中。
 
-### `workflow` 无法构建
+## 7. 读取并更新 Session
+
+保存为 `session-reply.json`：
+
+```json
+{
+  "version": 1,
+  "id": "session-reply",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["history"]
+    },
+    "history": {
+      "type": "execute",
+      "action": {
+        "type": "session",
+        "request": {
+          "Query": {
+            "user": "{$input.user}",
+            "session_id": "{$input.session_id}",
+            "limit": 20,
+            "offset": null
+          }
+        }
+      },
+      "next": ["reply"]
+    },
+    "reply": {
+      "type": "execute",
+      "action": {
+        "type": "single_agent",
+        "source": {
+          "agent_id": "fae"
+        },
+        "input": {
+          "history": "{$history}",
+          "message": "{$input.message}"
+        }
+      },
+      "next": ["save"]
+    },
+    "save": {
+      "type": "execute",
+      "action": {
+        "type": "session",
+        "request": {
+          "Add": {
+            "user": "{$input.user}",
+            "session_id": "{$input.session_id}",
+            "messages": [
+              {
+                "role": "user",
+                "content": "{$input.message}"
+              },
+              {
+                "role": "assistant",
+                "content": "{$reply}"
+              }
+            ]
+          }
+        }
+      },
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": "{$reply}"
+    }
+  }
+}
+```
+
+`single_agent.input` 可以是任意 JSON 值，但对象最终会按 JSON 文本交给 Agent。需要精确控制
+提示词时，使用一个字符串模板。
+
+## 8. 使用隔离目录测试
+
+准备目录：
+
+```text
+/tmp/fae-workflow-test/
+├── agents/
+├── mcp/
+├── skills/
+└── workflows/
+    └── example.json
+```
+
+执行：
+
+```bash
+jq empty /tmp/fae-workflow-test/workflows/example.json
+fae --fae-home /tmp/fae-workflow-test workflow example --input @input.json
+```
+
+隔离目录能避免读取用户真实配置，也能限制 workflow 测试产生的 session 或文件副作用。若配置
+使用 Agent、Skill 或 MCP，必须同时把对应依赖放入隔离目录。
+
+## 9. 排错清单
+
+### 找不到 Workflow
+
+- 检查 `FAE_HOST` 或 `--fae-home` 是否指向预期目录。
+- 检查文件是否位于 `<home>/workflows/<id>.json`。
+- 检查文件名、配置 `id` 和命令参数是否完全一致。
+
+### 配置校验失败
 
 - 检查 start/end 是否各一个。
-- 检查所有 target 拼写。
-- 检查是否存在不可达节点或无法到 end 的节点。
-- 检查普通环是否错误绕过 `loop_node`。
-- 检查 fan-out/DAG 是否混入 Loop。
+- 检查所有目标节点拼写。
+- 检查是否存在不可达节点或无法到达 end 的节点。
+- 检查普通环是否应改成 `loop`。
+- 检查 fan-out/DAG 是否混入 loop。
 
-### runtime 不支持任务
+### Action 无法执行
 
-- `WorkflowRuntime`、`WorkflowPlanBuilder` 是否都已注册。
-- 两者是否共享同一个 loader。
-- action 需要的 runtime 是否已注册。
-- Custom/Python 的 `task_type` 是否与 `TaskType::Any` 一致。
-- Tool name、Skill query 或 MCP server name 是否可被对应 runtime 查询。
+- Tool：确认 `tool_name` 是已注册工具。
+- Workflow：确认子配置位于同一 home 且 ID 一致。
+- Single Agent：确认 Agent config、prompt 和模型环境变量可用。
+- Python：确认 `python3` 可执行，脚本给 `result` 赋值且结果可 JSON 序列化。
+- Custom：标准 CLI 不会自动注册项目自定义 runtime。
 
 ### 模板解析失败
 
-- 被引用节点是否在当前节点之前完成。
-- 条件未选中的分支是否被引用。
+- 被引用节点是否一定在当前节点之前完成。
+- 是否引用了未选中的条件分支。
 - 对象字段和数组索引是否存在。
-- JSON 数字是否被误写成嵌入式字符串。
-- DAG 中是否错误使用 `{$last}`。
+- 需要数字或对象时，是否误把模板嵌入普通字符串。
+- 并行 DAG 中是否错误使用 `{$last}`。
 
 ### 并行流程卡住
 
-- 每个活跃分支是否都能到达汇合点。
-- action runtime 的 `spawn` 是否总会发送成功或失败事件。
-- task response 是否保留原始 `TaskMeta`，尤其是 `meta.id`。
-- 是否有 action runtime 只实现 `exec`，却没有正确实现异步 `spawn`。
-
-### 事件看不到或结果一直等待
-
-- 是否持有由同一次 `WorkflowEnv::new` 返回的 session。
-- 是否在执行期间并发调用 `session.answer()`。
-- runtime 错误路径是否发送 `TaskError`。
-- 消费循环是否仅在 `event.is_terminal()` 时退出。
+- 每个活跃分支是否都能到达汇合节点。
+- 汇合节点是否列为每个分支的后继。
+- 汇合后的模板是否只读取确定会执行的分支。

@@ -1,140 +1,122 @@
 ---
 name: "fae-workflow"
-description: "Builds, runs, and troubleshoots FAE workflows. Invoke when adding workflow graphs, actions, conditions, persistence, execution, or event handling."
+description: "Creates and runs FAE workflows from JSON configuration. Invoke when defining workflow nodes, actions, conditions, templates, nesting, loading, or troubleshooting."
 ---
 
 # FAE Workflow
 
-使用本 Skill 在当前仓库中设计、实现、运行或排查 FAE Workflow。
+使用本 Skill 通过 JSON 配置创建、运行和排查 FAE Workflow。
 
-## 适用范围
+## 核心原则
 
-在以下任务中调用本 Skill：
+- 默认交付 Workflow JSON，不编写 Rust Builder 代码。
+- 配置文件放在 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
+- 文件名、配置中的 `id`、运行命令中的 workflow ID 必须一致。
+- 优先复用 `fae` 已注册的 `tool`、`workflow`、`single_agent`、`session` 和
+  `python` action。
+- 仅当用户需要新的 `custom` action，或要把 Workflow 嵌入其他 Rust 应用时，才修改代码和
+  runtime。
 
-- 新建或修改 `WorkflowMetadata` / Workflow JSON。
-- 编排串行、条件、并行、汇合、循环或父子流程。
-- 配置 `WorkflowRuntime`、`WorkflowPlanBuilder` 和 `FAEWorkflowMetadataLoader`。
-- 使用 Tool、SingleAgent、Session、Python、Custom action。
-- 消费 `CommonSession` 事件，或排查模板解析、图校验和运行时路由问题。
+## 标准流程
 
-不要把普通 Rust `Plan` 实现当作 Workflow。用户明确需要手写 `Plan` 状态机时，直接使用
-`Plan` / `PlanBuilderWithEnv` API。
+1. 明确 workflow 的输入 JSON、最终输出和可能产生的副作用。
+2. 选择最简单的图：串行优先；只有独立任务才并行；重试才使用 `loop`。
+3. 创建 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
+4. 使用 `{$input...}` 和 `{$node_id...}` 在节点间传值，并显式配置 end `output`。
+5. 先用 `jq empty <file>` 检查 JSON 语法，再运行 workflow 触发完整图校验。
+6. 用内联 JSON 或 `@input.json` 执行：
 
-## 执行步骤
+```bash
+fae workflow <workflow-id> --input '{"key":"value"}'
+fae workflow <workflow-id> --input @input.json
+```
 
-1. 阅读目标代码和相邻示例，确认工作树中的 API 名称；Workflow 仍在演进，不要凭旧接口实现。
-2. 选择最简单的图结构。只有确实需要并发时才使用多目标边，只有需要有界重试时才使用
-   `loop_node`。
-3. 使用 `WorkflowMetadataBuilder` 构图，并通过 `build()` 执行完整校验。
-4. 为每种 action 注册对应 runtime。`WorkflowRuntime` 和 `WorkflowPlanBuilder` 必须共享同一个
-   metadata loader。
-5. 注册 metadata，或保存到 `{FAE_HOST}/workflows/<workflow-id>.json`。
-6. 使用 `WorkflowEnv::new` 启动流程；需要实时事件时优先使用 `engine.launch` 并并发消费
-   `CommonSession`。
-7. 添加与改动风险匹配的测试，并运行 `cargo fmt --check`、目标测试和 `cargo check`。
+仓库内开发时可使用：
 
-## 开始前按需阅读
+```bash
+cargo run -p fae -- workflow <workflow-id> --input @input.json
+```
 
-- 节点、动作、模板语法、加载和运行时契约：
-  [references/workflow-api.md](references/workflow-api.md)
-- 常见完整配方和排错清单：
-  [references/recipes.md](references/recipes.md)
+自定义目录使用全局参数：
 
-若实现涉及 SingleAgent、Python/Custom action、并行图或磁盘 JSON，必须先阅读对应参考章节。
+```bash
+fae --fae-home /path/to/fae-home workflow <workflow-id> --input @input.json
+```
 
-## 最小可运行模式
+## 最小配置
 
-```rust
-use fae_agent::{
-    FAEWorkflowMetadataLoader, WorkflowAction, WorkflowEnv, WorkflowMetadataBuilder,
-};
-use fae_engine::{EngineBuilder, PlanRuntime, ToolsRuntime, WorkflowRuntime, READ_FILE};
-use serde_json::{Value, json};
+保存为 `~/.fae/workflows/echo-input.json`：
 
-async fn run(path: &str) -> anyhow::Result<Value> {
-    let mut workflow = WorkflowMetadataBuilder::new("read-file");
-    workflow.start("start", "read")?;
-    workflow.execute(
-        "read",
-        WorkflowAction::Tool {
-            tool_name: READ_FILE.to_string(),
-            arguments: json!({ "path": "{$input.path}", "max_bytes": 4096 }),
-        },
-        "end",
-    )?;
-    workflow.end("end", Some(json!("{$read.content}")))?;
-
-    let loader = FAEWorkflowMetadataLoader::new();
-    loader.add(workflow.build()?)?;
-
-    let mut engine = EngineBuilder::new();
-    engine.add_runtime(PlanRuntime::new());
-    engine.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
-    let mut tools = ToolsRuntime::new();
-    tools.add_tool(Box::new(fae_engine::DefaultTools::default()));
-    engine.add_runtime(tools);
-    engine.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
-    let engine = engine.build().await;
-
-    let (env, _) = WorkflowEnv::new("read-file", json!({ "path": path }));
-    let (_, output) = engine.invoke::<_, Value>(env).await?;
-    engine.exit().await?;
-    Ok(output)
+```json
+{
+  "version": 1,
+  "id": "echo-input",
+  "nodes": {
+    "start": {
+      "type": "start",
+      "next": ["end"]
+    },
+    "end": {
+      "type": "end",
+      "output": {
+        "received": "{$input}"
+      }
+    }
+  }
 }
 ```
 
-关键点：
+运行：
 
-- 不能只注册 `WorkflowRuntime`；执行还需要 `PlanRuntime` 和 `WorkflowPlanBuilder`。
-- `Tool` action 需要能处理对应工具名的 `ToolsRuntime`。
-- `end(..., None)` 返回最近 action 的输出；若没有 action 输出，则返回 workflow 输入。
+```bash
+fae workflow echo-input --input '{"message":"hello"}'
+```
 
-## 图设计约束
+## 配置约束
 
-- 必须恰好有一个 start 和一个 end。
-- 每个节点必须可从 start 到达，并且必须存在到 end 的路径。
-- 所有目标节点必须存在；任何边都不能返回 start。
-- 普通环非法。环必须通过 `Loop` 节点形成，且循环体必须返回该 Loop。
+- 必须恰好有一个 `start` 和一个 `end`。
+- 所有节点都必须能从 start 到达，并存在到 end 的路径。
+- `next`、`on_true`、`on_false` 中的节点必须存在，且不能指回 start。
+- 普通环非法；循环必须使用 `loop`，循环体必须返回该 loop。
 - `max_iterations` 必须大于零。
-- fan-out 或多前驱汇合会启用 DAG 执行器；DAG 不能包含 Loop。
-- 汇合节点会等待所有前驱边完成判定；未选中的条件分支会被标记为 inactive，不会阻塞汇合。
+- fan-out 或多前驱汇合会进入 DAG 执行；同一 workflow 中不能再包含 loop。
+- 并行节点不要读取 `{$last}`；应通过明确的节点 ID 引用输出。
+- end 应显式配置 `output`，避免图调整改变隐式返回值。
 
 ## 模板规则
 
-在任意 action 参数、条件或 end 输出中使用：
+| 模板 | 含义 |
+| --- | --- |
+| `{$input}` | 完整 workflow 输入 |
+| `{$input.path}` | 输入对象字段 |
+| `{$node_id.result}` | 已完成节点的输出字段 |
+| `{$last.result}` | 顺序流程中最近 action 的输出 |
+| `{$loop.retry.iteration}` | loop 当前迭代次数，从 1 开始 |
 
-- `{$input.field}`：workflow 输入。
-- `{$node_id.field}`：已完成节点的输出。
-- `{$last.field}`：顺序执行器中最近 action 的输出。
-- `{$loop.loop_id.iteration}`：当前循环次数，从 1 开始。
+完整字符串仅包含一个模板时保留 JSON 类型；模板嵌入普通文本时结果是字符串：
 
-完整字符串只有一个引用时保留 JSON 类型：
-
-```rust
-json!({ "count": "{$input.count}" }) // 结果仍是数字
+```json
+{
+  "number": "{$input.count}",
+  "message": "count={$input.count}"
+}
 ```
 
-引用嵌入普通文本时结果为字符串：
+## 按需阅读
 
-```rust
-json!("count={$input.count}") // 结果是 "count=3"
-```
+- 创建或修改配置时，先读
+  [references/workflow-api.md](references/workflow-api.md)，确认节点、action 和条件的 JSON
+  字段。
+- 需要串行、条件、并行、循环、父子流程或 Agent 节点时，读
+  [references/recipes.md](references/recipes.md)，从完整 JSON 配方开始修改。
 
-不要在并行 DAG 中使用 `{$last...}`；DAG 执行器没有全局“最近输出”。
+## 排错顺序
 
-## 验证
+1. 确认实际 `FAE_HOST`、文件路径、文件名和 `id`。
+2. 用 `jq empty` 排除 JSON 语法错误。
+3. 检查 start/end 唯一性、目标节点拼写、可达性和环。
+4. 检查模板引用的节点是否一定先完成，字段是否真实存在。
+5. 检查 action 依赖：工具名、Agent 配置、子 workflow、Python 解释器或自定义 runtime。
+6. 检查并行汇合的每个活跃分支是否都能到达汇合节点。
 
-至少运行：
-
-```bash
-cargo fmt --check
-cargo test -p fae-agent workflow
-cargo check --workspace
-```
-
-若修改示例，再运行对应目标：
-
-```bash
-cargo test -p examples --example parent_child_workflow
-cargo test -p examples --example workflow
-```
+不要通过改 Rust 绕过配置校验。若现有 action 无法表达需求，再明确新增 runtime 的必要性。

@@ -1,61 +1,69 @@
 ---
 name: "fae-agent"
-description: "Builds, configures, runs, and troubleshoots FAE single agents. Invoke for agent config, prompts, sessions, tools, skills, MCP, or model execution."
+description: "Creates, configures, modifies, runs, and troubleshoots FAE agents. Invoke for agent initialization, config, prompts, models, tools, skills, MCP, or sessions."
 ---
 
 # FAE Agent
 
-使用本 Skill 在当前仓库中创建、配置、运行或排查 FAE SingleAgent。
+使用本 Skill 通过 `fae` 命令和配置文件创建、修改、运行或排查 FAE Agent。
 
-## 适用范围
+## 核心原则
 
-在以下任务中调用本 Skill：
+- 默认使用 `fae init` 创建 Agent，不编写代码。
+- 使用 `<agent-id>_config.json` 管理模型、会话、工具、Skill 和 MCP。
+- 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
+- 运行和验证统一使用 `fae agent`。
+- 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
 
-- 新建或修改 `SingleAgentConfig`、agent JSON 或 system prompt。
-- 使用 agent ID 或显式文件路径创建 `SingleAgentEnv`。
-- 配置 `SingleAgentPlanBuilder`、模型、会话、Tool、Skill 或 MCP runtime。
-- 实现单轮调用、多轮会话、流式事件消费或 workflow 中的 SingleAgent action。
-- 排查配置加载、模型请求、历史记录、工具路由或会话状态问题。
+## 标准流程
 
-如果任务主要是构建多节点图、条件、并行、循环或父子流程，应改用 `fae-workflow` Skill；
-只有其中的节点需要调用 Agent 时，再同时参考本 Skill。
+1. 确定 Agent ID、模型、职责、会话隔离要求和所需能力。
+2. 使用 `fae init` 生成基础配置：
 
-## 执行步骤
+```bash
+fae init --agent-id reviewer --model gpt-5
+```
 
-1. 阅读目标代码和相邻示例，确认当前 API。SingleAgent 配置和加载协议仍在演进，不要凭旧接口实现。
-2. 确定配置来源：
-   - 稳定部署使用 agent ID。
-   - 测试、临时配置或外部目录使用显式 config/prompt 路径。
-3. 将静态能力写入 `SingleAgentConfig`，将 system prompt 单独保存为文本文件。不要在
-   `SingleAgentEnv` 中重复模型、工具或 prompt 配置。
-4. 按配置能力注册 runtime。基础执行至少需要 `PlanRuntime`、`ModelRuntime`、
-   `SessionRuntime` 和 `SingleAgentPlanBuilder`。
-5. 使用 `SingleAgentEnv::from_agent_id` 或 `SingleAgentEnv::from_paths` 创建 ENV，并保留同时
-   返回的 `CommonSession`。
-6. 需要实时输出时使用 `engine.launch`，持续消费 session 事件，再等待 execution result。
-7. 多轮对话复用同一个已绑定 session，通过 `SessionInput::NewChat` 开启新轮次，或通过
-   `SessionInput::Supplement` 补充当前轮次。
-8. 添加与改动风险匹配的测试，并运行格式化、目标测试和 workspace 检查。
+3. 编辑 `${FAE_HOST:-~/.fae}/agents/reviewer_config.json`，只保留 Agent 实际需要的 Tool、
+   Skill 和 MCP。
+4. 创建或修改 `${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt`，写清角色、边界、工作步骤和
+   输出要求。
+5. 使用 `fae agent` 启动并验证：
 
-## 开始前按需阅读
+```bash
+fae agent --agent-id reviewer
+fae agent --agent-id reviewer "review this workspace"
+```
 
-- 配置格式、加载规则、类型、runtime 和事件契约：
-  [references/agent-api.md](references/agent-api.md)
-- 单轮、多轮、自定义 home、Tool/Skill/MCP 和排错配方：
-  [references/recipes.md](references/recipes.md)
+6. 根据实际输出调整 config 或 prompt，再次用同一命令验证。
 
-若任务涉及 Tool、Skill、MCP、自定义模型 client 或 workflow 嵌套，必须先阅读对应参考章节。
+自定义 home：
+
+```bash
+fae --fae-home /path/to/fae-home init --agent-id reviewer --model gpt-5
+fae --fae-home /path/to/fae-home agent --agent-id reviewer
+```
 
 ## 文件约定
 
-使用 agent ID `reviewer` 时，默认加载：
+Agent ID 为 `reviewer` 时，默认加载：
 
 ```text
 ${FAE_HOST:-~/.fae}/agents/reviewer_config.json
 ${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt
 ```
 
-`reviewer_config.json`：
+Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与 Agent ID 一致。
+
+`fae init`：
+
+- 创建 Agent config 及所需的 home 子目录。
+- 启用全部内置工具。
+- 收集当前 `<FAE_HOST>/skills/*/SKILL.md` 对应的已安装 Skill。
+- 已有 config 默认不会覆盖；使用 `--force` 才会替换。
+- 不创建也不覆盖 prompt。自定义 Agent 必须准备对应的 prompt 文件。
+
+## 最小配置
 
 ```json
 {
@@ -66,7 +74,7 @@ ${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt
     "metadata": {}
   },
   "model": {
-    "model": "gpt-xxx",
+    "model": "gpt-5",
     "context_size": 32000,
     "history_turns": 20,
     "max_completion_tokens": 4096,
@@ -75,67 +83,47 @@ ${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt
   },
   "tools": ["read_file"],
   "skills": [
-    { "type": "name", "value": "weather" }
+    {
+      "type": "name",
+      "value": "fae-agent"
+    }
   ],
   "mcp_servers": []
 }
 ```
 
-`reviewer_prompt.txt` 只存放 system prompt，不要包 JSON，不要把用户本轮输入写入其中。
+Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。
 
-## 最小运行模式
+## 修改策略
 
-```rust
-use fae_agent::{Session, SingleAgentEnv};
-
-async fn run() -> anyhow::Result<()> {
-    let engine = fae_engine::Engine::default().await;
-    let (env, session) =
-        SingleAgentEnv::from_agent_id("reviewer", "Review the current workspace.");
-    let execution = engine.launch(env).await?;
-
-    while let Some(event) = session.answer().await? {
-        if event.is_terminal() {
-            break;
-        }
-    }
-
-    execution.result::<()>().await?;
-    engine.exit().await?;
-    Ok(())
-}
-```
-
-关键点：
-
-- ENV 只描述配置来源和本轮输入；静态配置来自 JSON 与 prompt 文件。
-- `agent.name` 必须与 agent ID 一致；agent ID 必须是单个非空路径组件。
-- `Engine::default()` 已注册 SingleAgent 所需的默认 runtime 和 builder。
-- 自定义 `EngineBuilder` 时必须显式注册依赖；配置中声明能力但漏注册 runtime 会在构建 plan
-  或执行时失败。
-- session 事件必须被持续消费；不要把 `execution.result()` 当作流式输出接口。
-
-## 配置边界
-
-- `context_size` 必须大于 0。
-- `max_tool_iterations` 必须大于 0，用于阻止模型无限调用工具。
-- `history_turns` 表示读取的历史轮数，内部按一轮两条消息计算。
-- `max_completion_tokens` 和 `temperature` 可为 `null`。
-- `tools` 使用已注册的工具路由名。
-- `skills` 使用带 `type`/`value` 的 `SkillQuery` JSON。
-- `mcp_servers` 使用 MCP 配置中的 server 名称；模型侧工具名会变为
-  `<server>__<tool>`。
-- `user_id` 与 `session_id` 同时决定持久化历史路径，二者都必须是安全的单路径段。
-
-## 验证
-
-至少运行：
+- 改模型或上下文：编辑 `model`。
+- 改身份或输出风格：编辑 prompt，避免把行为规则散落到 config。
+- 改会话隔离：修改 `agent.user_id` 或 `agent.session_id`。
+- 增减内置工具：修改 `tools`，使用实际注册的工具名。
+- 增减 Skill：修改 `skills`，按名称或路径配置。
+- 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
+- 重新生成完整 config：
 
 ```bash
-cargo fmt --check
-cargo test -p fae-agent single_agent
-cargo test -p fae-engine
-cargo check --workspace --all-targets
+fae init --agent-id reviewer --model gpt-5 --force
 ```
 
-若修改 CLI 或示例，再运行：
+`--force` 会重置 config 中的手工修改，但不会覆盖 prompt。使用前先确认确实需要重新生成。
+
+## 按需阅读
+
+- 配置字段、文件加载、命令参数和能力规则：
+  [references/agent-api.md](references/agent-api.md)
+- 创建、修改、复制、Skill、MCP、会话和排错配方：
+  [references/recipes.md](references/recipes.md)
+
+如果任务主要是创建多节点图、条件、并行、循环或父子流程，应改用 `fae-workflow` Skill。
+
+## 排错顺序
+
+1. 检查实际 `FAE_HOST` 或 `--fae-home`。
+2. 检查 config 与 prompt 文件名是否匹配 Agent ID。
+3. 检查 `agent.name`、模型名和数值字段是否合法。
+4. 检查 Tool、Skill 和 MCP 名称是否真实存在。
+5. 使用 `fae agent --agent-id <id> "reply with OK"` 做最小运行验证。
+6. 根据错误定位配置加载、模型连接、能力路由或会话历史问题。
