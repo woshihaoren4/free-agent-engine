@@ -10,7 +10,7 @@
 | `SingleAgentSource` | 通过 agent ID 或显式路径定位配置与 prompt |
 | `SingleAgentEnv` | 一次执行的配置来源、输入和 session |
 | `SingleAgentPlanBuilder` | 加载配置并构造 `SingleAgentPlan` |
-| `SingleAgentSession` | 提交后续输入并接收流式事件 |
+| `CommonSession` | 提交后续输入并接收流式事件 |
 
 ## 2. 配置来源
 
@@ -214,22 +214,27 @@ execution.result::<()>().await?;
 后续轮次复用同一个 session：
 
 ```rust
-session.call("Now propose a fix.".to_string()).await?;
+session
+    .call(SessionInput::NewChat(
+        "Now propose a fix.".into(),
+    ))
+    .await?;
 consume_turn(&session).await?;
 ```
 
 注意：
 
 - session 在首次 plan 构建时绑定 engine；绑定前调用 `call` 会失败。
-- 活跃轮次仍接受输入时，新输入会进入该轮的 pending queue。
-- 当前轮已进入收尾阶段时，`call` 会等待其结束，再启动新轮。
+- `SessionInput::Supplement` 将输入追加到仍在运行的当前轮次。
+- `SessionInput::NewChat` 会等待当前轮次退出，然后启动新轮次。
 - `user_id` 与 `session_id` 对应持久化文件
   `${FAE_HOST:-~/.fae}/memory/<user_id>/session/<session_id>.jsonl`。
 - 每轮完成后保存 user 与 assistant 消息。
 
 ## 8. 事件
 
-`SessionEvent` 包含 `turn_id`、`source` 和 `SessionEventData`。常见事件：
+`SessionOutput` 提供父计划、当前计划、节点、runtime、事件类型和 JSON 输出。
+可通过 `event.event_data()?` 恢复为 `SessionEventData`：
 
 | 事件 | 含义 |
 | --- | --- |
@@ -255,5 +260,5 @@ WorkflowAction::SingleAgent {
 }
 ```
 
-Workflow 会创建绑定到父 `WorkflowSession` 的 child session，并转发 Agent 事件。引擎必须同时
+Workflow 会创建绑定到父 `CommonSession` 的 child session，并转发 Agent 事件。引擎必须同时
 注册 `WorkflowPlanBuilder` 与 `SingleAgentPlanBuilder`，且其 home 配置应保持一致。

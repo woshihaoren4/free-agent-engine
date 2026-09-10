@@ -11,7 +11,7 @@
 | `WorkflowPlanBuilder` | 将 `WorkflowEnv` 和 metadata 转成可执行 `Plan` |
 | `WorkflowRuntime` | 接收 `TaskType::Workflow` 并驱动 workflow plan |
 | `WorkflowEnv` | 一次执行的 `workflow_id`、输入和 session |
-| `WorkflowSession` | 输出节点事件、Agent 流式事件和最终结果 |
+| `CommonSession` | 输出节点事件、Agent 流式事件和最终结果 |
 
 ## 2. Builder API
 
@@ -277,7 +277,7 @@ let execution = engine.launch(env).await?;
 
 while let Some(event) = session.answer().await? {
     let terminal = event.is_terminal();
-    println!("{} {:?}", event.kind(), event.data);
+    println!("{} {:?}", event.kind(), event.output);
     if terminal {
         break;
     }

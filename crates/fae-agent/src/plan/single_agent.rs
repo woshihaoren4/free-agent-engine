@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -22,10 +22,10 @@ use tokio_stream::StreamExt;
 
 use crate::{
     Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse, Plan, PlanBuilderWithEnv,
-    PlanNext, RT, Session, SessionEvent, SessionEventChannel, SessionEventData, SessionMessage,
-    SessionMessageRole, SessionRequest, SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq,
-    TaskRequest, TaskResp, TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse,
-    WorkflowSession,
+    PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput, SessionInputData,
+    SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel, SessionRequest,
+    SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse,
+    TaskType, ToolRequest, ToolRespItem, ToolResponse,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,14 +77,14 @@ const fn default_max_tool_iterations() -> usize {
 pub struct SingleAgentEnv {
     pub source: SingleAgentSource,
     pub input: String,
-    session: SingleAgentSession,
+    session: CommonSession,
 }
 
 impl SingleAgentEnv {
     pub fn from_agent_id(
         agent_id: impl Into<String>,
         input: impl Into<String>,
-    ) -> (Self, SingleAgentSession) {
+    ) -> (Self, CommonSession) {
         Self::new(SingleAgentSource::AgentId(agent_id.into()), input)
     }
 
@@ -92,7 +92,7 @@ impl SingleAgentEnv {
         config: impl Into<PathBuf>,
         prompt: impl Into<PathBuf>,
         input: impl Into<String>,
-    ) -> (Self, SingleAgentSession) {
+    ) -> (Self, CommonSession) {
         Self::new(
             SingleAgentSource::Paths {
                 config: config.into(),
@@ -102,8 +102,8 @@ impl SingleAgentEnv {
         )
     }
 
-    pub fn new(source: SingleAgentSource, input: impl Into<String>) -> (Self, SingleAgentSession) {
-        let session = SingleAgentSession::new();
+    pub fn new(source: SingleAgentSource, input: impl Into<String>) -> (Self, CommonSession) {
+        let session = CommonSession::new();
         (
             Self {
                 source,
@@ -114,18 +114,18 @@ impl SingleAgentEnv {
         )
     }
 
-    pub fn session(&self) -> SingleAgentSession {
+    pub fn session(&self) -> CommonSession {
         self.session.clone()
     }
 
     pub fn new_with_session(
         source: SingleAgentSource,
         input: impl Into<String>,
-        workflow_session: WorkflowSession,
+        workflow_session: CommonSession,
         workflow_id: impl Into<String>,
         node_id: impl Into<String>,
-    ) -> (Self, SingleAgentSession) {
-        let session = SingleAgentSession::new_in_workflow(workflow_session, workflow_id, node_id);
+    ) -> (Self, CommonSession) {
+        let session = CommonSession::new_in_workflow(workflow_session, workflow_id, node_id);
         (
             Self {
                 source,
@@ -138,72 +138,92 @@ impl SingleAgentEnv {
 }
 
 #[derive(Debug, Clone)]
-pub struct SingleAgentSession {
-    inner: Arc<SingleAgentSessionInner>,
+pub struct CommonSession {
+    inner: Arc<CommonSessionInner>,
+    pub(crate) completion: Arc<CommonSessionCompletion>,
 }
 
 #[derive(Debug)]
-struct SingleAgentSessionInner {
-    channel: SessionEventChannel,
-    workflow: Option<WorkflowSessionTarget>,
+struct CommonSessionInner {
+    channel: SessionOutputChannel,
+    workflow: Option<CommonSessionTarget>,
     binding: RwLock<Option<SingleAgentBinding>>,
-    state: StdMutex<SingleAgentSessionState>,
+    state: StdMutex<CommonSessionState>,
     idle: Notify,
     next_turn_id: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
-struct WorkflowSessionTarget {
-    session: WorkflowSession,
+struct CommonSessionTarget {
+    session: CommonSession,
     workflow_id: String,
     node_id: String,
 }
 
 #[derive(Debug, Default)]
-struct SingleAgentSessionState {
+struct CommonSessionState {
     active: bool,
     accepting_input: bool,
-    pending_inputs: VecDeque<String>,
+    cancel_requested: bool,
+    pending_inputs: VecDeque<SessionInputData>,
 }
 
-impl SingleAgentSession {
-    fn new() -> Self {
+#[derive(Debug)]
+pub(crate) struct CommonSessionCompletion {
+    result: StdMutex<Option<Result<Value, String>>>,
+    notify: Notify,
+    pub(crate) complete_context: AtomicBool,
+}
+
+impl Default for CommonSessionCompletion {
+    fn default() -> Self {
+        Self {
+            result: StdMutex::new(None),
+            notify: Notify::new(),
+            complete_context: AtomicBool::new(true),
+        }
+    }
+}
+
+impl CommonSession {
+    pub(crate) fn new() -> Self {
         Self::new_with_workflow(None)
     }
 
     fn new_in_workflow(
-        session: WorkflowSession,
+        session: CommonSession,
         workflow_id: impl Into<String>,
         node_id: impl Into<String>,
     ) -> Self {
-        Self::new_with_workflow(Some(WorkflowSessionTarget {
+        Self::new_with_workflow(Some(CommonSessionTarget {
             session,
             workflow_id: workflow_id.into(),
             node_id: node_id.into(),
         }))
     }
 
-    fn new_with_workflow(workflow: Option<WorkflowSessionTarget>) -> Self {
+    fn new_with_workflow(workflow: Option<CommonSessionTarget>) -> Self {
         Self {
-            inner: Arc::new(SingleAgentSessionInner {
-                channel: SessionEventChannel::new(),
+            inner: Arc::new(CommonSessionInner {
+                channel: SessionOutputChannel::new(),
                 workflow,
                 binding: RwLock::new(None),
-                state: StdMutex::new(SingleAgentSessionState::default()),
+                state: StdMutex::new(CommonSessionState::default()),
                 idle: Notify::new(),
                 next_turn_id: AtomicU64::new(1),
             }),
+            completion: Arc::new(CommonSessionCompletion::default()),
         }
     }
 
-    pub(crate) fn emit(
+    pub(crate) fn emit_agent(
         &self,
         turn_id: u64,
         source: impl Into<String>,
         data: SessionEventData,
     ) -> anyhow::Result<()> {
         let source = source.into();
-        self.inner.channel.emit(SessionEvent::single_agent(
+        self.emit(SessionEvent::single_agent(
             turn_id,
             source.clone(),
             data.clone(),
@@ -218,6 +238,33 @@ impl SingleAgentSession {
             ))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn emit(&self, event: SessionEvent) -> anyhow::Result<()> {
+        let terminal = event.is_terminal().then(|| match &event.data {
+            SessionEventData::NodeCompleted { output, .. } => Ok(output.clone()),
+            SessionEventData::Failed { error } => Err(error.clone()),
+            SessionEventData::Completed { content } => Ok(Value::String(content.clone())),
+            _ => unreachable!("terminal session event has an unsupported payload"),
+        });
+        self.inner.channel.emit(event.into())?;
+        if let Some(result) = terminal {
+            self.completion.complete(result);
+        }
+        Ok(())
+    }
+
+    pub async fn result(&self) -> anyhow::Result<Value> {
+        loop {
+            let notified = self.completion.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if let Some(result) = self.completion.result.lock().unwrap().clone() {
+                return result.map_err(anyhow::Error::msg);
+            }
+            notified.await;
+        }
     }
 
     async fn bind(&self, binding: SingleAgentBinding) -> anyhow::Result<u64> {
@@ -235,12 +282,12 @@ impl SingleAgentSession {
         Ok(self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    fn take_pending_inputs(&self) -> Vec<String> {
+    fn take_pending_inputs(&self) -> Vec<SessionInputData> {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.pending_inputs.drain(..).collect()
     }
 
-    fn finish_or_take_pending(&self) -> Option<Vec<String>> {
+    fn finish_or_take_pending(&self) -> Option<Vec<SessionInputData>> {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         if state.pending_inputs.is_empty() {
             state.accepting_input = false;
@@ -254,24 +301,50 @@ impl SingleAgentSession {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.active = false;
         state.accepting_input = false;
+        state.cancel_requested = false;
         drop(state);
         self.inner.idle.notify_waiters();
+    }
+
+    fn cancel_requested(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("session state poisoned")
+            .cancel_requested
     }
 
     fn abort_turn(&self) {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.active = false;
         state.accepting_input = false;
+        state.cancel_requested = false;
         state.pending_inputs.clear();
         drop(state);
         self.inner.idle.notify_waiters();
     }
 }
 
+impl CommonSessionCompletion {
+    fn complete(&self, result: Result<Value, String>) {
+        let mut completion = self.result.lock().unwrap();
+        if completion.is_some() {
+            return;
+        }
+        *completion = Some(result);
+        drop(completion);
+        self.notify.notify_waiters();
+    }
+}
+
 #[async_trait::async_trait]
-impl Session<String, SessionEvent> for SingleAgentSession {
-    async fn call(&self, input: String) -> anyhow::Result<()> {
-        anyhow::ensure!(!input.trim().is_empty(), "input cannot be empty");
+impl Session<SessionInput, SessionOutput> for CommonSession {
+    async fn call(&self, input: SessionInput) -> anyhow::Result<()> {
+        let (input, supplement) = match input {
+            SessionInput::NewChat(input) => (input, false),
+            SessionInput::Supplement(input) => (input, true),
+        };
+        anyhow::ensure!(!input.text.trim().is_empty(), "input text cannot be empty");
         let binding = self
             .inner
             .binding
@@ -279,6 +352,16 @@ impl Session<String, SessionEvent> for SingleAgentSession {
             .await
             .clone()
             .ok_or_else(|| anyhow::anyhow!("single-agent session is not bound to an engine"))?;
+
+        if supplement {
+            let mut state = self.inner.state.lock().expect("session state poisoned");
+            anyhow::ensure!(
+                state.active && state.accepting_input,
+                "there is no active conversation to supplement"
+            );
+            state.pending_inputs.push_back(input);
+            return Ok(());
+        }
 
         loop {
             let idle = self.inner.idle.notified();
@@ -288,10 +371,10 @@ impl Session<String, SessionEvent> for SingleAgentSession {
                     state.active = true;
                     state.accepting_input = true;
                     false
-                } else if state.accepting_input {
-                    state.pending_inputs.push_back(input);
-                    return Ok(());
                 } else {
+                    state.accepting_input = false;
+                    state.cancel_requested = true;
+                    state.pending_inputs.clear();
                     true
                 }
             };
@@ -306,7 +389,7 @@ impl Session<String, SessionEvent> for SingleAgentSession {
         let plan = SingleAgentPlan::new(
             binding.ctx.clone(),
             binding.template,
-            input,
+            input.text,
             turn_id,
             self.clone(),
         );
@@ -327,7 +410,7 @@ impl Session<String, SessionEvent> for SingleAgentSession {
         Ok(())
     }
 
-    async fn answer(&self) -> anyhow::Result<Option<SessionEvent>> {
+    async fn answer(&self) -> anyhow::Result<Option<SessionOutput>> {
         Ok(self.inner.channel.answer().await)
     }
 }
@@ -658,7 +741,7 @@ struct SingleAgentPlan {
     template: SingleAgentTemplate,
     input: String,
     turn_id: u64,
-    session: SingleAgentSession,
+    session: CommonSession,
     stage: SingleAgentStage,
     messages: Vec<ChatCompletionRequestMessage>,
     unsaved_messages: Vec<SessionMessage>,
@@ -676,7 +759,7 @@ impl SingleAgentPlan {
         template: SingleAgentTemplate,
         input: String,
         turn_id: u64,
-        session: SingleAgentSession,
+        session: CommonSession,
     ) -> Self {
         let initial_message = SessionMessage::user(input.clone());
         Self {
@@ -699,7 +782,7 @@ impl SingleAgentPlan {
     }
 
     async fn emit(&self, source: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
-        self.session.emit(self.turn_id, source, data)
+        self.session.emit_agent(self.turn_id, source, data)
     }
 
     fn task<Req: Send + 'static>(&mut self, ty: TaskType, req: Req) -> TaskRequest {
@@ -755,8 +838,9 @@ impl SingleAgentPlan {
         )
     }
 
-    async fn append_user_inputs(&mut self, inputs: Vec<String>) -> anyhow::Result<()> {
+    async fn append_user_inputs(&mut self, inputs: Vec<SessionInputData>) -> anyhow::Result<()> {
         for input in inputs {
+            let input = input.text;
             self.emit(
                 self.template.agent.user_id.clone(),
                 SessionEventData::UserInput {
@@ -1068,6 +1152,10 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
+        if self.session.cancel_requested() {
+            self.finish_on_drop = true;
+            return Ok(PlanNext::End);
+        }
         self.emit(
             self.template.agent.name.clone(),
             SessionEventData::TurnStarted {
@@ -1079,6 +1167,10 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn next(&mut self, mut task_result: TaskResponse) -> anyhow::Result<PlanNext> {
+        if self.session.cancel_requested() {
+            self.finish_on_drop = true;
+            return Ok(PlanNext::End);
+        }
         match self.stage {
             SingleAgentStage::History => {
                 let response = TaskResp::<SessionResponse>::try_from_response(&mut task_result)
@@ -1432,7 +1524,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tool_calls_use_the_mcp_task_type_and_response() -> anyhow::Result<()> {
-        let session = SingleAgentSession::new();
+        let session = CommonSession::new();
         session.activate_turn().unwrap();
         let ctx = Ctx::null();
         let mut template = test_template();
@@ -1504,9 +1596,52 @@ mod tests {
 
     #[tokio::test]
     async fn session_rejects_calls_before_binding() {
-        let session = SingleAgentSession::new();
-        let error = session.call("hello".to_string()).await.unwrap_err();
+        let session = CommonSession::new();
+        let error = session
+            .call(SessionInput::NewChat("hello".into()))
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not bound"));
+    }
+
+    #[tokio::test]
+    async fn new_chat_cancels_the_active_plan_before_starting_another() {
+        let session = CommonSession::new();
+        let ctx = Ctx::null();
+        let template = test_template();
+        let turn_id = session
+            .bind(SingleAgentBinding {
+                rt: RT::null(),
+                ctx: ctx.clone(),
+                template: template.clone(),
+            })
+            .await
+            .unwrap();
+        let mut plan =
+            SingleAgentPlan::new(ctx, template, "first".to_string(), turn_id, session.clone());
+
+        let next_session = session.clone();
+        let next_chat = tokio::spawn(async move {
+            next_session
+                .call(SessionInput::NewChat("second".into()))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !session.cancel_requested() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(plan.init().await.unwrap(), PlanNext::End));
+        drop(plan);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), next_chat)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
     }
 
     #[test]
@@ -1516,14 +1651,14 @@ mod tests {
             test_template(),
             "first".to_string(),
             1,
-            SingleAgentSession::new(),
+            CommonSession::new(),
         );
         let second = SingleAgentPlan::new(
             Ctx::null(),
             test_template(),
             "second".to_string(),
             2,
-            SingleAgentSession::new(),
+            CommonSession::new(),
         );
 
         assert!(first.id().starts_with("single_agent-"));
@@ -1533,7 +1668,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_plan_appends_new_call_to_current_messages() {
-        let session = SingleAgentSession::new();
+        let session = CommonSession::new();
         let ctx = Ctx::null();
         let template = test_template();
         let turn_id = session
@@ -1552,7 +1687,10 @@ mod tests {
             session.clone(),
         );
 
-        session.call("second".to_string()).await.unwrap();
+        session
+            .call(SessionInput::Supplement("second".into()))
+            .await
+            .unwrap();
         plan.init().await.unwrap();
         let history_response = TaskResp {
             ctx,
@@ -1593,7 +1731,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_plan_appends_new_input_after_tool_result() {
-        let session = SingleAgentSession::new();
+        let session = CommonSession::new();
         let ctx = Ctx::null();
         let mut template = test_template();
         template.tool_routes.insert(
@@ -1672,7 +1810,10 @@ mod tests {
         };
         let tool_task_id = tool_tasks[0].meta.id.clone();
 
-        session.call("second".to_string()).await.unwrap();
+        session
+            .call(SessionInput::Supplement("second".into()))
+            .await
+            .unwrap();
         let next = plan
             .next(
                 TaskResp {
@@ -1710,7 +1851,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_tool_turn_streams_and_completes() {
-        let session = SingleAgentSession::new();
+        let session = CommonSession::new();
         session.activate_turn().unwrap();
         let ctx = Ctx::null();
         let template = test_template();
@@ -1778,7 +1919,7 @@ mod tests {
         let mut kinds = Vec::new();
         loop {
             let event = session.answer().await.unwrap().unwrap();
-            kinds.push(event.kind());
+            kinds.push(event.kind().to_string());
             if event.is_terminal() {
                 break;
             }

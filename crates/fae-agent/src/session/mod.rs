@@ -12,6 +12,92 @@ pub trait Session<In, Out>: Debug + Send + Sync + 'static {
     async fn answer(&self) -> anyhow::Result<Option<Out>>;
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionInputData {
+    /// User-provided text.
+    pub text: String,
+    /// Image paths, URLs, or identifiers associated with the input.
+    pub images: Option<Vec<String>>,
+    /// File paths or identifiers associated with the input.
+    pub files: Option<Vec<String>>,
+    /// Opaque binary input for runtimes that support it.
+    pub data: Option<Vec<u8>>,
+}
+
+impl SessionInputData {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl From<String> for SessionInputData {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&str> for SessionInputData {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionInput {
+    /// Stop the active conversation and start a new one.
+    NewChat(SessionInputData),
+    /// Add information to the active conversation without ending it.
+    Supplement(SessionInputData),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionOutput {
+    /// Parent plan ID for nested executions.
+    pub parament_plan_id: Option<String>,
+    /// Current plan ID.
+    pub plan_id: Option<String>,
+    /// Current workflow node ID.
+    pub node_id: Option<String>,
+    /// Runtime or event source ID.
+    pub runtime_id: Option<String>,
+    /// Output event type.
+    pub input_type: String,
+    /// Event-specific output data.
+    pub output: Value,
+}
+
+impl SessionOutput {
+    pub fn kind(&self) -> &str {
+        &self.input_type
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        match self.input_type.as_str() {
+            "node_completed" => {
+                self.parament_plan_id.is_none()
+                    && self
+                        .output
+                        .get("finished")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+            }
+            "completed" | "failed" => self.parament_plan_id.is_none(),
+            _ => false,
+        }
+    }
+
+    pub fn event_data(&self) -> serde_json::Result<SessionEventData> {
+        deserialize_event_data(serde_json::json!({
+            "type": self.input_type,
+            "data": self.output,
+        }))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionMessageRole {
@@ -219,6 +305,32 @@ impl SessionEventData {
     }
 }
 
+impl From<SessionEvent> for SessionOutput {
+    fn from(event: SessionEvent) -> Self {
+        let SessionEvent {
+            workflow_id,
+            node_id,
+            turn_id,
+            source,
+            data,
+        } = event;
+        let (parament_plan_id, plan_id) = match (workflow_id, turn_id) {
+            (Some(workflow_id), Some(turn_id)) => (Some(workflow_id), Some(turn_id.to_string())),
+            (Some(workflow_id), None) => (None, Some(workflow_id)),
+            (None, Some(turn_id)) => (None, Some(turn_id.to_string())),
+            (None, None) => (None, None),
+        };
+        Self {
+            parament_plan_id,
+            plan_id,
+            node_id,
+            runtime_id: Some(source),
+            input_type: data.event_type().to_string(),
+            output: data.content(),
+        }
+    }
+}
+
 impl serde::Serialize for SessionEventData {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -375,35 +487,35 @@ fn deserialize_event_data(value: Value) -> serde_json::Result<SessionEventData> 
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionEventChannel {
-    inner: Arc<SessionEventChannelInner>,
+pub(crate) struct SessionOutputChannel {
+    inner: Arc<SessionOutputChannelInner>,
 }
 
 #[derive(Debug)]
-struct SessionEventChannelInner {
-    sender: UnboundedSender<SessionEvent>,
-    receiver: Mutex<UnboundedReceiver<SessionEvent>>,
+struct SessionOutputChannelInner {
+    sender: UnboundedSender<SessionOutput>,
+    receiver: Mutex<UnboundedReceiver<SessionOutput>>,
 }
 
-impl SessionEventChannel {
+impl SessionOutputChannel {
     pub(crate) fn new() -> Self {
         let (sender, receiver) = unbounded_channel();
         Self {
-            inner: Arc::new(SessionEventChannelInner {
+            inner: Arc::new(SessionOutputChannelInner {
                 sender,
                 receiver: Mutex::new(receiver),
             }),
         }
     }
 
-    pub(crate) fn emit(&self, event: SessionEvent) -> anyhow::Result<()> {
+    pub(crate) fn emit(&self, output: SessionOutput) -> anyhow::Result<()> {
         self.inner
             .sender
-            .send(event)
-            .map_err(|error| anyhow::anyhow!("send session event failed: {error}"))
+            .send(output)
+            .map_err(|error| anyhow::anyhow!("send session output failed: {error}"))
     }
 
-    pub(crate) async fn answer(&self) -> Option<SessionEvent> {
+    pub(crate) async fn answer(&self) -> Option<SessionOutput> {
         self.inner.receiver.lock().await.recv().await
     }
 }
@@ -581,5 +693,47 @@ mod tests {
                 content: json!({"percent": 50}),
             }
         );
+    }
+
+    #[test]
+    fn session_input_round_trips_all_payload_fields() {
+        let input = SessionInput::Supplement(SessionInputData {
+            text: "inspect these inputs".to_string(),
+            images: Some(vec!["image.png".to_string()]),
+            files: Some(vec!["notes.txt".to_string()]),
+            data: Some(vec![1, 2, 3]),
+        });
+
+        let value = serde_json::to_value(&input).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionInput>(value).unwrap(),
+            input
+        );
+    }
+
+    #[test]
+    fn nested_event_maps_to_common_session_output() {
+        let output = SessionOutput::from(SessionEvent::in_workflow(
+            "parent-plan",
+            "agent-node",
+            7,
+            "model",
+            SessionEventData::ModelOutput {
+                content: "hello".to_string(),
+            },
+        ));
+
+        assert_eq!(output.parament_plan_id.as_deref(), Some("parent-plan"));
+        assert_eq!(output.plan_id.as_deref(), Some("7"));
+        assert_eq!(output.node_id.as_deref(), Some("agent-node"));
+        assert_eq!(output.runtime_id.as_deref(), Some("model"));
+        assert_eq!(output.input_type, "model_output");
+        assert_eq!(
+            output.event_data().unwrap(),
+            SessionEventData::ModelOutput {
+                content: "hello".to_string()
+            }
+        );
+        assert!(!output.is_terminal());
     }
 }

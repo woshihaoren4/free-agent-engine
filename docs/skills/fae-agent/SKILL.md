@@ -31,9 +31,10 @@ description: "Builds, configures, runs, and troubleshoots FAE single agents. Inv
 4. 按配置能力注册 runtime。基础执行至少需要 `PlanRuntime`、`ModelRuntime`、
    `SessionRuntime` 和 `SingleAgentPlanBuilder`。
 5. 使用 `SingleAgentEnv::from_agent_id` 或 `SingleAgentEnv::from_paths` 创建 ENV，并保留同时
-   返回的 `SingleAgentSession`。
+   返回的 `CommonSession`。
 6. 需要实时输出时使用 `engine.launch`，持续消费 session 事件，再等待 execution result。
-7. 多轮对话复用同一个已绑定 session，通过 `session.call(...)` 提交后续输入。
+7. 多轮对话复用同一个已绑定 session，通过 `SessionInput::NewChat` 开启新轮次，或通过
+   `SessionInput::Supplement` 补充当前轮次。
 8. 添加与改动风险匹配的测试，并运行格式化、目标测试和 workspace 检查。
 
 ## 开始前按需阅读

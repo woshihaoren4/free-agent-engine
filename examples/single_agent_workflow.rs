@@ -49,10 +49,10 @@ use async_openai::types::chat::{
 };
 use fae_agent::{
     Ctx, FAEWorkflowMetadataLoader, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
-    Session, SessionEvent, SessionEventData, SessionMessage, SessionMessageRole, SessionRequest,
-    SessionResponse, SingleAgentConfig, SingleAgentPlanBuilder, SingleAgentSource, SkillInfo,
-    TaskMeta, TaskReq, TaskType, ToolRequest, ToolRespItem, ToolResponse, Tools, WorkflowAction,
-    WorkflowCondition, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
+    Session, SessionEventData, SessionInput, SessionMessage, SessionMessageRole, SessionOutput,
+    SessionRequest, SessionResponse, SingleAgentConfig, SingleAgentPlanBuilder, SingleAgentSource,
+    SkillInfo, TaskMeta, TaskReq, TaskType, ToolRequest, ToolRespItem, ToolResponse, Tools,
+    WorkflowAction, WorkflowCondition, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
 };
 use fae_engine::EngineBuilder;
 use serde::{Deserialize, Serialize};
@@ -611,10 +611,10 @@ fn read_user_input() -> anyhow::Result<Option<String>> {
     }
 }
 
-async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Result<()> {
+async fn print_session(session: &impl Session<SessionInput, SessionOutput>) -> anyhow::Result<()> {
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
-        match event.data {
+        match event.event_data()? {
             SessionEventData::NodeCompleted { .. } => {
                 println!("completed> {}", event.node_id.as_deref().unwrap_or("-"));
             }

@@ -64,22 +64,22 @@ engine.exit().await?;
 ## 3. 流式消费
 
 ```rust
-async fn consume_turn(session: &SingleAgentSession) -> anyhow::Result<String> {
+async fn consume_turn(session: &CommonSession) -> anyhow::Result<String> {
     let mut completed = None;
     while let Some(event) = session.answer().await? {
-        match event.data {
+        match event.event_data()? {
             SessionEventData::ModelOutput { content } => {
                 print!("{content}");
             }
             SessionEventData::ToolCall { arguments, .. } => {
-                eprintln!("tool {}: {arguments}", event.source);
+                eprintln!("tool {:?}: {arguments}", event.runtime_id);
             }
             SessionEventData::ToolOutput {
                 output,
                 completed,
                 ..
             } => {
-                eprintln!("tool {} [{completed}]: {output}", event.source);
+                eprintln!("tool {:?} [{completed}]: {output}", event.runtime_id);
             }
             SessionEventData::Completed { content } => {
                 completed = Some(content);
@@ -112,7 +112,9 @@ consume_turn(&session).await?;
 first.result::<()>().await?;
 
 session
-    .call("Show a minimal patch for that issue.".to_string())
+    .call(SessionInput::NewChat(
+        "Show a minimal patch for that issue.".into(),
+    ))
     .await?;
 consume_turn(&session).await?;
 ```
@@ -275,7 +277,7 @@ builder.execute(
 )?;
 ```
 
-Agent 的最终文本是该节点输出。流式事件会转发到 `WorkflowSession`，并附带 workflow ID、
+Agent 的最终文本是该节点输出。流式事件会转发到 `CommonSession`，并附带 workflow ID、
 node ID 和 turn ID。
 
 ## 11. 测试模式

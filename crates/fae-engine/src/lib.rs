@@ -161,7 +161,10 @@ mod tests {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("workflow session ended unexpectedly"))?;
             assert_eq!(event.node_id.as_deref(), Some(expected_node));
-            assert!(matches!(event.data, SessionEventData::NodeCompleted { .. }));
+            assert!(matches!(
+                event.event_data().unwrap(),
+                SessionEventData::NodeCompleted { .. }
+            ));
         }
         Ok(())
     }

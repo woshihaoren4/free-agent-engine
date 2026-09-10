@@ -6,11 +6,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Ctx, Plan, PlanBuilderWithEnv, PlanNext, Session, SessionEvent, SessionEventData,
-    SessionResponse, SingleAgentEnv, SingleAgentSession, TaskMeta, TaskReq, TaskRequest, TaskResp,
+    CommonSession, Ctx, Plan, PlanBuilderWithEnv, PlanNext, Session, SessionEvent,
+    SessionEventData, SessionResponse, SingleAgentEnv, TaskMeta, TaskReq, TaskRequest, TaskResp,
     TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction,
     WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv, WorkflowMetadata, WorkflowNode,
-    WorkflowSession, WorkflowValues, to_plan_ty,
+    WorkflowValues, to_plan_ty,
 };
 
 use super::builder::requires_dag_execution;
@@ -226,7 +226,7 @@ enum PendingAction {
     Workflow,
     Tool,
     Session,
-    SingleAgent(SingleAgentSession),
+    SingleAgent(CommonSession),
     Extension,
 }
 
@@ -235,7 +235,7 @@ struct WorkflowPlan {
     id: String,
     metadata: WorkflowMetadata,
     input: Value,
-    session: WorkflowSession,
+    session: CommonSession,
     ctx: Ctx,
     current: String,
     outputs: HashMap<String, Value>,
@@ -258,7 +258,7 @@ struct DagWorkflowPlan {
     id: String,
     metadata: WorkflowMetadata,
     input: Value,
-    session: WorkflowSession,
+    session: CommonSession,
     ctx: Ctx,
     start: String,
     predecessors: HashMap<String, HashSet<String>>,
@@ -562,7 +562,7 @@ impl WorkflowPlan {
                     let event = session.answer().await?.ok_or_else(|| {
                         anyhow::anyhow!("single-agent session ended without a final event")
                     })?;
-                    match event.data {
+                    match event.event_data()? {
                         SessionEventData::Completed { content } => {
                             break Ok(Value::String(content));
                         }
@@ -615,7 +615,7 @@ impl DagWorkflowPlan {
     fn new(
         metadata: WorkflowMetadata,
         input: Value,
-        session: WorkflowSession,
+        session: CommonSession,
         ctx: Ctx,
         start: String,
         complete_context: bool,
@@ -1017,7 +1017,7 @@ impl Plan for DagWorkflowPlan {
                     let event = session.answer().await?.ok_or_else(|| {
                         anyhow::anyhow!("single-agent session ended without a final event")
                     })?;
-                    match event.data {
+                    match event.event_data()? {
                         SessionEventData::Completed { content } => {
                             break Value::String(content);
                         }
@@ -1236,7 +1236,13 @@ mod tests {
             panic!("expected first action");
         };
         assert_eq!(
-            session.answer().await.unwrap().unwrap().data,
+            session
+                .answer()
+                .await
+                .unwrap()
+                .unwrap()
+                .event_data()
+                .unwrap(),
             SessionEventData::NodeCompleted {
                 output: json!({"name": "Ada"}),
                 finished: false,
@@ -1262,7 +1268,13 @@ mod tests {
             panic!("expected second action");
         };
         assert_eq!(
-            session.answer().await.unwrap().unwrap().data,
+            session
+                .answer()
+                .await
+                .unwrap()
+                .unwrap()
+                .event_data()
+                .unwrap(),
             SessionEventData::NodeCompleted {
                 output: json!({"output_field": {"count": 3}}),
                 finished: false,
@@ -1287,7 +1299,13 @@ mod tests {
             PlanNext::End
         ));
         assert_eq!(
-            session.answer().await.unwrap().unwrap().data,
+            session
+                .answer()
+                .await
+                .unwrap()
+                .unwrap()
+                .event_data()
+                .unwrap(),
             SessionEventData::NodeCompleted {
                 output: json!({"done": true}),
                 finished: false,
@@ -1327,7 +1345,7 @@ mod tests {
             let event = session.answer().await.unwrap().unwrap();
             assert_eq!(event.node_id.as_deref(), Some(node_id));
             assert_eq!(
-                event.data,
+                event.event_data().unwrap(),
                 SessionEventData::NodeCompleted { output, finished }
             );
         }
@@ -1480,7 +1498,7 @@ mod tests {
         let terminal = terminal.unwrap();
         assert_eq!(terminal.node_id.as_deref(), Some("e"));
         assert_eq!(
-            terminal.data,
+            terminal.event_data().unwrap(),
             SessionEventData::NodeCompleted {
                 output: json!({
                     "first": "first result",
@@ -1706,7 +1724,7 @@ mod tests {
         );
 
         child_session
-            .emit(
+            .emit_agent(
                 1,
                 "model",
                 SessionEventData::ModelOutput {
@@ -1715,18 +1733,21 @@ mod tests {
             )
             .unwrap();
         let chunk = session.answer().await.unwrap().unwrap();
-        assert_eq!(chunk.workflow_id.as_deref(), Some("single-agent-events"));
-        assert_eq!(chunk.node_id.as_deref(), Some("agent-node"));
-        assert_eq!(chunk.turn_id, Some(1));
         assert_eq!(
-            chunk.data,
+            chunk.parament_plan_id.as_deref(),
+            Some("single-agent-events")
+        );
+        assert_eq!(chunk.node_id.as_deref(), Some("agent-node"));
+        assert_eq!(chunk.plan_id.as_deref(), Some("1"));
+        assert_eq!(
+            chunk.event_data().unwrap(),
             SessionEventData::ModelOutput {
                 content: "hel".to_string()
             }
         );
 
         child_session
-            .emit(
+            .emit_agent(
                 1,
                 "agent",
                 SessionEventData::Completed {
@@ -1736,20 +1757,32 @@ mod tests {
             .unwrap();
         let completed = session.answer().await.unwrap().unwrap();
         assert_eq!(
-            completed.data,
+            completed.event_data().unwrap(),
             SessionEventData::Completed {
                 content: "hello".to_string()
             }
         );
         assert!(!completed.is_terminal());
         assert_eq!(
-            child_session.answer().await.unwrap().unwrap().data,
+            child_session
+                .answer()
+                .await
+                .unwrap()
+                .unwrap()
+                .event_data()
+                .unwrap(),
             SessionEventData::ModelOutput {
                 content: "hel".to_string()
             }
         );
         assert_eq!(
-            child_session.answer().await.unwrap().unwrap().data,
+            child_session
+                .answer()
+                .await
+                .unwrap()
+                .unwrap()
+                .event_data()
+                .unwrap(),
             SessionEventData::Completed {
                 content: "hello".to_string()
             }

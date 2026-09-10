@@ -272,7 +272,7 @@ let execution = engine.launch(env).await?;
 
 let events = async {
     while let Some(event) = session.answer().await? {
-        match &event.data {
+        match event.event_data()? {
             SessionEventData::ModelOutput { content } => print!("{content}"),
             SessionEventData::NodeCompleted { output, .. } => {
                 println!("{}: {output}", event.node_id.as_deref().unwrap_or("-"));

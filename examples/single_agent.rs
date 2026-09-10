@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use fae_agent::{Session, SessionEvent, SessionEventData, SingleAgentEnv};
+use fae_agent::{Session, SessionEventData, SessionInput, SessionOutput, SingleAgentEnv};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
     first_turn.result::<()>().await?;
 
     while let Some(input) = read_user_input()? {
-        session.call(input).await?;
+        session.call(SessionInput::NewChat(input.into())).await?;
         print_turn(&session).await?;
     }
 
@@ -48,13 +48,13 @@ fn read_user_input() -> anyhow::Result<Option<String>> {
     }
 }
 
-async fn print_turn(session: &impl Session<String, SessionEvent>) -> anyhow::Result<()> {
+async fn print_turn(session: &impl Session<SessionInput, SessionOutput>) -> anyhow::Result<()> {
     let mut streaming = None;
 
     while let Some(event) = session.answer().await? {
-        let turn_id = event.turn_id.unwrap_or_default();
-        let source = event.source;
-        match event.data {
+        let turn_id = event.plan_id.as_deref().unwrap_or_default();
+        let source = event.runtime_id.as_deref().unwrap_or_default();
+        match event.event_data()? {
             SessionEventData::TurnStarted { input } => {
                 println!("\n== Turn {turn_id} | {source} ==\nuser> {input}");
             }

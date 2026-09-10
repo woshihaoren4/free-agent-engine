@@ -115,7 +115,9 @@ async fn run_agent(
             let Some(input) = next_agent_input(&mut ui, &model, &session_id).await? else {
                 break;
             };
-            session.call(input).await?;
+            session
+                .call(fae_agent::SessionInput::NewChat(input.into()))
+                .await?;
             if !ui.run_session(&session, None).await? {
                 break;
             }

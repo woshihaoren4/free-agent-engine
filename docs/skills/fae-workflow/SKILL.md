@@ -15,7 +15,7 @@ description: "Builds, runs, and troubleshoots FAE workflows. Invoke when adding 
 - 编排串行、条件、并行、汇合、循环或父子流程。
 - 配置 `WorkflowRuntime`、`WorkflowPlanBuilder` 和 `FAEWorkflowMetadataLoader`。
 - 使用 Tool、SingleAgent、Session、Python、Custom action。
-- 消费 `WorkflowSession` 事件，或排查模板解析、图校验和运行时路由问题。
+- 消费 `CommonSession` 事件，或排查模板解析、图校验和运行时路由问题。
 
 不要把普通 Rust `Plan` 实现当作 Workflow。用户明确需要手写 `Plan` 状态机时，直接使用
 `Plan` / `PlanBuilderWithEnv` API。
@@ -30,7 +30,7 @@ description: "Builds, runs, and troubleshoots FAE workflows. Invoke when adding 
    metadata loader。
 5. 注册 metadata，或保存到 `{FAE_HOST}/workflows/<workflow-id>.json`。
 6. 使用 `WorkflowEnv::new` 启动流程；需要实时事件时优先使用 `engine.launch` 并并发消费
-   `WorkflowSession`。
+   `CommonSession`。
 7. 添加与改动风险匹配的测试，并运行 `cargo fmt --check`、目标测试和 `cargo check`。
 
 ## 开始前按需阅读

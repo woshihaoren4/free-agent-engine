@@ -6,8 +6,8 @@ use std::{
 };
 
 use fae_agent::{
-    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEvent,
-    SessionEventData, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
+    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEventData,
+    SessionInput, SessionOutput, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
     WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::EngineBuilder;
@@ -154,7 +154,7 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
     builder.build().await
 }
 
-async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Result<()> {
+async fn print_session(session: &impl Session<SessionInput, SessionOutput>) -> anyhow::Result<()> {
     let mut streaming = None;
     println!("\n=== WORKFLOW SESSION (LIVE) ===");
 
@@ -171,10 +171,11 @@ async fn print_session(session: &impl Session<(), SessionEvent>) -> anyhow::Resu
 }
 
 fn print_session_event(
-    event: &SessionEvent,
+    event: &SessionOutput,
     streaming: &mut Option<(String, &'static str)>,
 ) -> anyhow::Result<()> {
-    let stream_kind = match &event.data {
+    let data = event.event_data()?;
+    let stream_kind = match &data {
         SessionEventData::ModelReasoning { .. } => Some("reasoning"),
         SessionEventData::ModelOutput { .. } => Some("assistant"),
         _ => None,
@@ -184,8 +185,8 @@ fn print_session_event(
         let stream_id = format!(
             "{} / {} / turn {}",
             event.node_id.as_deref().unwrap_or("-"),
-            event.source,
-            event.turn_id.unwrap_or_default()
+            event.runtime_id.as_deref().unwrap_or("-"),
+            event.plan_id.as_deref().unwrap_or("-")
         );
         if streaming.as_ref() != Some(&(stream_id.clone(), kind)) {
             finish_stream(streaming);
@@ -194,7 +195,7 @@ fn print_session_event(
             *streaming = Some((stream_id, kind));
         }
 
-        let content = match &event.data {
+        let content = match &data {
             SessionEventData::ModelReasoning { content }
             | SessionEventData::ModelOutput { content } => content,
             _ => unreachable!(),

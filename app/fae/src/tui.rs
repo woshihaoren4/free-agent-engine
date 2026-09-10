@@ -15,7 +15,7 @@ use crossterm::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
     },
 };
-use fae_agent::{Ctx, Session, SessionEvent, SessionEventData};
+use fae_agent::{Ctx, Session, SessionEventData, SessionOutput};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -349,7 +349,7 @@ impl TerminalUi {
 
     pub async fn run_session<In>(
         &mut self,
-        session: &impl Session<In, SessionEvent>,
+        session: &impl Session<In, SessionOutput>,
         execution: Option<&Ctx>,
     ) -> anyhow::Result<bool>
     where
@@ -365,7 +365,7 @@ impl TerminalUi {
                         self.state = RunState::Idle;
                         return Ok(true);
                     };
-                    let terminal = self.apply_session_event(event);
+                    let terminal = self.apply_session_output(event)?;
                     if terminal {
                         if self.state != RunState::Failed {
                             self.state = RunState::Idle;
@@ -403,15 +403,16 @@ impl TerminalUi {
         }
     }
 
-    pub fn apply_session_event(&mut self, event: SessionEvent) -> bool {
+    pub fn apply_session_output(&mut self, event: SessionOutput) -> anyhow::Result<bool> {
         let terminal = event.is_terminal();
+        let source = event.runtime_id.as_deref().unwrap_or_default();
         let stream_id = format!(
             "{}:{}:{}",
             event.node_id.as_deref().unwrap_or_default(),
-            event.source,
-            event.turn_id.unwrap_or_default()
+            source,
+            event.plan_id.as_deref().unwrap_or_default()
         );
-        match event.data {
+        match event.event_data()? {
             SessionEventData::ModelReasoning { content } => {
                 self.append_stream(MessageKind::Reasoning, "Thinking", stream_id, content);
             }
@@ -422,7 +423,7 @@ impl TerminalUi {
                 self.finish_stream();
                 self.messages.push(Message {
                     kind: MessageKind::Tool,
-                    title: format!("Called {}", event.source),
+                    title: format!("Called {source}"),
                     content: pretty_json_text(&arguments),
                     stream_id: None,
                 });
@@ -436,7 +437,7 @@ impl TerminalUi {
                     title: format!(
                         "{} {}",
                         if completed { "Completed" } else { "Running" },
-                        event.source
+                        source
                     ),
                     content: pretty_json_text(&output),
                     stream_id: None,
@@ -449,10 +450,7 @@ impl TerminalUi {
                     title: if finished {
                         "Workflow complete".to_string()
                     } else {
-                        format!(
-                            "Completed {}",
-                            event.node_id.as_deref().unwrap_or(&event.source)
-                        )
+                        format!("Completed {}", event.node_id.as_deref().unwrap_or(source))
                     },
                     content: if output.is_null() {
                         String::new()
@@ -488,7 +486,7 @@ impl TerminalUi {
             SessionEventData::TurnStarted { .. } | SessionEventData::UserInput { .. } => {}
         }
         self.scroll_from_bottom = 0;
-        terminal
+        Ok(terminal)
     }
 
     fn append_stream(
@@ -958,7 +956,7 @@ fn display_cwd() -> String {
 
 #[cfg(test)]
 mod tests {
-    use fae_agent::SessionEventData;
+    use fae_agent::{SessionEvent, SessionEventData};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
