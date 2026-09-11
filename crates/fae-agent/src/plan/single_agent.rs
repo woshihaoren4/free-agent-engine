@@ -838,9 +838,18 @@ impl SingleAgentPlan {
         }
     }
 
-    fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
+    async fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
         let request = self.model_request();
-        if estimated_tokens(&request) > self.template.model.trigger_compression_size {
+        let estimated_tokens = estimated_tokens(&request);
+        if estimated_tokens > self.template.model.trigger_compression_size {
+            self.emit(
+                COMPRESSION_TASK_TYPE,
+                SessionEventData::CompressionStarted {
+                    estimated_tokens,
+                    trigger_compression_size: self.template.model.trigger_compression_size,
+                },
+            )
+            .await?;
             let content = serde_json::to_string(
                 &request
                     .messages
@@ -865,12 +874,19 @@ impl SingleAgentPlan {
         Ok(self.task(TaskType::Model, request))
     }
 
-    fn apply_compression(&mut self, content: String) -> anyhow::Result<TaskRequest> {
+    async fn apply_compression(&mut self, content: String) -> anyhow::Result<TaskRequest> {
         anyhow::ensure!(
             !content.trim().is_empty(),
             "compression runtime returned empty content"
         );
         let content = content.trim().to_string();
+        self.emit(
+            COMPRESSION_TASK_TYPE,
+            SessionEventData::CompressionCompleted {
+                content: content.clone(),
+            },
+        )
+        .await?;
         self.messages
             .retain(|message| matches!(message, ChatCompletionRequestMessage::System(_)));
         self.messages.push(summary_chat_message(&content));
@@ -1060,7 +1076,7 @@ impl SingleAgentPlan {
             let pending = self.session.take_pending_inputs();
             if !pending.is_empty() {
                 self.append_user_inputs(pending).await?;
-                return Ok(PlanNext::Tasks(vec![self.next_model_task()?]));
+                return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
             }
 
             self.stage = SingleAgentStage::Save;
@@ -1215,7 +1231,7 @@ impl SingleAgentPlan {
         if *remaining == 0 {
             let pending = self.session.take_pending_inputs();
             self.append_user_inputs(pending).await?;
-            Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
+            Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
         } else {
             Ok(PlanNext::Tasks(Vec::new()))
         }
@@ -1258,7 +1274,7 @@ impl Plan for SingleAgentPlan {
                 self.prepare_messages(&messages);
                 let pending = self.session.take_pending_inputs();
                 self.append_user_inputs(pending).await?;
-                Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
+                Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
             }
             SingleAgentStage::Compression => {
                 let response =
@@ -1270,7 +1286,7 @@ impl Plan for SingleAgentPlan {
                     anyhow::anyhow!("compression runtime returned a non-string output")
                 })?;
                 Ok(PlanNext::Tasks(vec![
-                    self.apply_compression(content.to_string())?,
+                    self.apply_compression(content.to_string()).await?,
                 ]))
             }
             SingleAgentStage::Model => {
@@ -1310,7 +1326,7 @@ impl Plan for SingleAgentPlan {
 
                 if let Some(pending) = self.session.finish_or_take_pending() {
                     self.append_user_inputs(pending).await?;
-                    Ok(PlanNext::Tasks(vec![self.next_model_task()?]))
+                    Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
                 } else {
                     self.finish_on_drop = true;
                     self.emit(
@@ -1601,20 +1617,21 @@ mod tests {
         assert_eq!(call.function.arguments, "{\"path\":\"Cargo.toml\"}");
     }
 
-    #[test]
-    fn oversized_context_requests_compression_before_model() {
+    #[tokio::test]
+    async fn oversized_context_requests_compression_before_model() {
         let mut template = test_template();
         template.model.trigger_compression_size = 1;
+        let session = CommonSession::new();
         let mut plan = SingleAgentPlan::new(
             Ctx::null(),
             template,
             "a long input that exceeds the configured context".to_string(),
             1,
-            CommonSession::new(),
+            session.clone(),
         );
         plan.prepare_messages(&[]);
 
-        let mut task = plan.next_model_task().unwrap();
+        let mut task = plan.next_model_task().await.unwrap();
 
         assert!(matches!(plan.stage, SingleAgentStage::Compression));
         assert_eq!(
@@ -1630,16 +1647,27 @@ mod tests {
                 .unwrap()
                 .contains("long input")
         );
+        let event = session.answer().await.unwrap().unwrap();
+        assert_eq!(event.runtime_id.as_deref(), Some(COMPRESSION_TASK_TYPE));
+        assert_eq!(event.input_type, "compression_started");
+        assert!(matches!(
+            event.event_data().unwrap(),
+            SessionEventData::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size: 1,
+            } if estimated_tokens > 1
+        ));
     }
 
-    #[test]
-    fn compressed_content_replaces_context_and_is_saved() {
+    #[tokio::test]
+    async fn compressed_content_replaces_context_and_is_saved() {
+        let session = CommonSession::new();
         let mut plan = SingleAgentPlan::new(
             Ctx::null(),
             test_template(),
             "current question".to_string(),
             1,
-            CommonSession::new(),
+            session.clone(),
         );
         plan.prepare_messages(&[
             SessionMessage::user("old question"),
@@ -1648,6 +1676,7 @@ mod tests {
 
         let mut task = plan
             .apply_compression("condensed history and current question".to_string())
+            .await
             .unwrap();
 
         assert!(matches!(plan.stage, SingleAgentStage::Model));
@@ -1671,6 +1700,15 @@ mod tests {
                     .unwrap()
                     .contains("condensed history")
         ));
+        let event = session.answer().await.unwrap().unwrap();
+        assert_eq!(event.runtime_id.as_deref(), Some(COMPRESSION_TASK_TYPE));
+        assert_eq!(event.input_type, "compression_completed");
+        assert_eq!(
+            event.event_data().unwrap(),
+            SessionEventData::CompressionCompleted {
+                content: "condensed history and current question".to_string(),
+            }
+        );
     }
 
     #[test]

@@ -80,6 +80,20 @@ async fn print_turn(session: &impl Session<SessionInput, SessionOutput>) -> anyh
                 print!("{content}");
                 io::stdout().flush()?;
             }
+            SessionEventData::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size,
+            } => {
+                finish_stream(&mut streaming);
+                println!(
+                    "compression started> estimated tokens: {estimated_tokens}, trigger: \
+                     {trigger_compression_size}"
+                );
+            }
+            SessionEventData::CompressionCompleted { content } => {
+                finish_stream(&mut streaming);
+                println!("compression completed> {content}");
+            }
             SessionEventData::ToolCall { arguments, .. } => {
                 finish_stream(&mut streaming);
                 println!("tool call> {source}\n{}", pretty_json(&arguments));

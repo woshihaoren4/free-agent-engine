@@ -241,6 +241,13 @@ pub enum SessionEventData {
     ModelReasoning {
         content: String,
     },
+    CompressionStarted {
+        estimated_tokens: usize,
+        trigger_compression_size: usize,
+    },
+    CompressionCompleted {
+        content: String,
+    },
     ToolCall {
         call_id: String,
         arguments: String,
@@ -270,6 +277,8 @@ impl SessionEventData {
             SessionEventData::UserInput { .. } => "user_input",
             SessionEventData::ModelOutput { .. } => "model_output",
             SessionEventData::ModelReasoning { .. } => "model_reasoning",
+            SessionEventData::CompressionStarted { .. } => "compression_started",
+            SessionEventData::CompressionCompleted { .. } => "compression_completed",
             SessionEventData::ToolCall { .. } => "tool_call",
             SessionEventData::ToolOutput { .. } => "tool_output",
             SessionEventData::Completed { .. } => "completed",
@@ -294,7 +303,15 @@ impl SessionEventData {
             Self::UserInput { content }
             | Self::ModelOutput { content }
             | Self::ModelReasoning { content }
+            | Self::CompressionCompleted { content }
             | Self::Completed { content } => serde_json::json!({ "content": content }),
+            Self::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size,
+            } => serde_json::json!({
+                "estimated_tokens": estimated_tokens,
+                "trigger_compression_size": trigger_compression_size,
+            }),
             Self::ToolCall { call_id, arguments } => {
                 serde_json::json!({ "call_id": call_id, "arguments": arguments })
             }
@@ -383,6 +400,13 @@ enum KnownSessionEventData {
     ModelReasoning {
         content: String,
     },
+    CompressionStarted {
+        estimated_tokens: usize,
+        trigger_compression_size: usize,
+    },
+    CompressionCompleted {
+        content: String,
+    },
     ToolCall {
         call_id: String,
         arguments: String,
@@ -410,6 +434,16 @@ impl From<KnownSessionEventData> for SessionEventData {
             KnownSessionEventData::UserInput { content } => Self::UserInput { content },
             KnownSessionEventData::ModelOutput { content } => Self::ModelOutput { content },
             KnownSessionEventData::ModelReasoning { content } => Self::ModelReasoning { content },
+            KnownSessionEventData::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size,
+            } => Self::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size,
+            },
+            KnownSessionEventData::CompressionCompleted { content } => {
+                Self::CompressionCompleted { content }
+            }
             KnownSessionEventData::ToolCall { call_id, arguments } => {
                 Self::ToolCall { call_id, arguments }
             }
@@ -446,6 +480,8 @@ fn deserialize_event_data(value: Value) -> serde_json::Result<SessionEventData> 
             | "user_input"
             | "model_output"
             | "model_reasoning"
+            | "compression_started"
+            | "compression_completed"
             | "tool_call"
             | "tool_output"
             | "completed"

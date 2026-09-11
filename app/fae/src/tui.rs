@@ -419,6 +419,29 @@ impl TerminalUi {
             SessionEventData::ModelOutput { content } => {
                 self.append_stream(MessageKind::Assistant, "Assistant", stream_id, content);
             }
+            SessionEventData::CompressionStarted {
+                estimated_tokens,
+                trigger_compression_size,
+            } => {
+                self.finish_stream();
+                self.messages.push(Message {
+                    kind: MessageKind::System,
+                    title: "Compressing context".to_string(),
+                    content: format!(
+                        "Estimated tokens: {estimated_tokens}, trigger: {trigger_compression_size}"
+                    ),
+                    stream_id: None,
+                });
+            }
+            SessionEventData::CompressionCompleted { content } => {
+                self.finish_stream();
+                self.messages.push(Message {
+                    kind: MessageKind::System,
+                    title: "Context compressed".to_string(),
+                    content,
+                    stream_id: None,
+                });
+            }
             SessionEventData::ToolCall { arguments, .. } => {
                 self.finish_stream();
                 self.messages.push(Message {
