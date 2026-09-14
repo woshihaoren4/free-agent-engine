@@ -823,6 +823,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shlex",
  "tokio",
  "tokio-stream",
  "wd_log",
