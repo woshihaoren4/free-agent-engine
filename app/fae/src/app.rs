@@ -106,7 +106,14 @@ async fn run_agent(
         let (env, session) = SingleAgentEnv::new(source, input);
         let execution = engine.launch(env).await?;
 
-        if !ui.run_session(&session, Some(&execution)).await? {
+        if !ui
+            .run_session(
+                &session,
+                Some(&execution),
+                Some(|content| fae_agent::SessionInput::Supplement(content.into())),
+            )
+            .await?
+        {
             return Ok(());
         }
         execution.result::<()>().await?;
@@ -118,7 +125,14 @@ async fn run_agent(
             session
                 .call(fae_agent::SessionInput::NewChat(input.into()))
                 .await?;
-            if !ui.run_session(&session, None).await? {
+            if !ui
+                .run_session(
+                    &session,
+                    None,
+                    Some(|content| fae_agent::SessionInput::Supplement(content.into())),
+                )
+                .await?
+            {
                 break;
             }
         }
@@ -155,7 +169,7 @@ async fn run_workflow(
 
     let result = async {
         let execution = engine.launch(env).await?;
-        if !ui.run_session(&session, Some(&execution)).await? {
+        if !ui.run_session(&session, Some(&execution), None).await? {
             return Ok(());
         }
         let output = execution.result::<Value>().await?;
@@ -183,7 +197,7 @@ async fn next_agent_input(
             "/exit" | "/quit" => return Ok(None),
             "/help" => {
                 ui.push_system(
-                    "/help  show commands\n/status  show model and session\n/clear  clear the transcript\n/exit  leave the session",
+                    "/help  show commands\n/status  show model and session\n/clear  clear the transcript\n/steer <message>  supplement a running agent\n/exit  leave the session",
                 );
             }
             "/status" => {

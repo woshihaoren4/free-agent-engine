@@ -83,6 +83,10 @@ const fn default_max_completion_tokens() -> Option<u32> {
     Some(32_000)
 }
 
+const MAX_EMPTY_MODEL_RETRIES: usize = 1;
+const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without assistant output. \
+Continue the task from the available context and return either a tool call or a final answer.";
+
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
 
 #[derive(Debug)]
@@ -760,6 +764,7 @@ struct SingleAgentPlan {
     unsaved_messages: Vec<SessionMessage>,
     final_output: String,
     tool_iterations: usize,
+    empty_model_retries: usize,
     task_sequence: u64,
     pending_tools: HashMap<String, PendingCall>,
     owns_active_turn: bool,
@@ -787,6 +792,7 @@ impl SingleAgentPlan {
             unsaved_messages: vec![initial_message],
             final_output: String::new(),
             tool_iterations: 0,
+            empty_model_retries: 0,
             task_sequence: 0,
             pending_tools: HashMap::new(),
             owns_active_turn: true,
@@ -839,6 +845,9 @@ impl SingleAgentPlan {
     }
 
     async fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
+        let pending = self.session.take_pending_inputs();
+        self.append_user_inputs(pending).await?;
+
         let request = self.model_request();
         let estimated_tokens = estimated_tokens(&request);
         if estimated_tokens > self.template.model.trigger_compression_size {
@@ -898,8 +907,7 @@ impl SingleAgentPlan {
             "compressed model request still exceeds trigger_compression_size ({})",
             self.template.model.trigger_compression_size
         );
-        self.stage = SingleAgentStage::Model;
-        Ok(self.task(TaskType::Model, request))
+        self.next_model_task().await
     }
 
     fn save_task(&mut self) -> TaskRequest {
@@ -1059,10 +1067,25 @@ impl SingleAgentPlan {
         }
 
         if tool_calls.is_empty() {
-            anyhow::ensure!(
-                !content.trim().is_empty(),
-                "model completed without assistant output"
-            );
+            if content.trim().is_empty() {
+                if self.empty_model_retries < MAX_EMPTY_MODEL_RETRIES {
+                    self.empty_model_retries += 1;
+                    self.messages.push(ChatCompletionRequestMessage::User(
+                        ChatCompletionRequestUserMessage {
+                            content: EMPTY_MODEL_RETRY_PROMPT.into(),
+                            ..Default::default()
+                        },
+                    ));
+                    return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
+                }
+                anyhow::bail!(
+                    "model completed without assistant output after {} retry \
+                     (finish_reason: {:?})",
+                    self.empty_model_retries,
+                    finish_reason
+                );
+            }
+            self.empty_model_retries = 0;
             self.final_output = content.clone();
             self.messages.push(ChatCompletionRequestMessage::Assistant(
                 ChatCompletionRequestAssistantMessage {
@@ -1083,6 +1106,7 @@ impl SingleAgentPlan {
             return Ok(PlanNext::Tasks(vec![self.save_task()]));
         }
 
+        self.empty_model_retries = 0;
         self.tool_iterations += 1;
         anyhow::ensure!(
             self.tool_iterations <= self.template.model.max_tool_iterations,
@@ -1229,8 +1253,6 @@ impl SingleAgentPlan {
         };
         *remaining -= 1;
         if *remaining == 0 {
-            let pending = self.session.take_pending_inputs();
-            self.append_user_inputs(pending).await?;
             Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
         } else {
             Ok(PlanNext::Tasks(Vec::new()))
@@ -1272,8 +1294,6 @@ impl Plan for SingleAgentPlan {
                     anyhow::bail!("expected history query response");
                 };
                 self.prepare_messages(&messages);
-                let pending = self.session.take_pending_inputs();
-                self.append_user_inputs(pending).await?;
                 Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
             }
             SingleAgentStage::Compression => {
@@ -1961,6 +1981,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compression_completion_reads_supplement_before_model_call() {
+        let session = CommonSession::new();
+        let ctx = Ctx::null();
+        let template = test_template();
+        let turn_id = session
+            .bind(SingleAgentBinding {
+                rt: RT::null(),
+                ctx: ctx.clone(),
+                template: template.clone(),
+            })
+            .await
+            .unwrap();
+        let mut plan =
+            SingleAgentPlan::new(ctx, template, "first".to_string(), turn_id, session.clone());
+        plan.prepare_messages(&[]);
+        session
+            .call(SessionInput::Supplement("new constraint".into()))
+            .await
+            .unwrap();
+
+        let mut task = plan
+            .apply_compression("condensed context".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(task.meta.ty, TaskType::Model);
+        let request = TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut task).unwrap();
+        let serialized = serde_json::to_string(&request.req.messages).unwrap();
+        assert!(serialized.contains("condensed context"));
+        assert!(serialized.contains("new constraint"));
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![
+                SessionMessage::user("first"),
+                SessionMessage::summary("condensed context"),
+                SessionMessage::user("new constraint"),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn active_plan_appends_new_input_after_tool_result() {
         let session = CommonSession::new();
         let ctx = Ctx::null();
@@ -2193,6 +2254,68 @@ mod tests {
         assert_eq!(
             plan.unsaved_messages,
             vec![SessionMessage::user("complete a long task")]
+        );
+        assert!(plan.final_output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_model_response_retries_once_before_failing() {
+        let session = CommonSession::new();
+        session.activate_turn().unwrap();
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "complete a complex task".to_string(),
+            1,
+            session,
+        );
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {"content": null, "role": "assistant"},
+                "finish_reason": "stop"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))
+        .unwrap();
+
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response.clone()))
+            .await
+            .unwrap()
+        else {
+            panic!("empty response should schedule a retry");
+        };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Model);
+        let request =
+            TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let retry_message = serde_json::to_value(request.req.messages.last().unwrap()).unwrap();
+        assert_eq!(retry_message["role"], "user");
+        assert_eq!(retry_message["content"], EMPTY_MODEL_RETRY_PROMPT);
+        assert_eq!(plan.empty_model_retries, 1);
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![SessionMessage::user("complete a complex task")]
+        );
+
+        let error = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("without assistant output after 1 retry")
+        );
+        assert!(error.to_string().contains("Some(Stop)"));
+        assert_eq!(
+            plan.unsaved_messages,
+            vec![SessionMessage::user("complete a complex task")]
         );
         assert!(plan.final_output.is_empty());
     }

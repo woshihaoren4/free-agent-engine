@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, process::Stdio};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use fae_agent::{
     Event, EventType, McpQuery, McpRequest, McpResponse, McpServerConfig, McpToolInfo,
@@ -9,7 +13,7 @@ use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, Tool},
     transport::{
-        TokioChildProcess, StreamableHttpClientTransport,
+        StreamableHttpClientTransport, TokioChildProcess,
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
@@ -88,11 +92,7 @@ impl RuntimeSelectExec<McpRequest, McpResponse, McpQuery, Vec<McpToolInfo>> for 
         Ok(self.event_receiver.clone())
     }
 
-    async fn select(
-        &self,
-        ty: TaskType,
-        query: McpQuery,
-    ) -> fae_agent::Result<Vec<McpToolInfo>> {
+    async fn select(&self, ty: TaskType, query: McpQuery) -> fae_agent::Result<Vec<McpToolInfo>> {
         if ty != TaskType::Mcp {
             return Err(fae_agent::Error::RuntimeNoSupport);
         }
@@ -140,10 +140,7 @@ impl RuntimeSelectExec<McpRequest, McpResponse, McpQuery, Vec<McpToolInfo>> for 
         Ok(())
     }
 
-    async fn exec(
-        &self,
-        task: TaskReq<McpRequest>,
-    ) -> fae_agent::Result<TaskResp<McpResponse>> {
+    async fn exec(&self, task: TaskReq<McpRequest>) -> fae_agent::Result<TaskResp<McpResponse>> {
         let TaskReq { ctx, mut meta, req } = task;
         let resp = self.execute(req).await?;
         meta.publisher = Self::ID.to_string();
@@ -151,11 +148,11 @@ impl RuntimeSelectExec<McpRequest, McpResponse, McpQuery, Vec<McpToolInfo>> for 
     }
 }
 
-async fn load_server_config(
-    mcp_dir: &Path,
-    server: &str,
-) -> anyhow::Result<McpServerConfig> {
-    anyhow::ensure!(!server.trim().is_empty(), "MCP server name must not be empty");
+async fn load_server_config(mcp_dir: &Path, server: &str) -> anyhow::Result<McpServerConfig> {
+    anyhow::ensure!(
+        !server.trim().is_empty(),
+        "MCP server name must not be empty"
+    );
     let mut entries = tokio::fs::read_dir(mcp_dir)
         .await
         .map_err(|error| anyhow::anyhow!("MCP directory `{}`: {error}", mcp_dir.display()))?;
@@ -173,9 +170,8 @@ async fn load_server_config(
     let mut found = None;
     for path in files {
         let content = tokio::fs::read_to_string(&path).await?;
-        let config: McpConfigFile = serde_json::from_str(&content).map_err(|error| {
-            anyhow::anyhow!("invalid MCP config `{}`: {error}", path.display())
-        })?;
+        let config: McpConfigFile = serde_json::from_str(&content)
+            .map_err(|error| anyhow::anyhow!("invalid MCP config `{}`: {error}", path.display()))?;
         if let Some(candidate) = config.mcp_servers.get(server) {
             anyhow::ensure!(
                 found.is_none(),
@@ -188,10 +184,7 @@ async fn load_server_config(
     found.ok_or_else(|| anyhow::anyhow!("MCP server `{server}` was not found"))
 }
 
-async fn list_tools(
-    server: &str,
-    config: McpServerConfig,
-) -> anyhow::Result<Vec<McpToolInfo>> {
+async fn list_tools(server: &str, config: McpServerConfig) -> anyhow::Result<Vec<McpToolInfo>> {
     let tools = match config {
         McpServerConfig::Local { command, args, env } => {
             let mut command = Command::new(command);
@@ -214,10 +207,7 @@ async fn list_tools(
     Ok(to_tool_info(server, tools))
 }
 
-async fn call_tool(
-    config: McpServerConfig,
-    request: McpRequest,
-) -> anyhow::Result<McpResponse> {
+async fn call_tool(config: McpServerConfig, request: McpRequest) -> anyhow::Result<McpResponse> {
     let arguments = serde_json::from_str::<Value>(&request.arguments)?;
     let Value::Object(arguments) = arguments else {
         anyhow::bail!("MCP tool arguments must be a JSON object");
@@ -274,7 +264,10 @@ fn to_tool_info(server: &str, tools: Vec<Tool>) -> Vec<McpToolInfo> {
         .map(|tool| McpToolInfo {
             server: server.to_string(),
             name: tool.name.into_owned(),
-            description: tool.description.map(|value| value.into_owned()).unwrap_or_default(),
+            description: tool
+                .description
+                .map(|value| value.into_owned())
+                .unwrap_or_default(),
             input_schema: Value::Object((*tool.input_schema).clone()),
         })
         .collect()

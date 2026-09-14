@@ -8,7 +8,7 @@ use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-        MouseEvent, MouseEventKind,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{
@@ -31,6 +31,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::args::ColorChoice;
 
 const SPINNER: &[&str] = &["-", "\\", "|", "/"];
+const OUTPUT_STATUS: &str = "Outputting...";
+const OUTPUT_ANIMATION_STEPS: usize = OUTPUT_STATUS.len() + 3;
 const PAGE_SCROLL_LINES: u16 = 8;
 const MOUSE_SCROLL_LINES: u16 = 3;
 
@@ -59,12 +61,45 @@ enum MessageKind {
     Error,
 }
 
+impl MessageKind {
+    fn folds_by_default(self) -> bool {
+        !matches!(self, Self::User | Self::Assistant)
+    }
+}
+
 #[derive(Debug)]
 struct Message {
     kind: MessageKind,
     title: String,
     content: String,
     stream_id: Option<String>,
+    expanded: bool,
+}
+
+impl Message {
+    fn new(
+        kind: MessageKind,
+        title: impl Into<String>,
+        content: impl Into<String>,
+        stream_id: Option<String>,
+    ) -> Self {
+        let content = content.into();
+        Self {
+            kind,
+            title: title.into(),
+            expanded: !kind.folds_by_default() || content.is_empty(),
+            content,
+            stream_id,
+        }
+    }
+
+    fn is_collapsible(&self) -> bool {
+        self.kind.folds_by_default() && !self.content.is_empty()
+    }
+
+    fn shows_content(&self) -> bool {
+        !self.is_collapsible() || self.expanded
+    }
 }
 
 #[derive(Debug, Default)]
@@ -159,10 +194,27 @@ impl Composer {
     }
 }
 
+fn parse_steer(input: &str) -> Option<&str> {
+    let content = input.strip_prefix("/steer")?;
+    if !content.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let content = content.trim();
+    (!content.is_empty()).then_some(content)
+}
+
 #[derive(Debug)]
 pub enum PromptAction {
     Submit(String),
     Exit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunningAction {
+    None,
+    Interrupt,
+    Steer(String),
+    InvalidSteer,
 }
 
 pub struct TerminalUi {
@@ -260,23 +312,26 @@ impl TerminalUi {
 
     pub fn push_user(&mut self, content: impl Into<String>) {
         self.finish_stream();
-        self.messages.push(Message {
-            kind: MessageKind::User,
-            title: "You".to_string(),
-            content: content.into(),
-            stream_id: None,
-        });
+        self.messages
+            .push(Message::new(MessageKind::User, "You", content, None));
+        self.scroll_from_bottom = 0;
+    }
+
+    fn push_steer(&mut self, content: impl Into<String>) {
+        self.finish_stream();
+        self.messages
+            .push(Message::new(MessageKind::User, "Steer", content, None));
         self.scroll_from_bottom = 0;
     }
 
     pub fn push_system(&mut self, content: impl Into<String>) {
         self.finish_stream();
-        self.messages.push(Message {
-            kind: MessageKind::System,
-            title: String::new(),
-            content: content.into(),
-            stream_id: None,
-        });
+        let content = content.into();
+        let (title, details) = content
+            .split_once('\n')
+            .map_or((content.as_str(), ""), |(title, details)| (title, details));
+        self.messages
+            .push(Message::new(MessageKind::System, title, details, None));
         self.scroll_from_bottom = 0;
     }
 
@@ -287,12 +342,12 @@ impl TerminalUi {
 
     pub fn workflow_result(&mut self, output: &Value) {
         self.finish_stream();
-        self.messages.push(Message {
-            kind: MessageKind::Workflow,
-            title: "Workflow result".to_string(),
-            content: pretty_value(output),
-            stream_id: None,
-        });
+        self.messages.push(Message::new(
+            MessageKind::Workflow,
+            "Workflow result",
+            pretty_value(output),
+            None,
+        ));
         self.state = RunState::Completed;
         self.scroll_from_bottom = 0;
     }
@@ -351,6 +406,7 @@ impl TerminalUi {
         &mut self,
         session: &impl Session<In, SessionOutput>,
         execution: Option<&Ctx>,
+        supplement: Option<fn(String) -> In>,
     ) -> anyhow::Result<bool>
     where
         In: Send + 'static,
@@ -379,17 +435,37 @@ impl TerminalUi {
                         return Ok(false);
                     };
                     match input? {
-                        TerminalEvent::Key(key)
-                            if key.kind == KeyEventKind::Press
-                                && self.handle_running_key(key) =>
-                        {
-                            if let Some(execution) = execution {
-                                execution.abort();
+                        TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                            match self.handle_running_key(key, supplement.is_some()) {
+                                RunningAction::None => {}
+                                RunningAction::Interrupt => {
+                                    if let Some(execution) = execution {
+                                        execution.abort();
+                                    }
+                                    self.push_system("Interrupted");
+                                    self.state = RunState::Idle;
+                                    self.draw()?;
+                                    return Ok(false);
+                                }
+                                RunningAction::Steer(content) => {
+                                    let make_input =
+                                        supplement.expect("steering is enabled for this session");
+                                    match session.call(make_input(content.clone())).await {
+                                        Ok(()) => self.push_steer(content),
+                                        Err(error) => self.push_system(format!(
+                                            "Steer rejected\n{error}"
+                                        )),
+                                    }
+                                }
+                                RunningAction::InvalidSteer => {
+                                    self.push_system(
+                                        "Invalid steer command\nUse `/steer <message>` while the agent is running.",
+                                    );
+                                }
                             }
-                            self.push_system("Interrupted");
-                            self.state = RunState::Idle;
-                            self.draw()?;
-                            return Ok(false);
+                        }
+                        TerminalEvent::Paste(content) if supplement.is_some() => {
+                            self.composer.insert(&content);
                         }
                         TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
                         TerminalEvent::Resize(_, _) => {}
@@ -397,7 +473,7 @@ impl TerminalUi {
                     }
                 }
                 _ = tick.tick() => {
-                    self.spinner = (self.spinner + 1) % SPINNER.len();
+                    self.spinner = (self.spinner + 1) % OUTPUT_ANIMATION_STEPS;
                 }
             }
         }
@@ -424,73 +500,69 @@ impl TerminalUi {
                 trigger_compression_size,
             } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::System,
-                    title: "Compressing context".to_string(),
-                    content: format!(
+                self.messages.push(Message::new(
+                    MessageKind::System,
+                    "Compressing context",
+                    format!(
                         "Estimated tokens: {estimated_tokens}, trigger: {trigger_compression_size}"
                     ),
-                    stream_id: None,
-                });
+                    None,
+                ));
             }
             SessionEventData::CompressionCompleted { content } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::System,
-                    title: "Context compressed".to_string(),
+                self.messages.push(Message::new(
+                    MessageKind::System,
+                    "Context compressed",
                     content,
-                    stream_id: None,
-                });
+                    None,
+                ));
             }
             SessionEventData::ToolCall { arguments, .. } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::Tool,
-                    title: format!("Called {source}"),
-                    content: pretty_json_text(&arguments),
-                    stream_id: None,
-                });
+                self.messages.push(Message::new(
+                    MessageKind::Tool,
+                    format!("Called {source}"),
+                    pretty_json_text(&arguments),
+                    None,
+                ));
             }
             SessionEventData::ToolOutput {
                 output, completed, ..
             } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::Tool,
-                    title: format!(
+                self.messages.push(Message::new(
+                    MessageKind::Tool,
+                    format!(
                         "{} {}",
                         if completed { "Completed" } else { "Running" },
                         source
                     ),
-                    content: pretty_json_text(&output),
-                    stream_id: None,
-                });
+                    pretty_json_text(&output),
+                    None,
+                ));
             }
             SessionEventData::NodeCompleted { output, finished } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::Workflow,
-                    title: if finished {
+                self.messages.push(Message::new(
+                    MessageKind::Workflow,
+                    if finished {
                         "Workflow complete".to_string()
                     } else {
                         format!("Completed {}", event.node_id.as_deref().unwrap_or(source))
                     },
-                    content: if output.is_null() {
+                    if output.is_null() {
                         String::new()
                     } else {
                         pretty_value(&output)
                     },
-                    stream_id: None,
-                });
+                    None,
+                ));
             }
             SessionEventData::Failed { error } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::Error,
-                    title: "Error".to_string(),
-                    content: error,
-                    stream_id: None,
-                });
+                self.messages
+                    .push(Message::new(MessageKind::Error, "Error", error, None));
                 self.state = RunState::Failed;
             }
             SessionEventData::Custom {
@@ -498,12 +570,12 @@ impl TerminalUi {
                 content,
             } => {
                 self.finish_stream();
-                self.messages.push(Message {
-                    kind: MessageKind::System,
-                    title: event_type,
-                    content: compact_value(&content),
-                    stream_id: None,
-                });
+                self.messages.push(Message::new(
+                    MessageKind::System,
+                    event_type,
+                    compact_value(&content),
+                    None,
+                ));
             }
             SessionEventData::Completed { .. } => self.finish_stream(),
             SessionEventData::TurnStarted { .. } | SessionEventData::UserInput { .. } => {}
@@ -610,19 +682,67 @@ impl TerminalUi {
         self.composer.cursor = self.composer.text.len();
     }
 
-    fn handle_running_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_running_key(&mut self, key: KeyEvent, can_steer: bool) -> RunningAction {
         match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) => true,
-            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => true,
+            (KeyCode::Esc, _) => RunningAction::Interrupt,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                RunningAction::Interrupt
+            }
             (KeyCode::PageUp, _) => {
                 self.scroll_up(PAGE_SCROLL_LINES);
-                false
+                RunningAction::None
             }
             (KeyCode::PageDown, _) => {
                 self.scroll_down(PAGE_SCROLL_LINES);
-                false
+                RunningAction::None
             }
-            _ => false,
+            _ if !can_steer => RunningAction::None,
+            (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.composer.insert("\n");
+                RunningAction::None
+            }
+            (KeyCode::Enter, modifiers)
+                if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                self.composer.insert("\n");
+                RunningAction::None
+            }
+            (KeyCode::Enter, _) => self.composer.take().map_or(RunningAction::None, |input| {
+                parse_steer(&input)
+                    .map(ToOwned::to_owned)
+                    .map_or(RunningAction::InvalidSteer, RunningAction::Steer)
+            }),
+            (KeyCode::Char(character), modifiers)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.composer.insert(&character.to_string());
+                RunningAction::None
+            }
+            (KeyCode::Backspace, _) => {
+                self.composer.backspace();
+                RunningAction::None
+            }
+            (KeyCode::Delete, _) => {
+                self.composer.delete();
+                RunningAction::None
+            }
+            (KeyCode::Left, _) => {
+                self.composer.move_left();
+                RunningAction::None
+            }
+            (KeyCode::Right, _) => {
+                self.composer.move_right();
+                RunningAction::None
+            }
+            (KeyCode::Home, _) => {
+                self.composer.move_home();
+                RunningAction::None
+            }
+            (KeyCode::End, _) => {
+                self.composer.move_end();
+                RunningAction::None
+            }
+            _ => RunningAction::None,
         }
     }
 
@@ -630,7 +750,29 @@ impl TerminalUi {
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(MOUSE_SCROLL_LINES),
             MouseEventKind::ScrollDown => self.scroll_down(MOUSE_SCROLL_LINES),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.toggle_message_at(mouse.column, mouse.row);
+            }
             _ => {}
+        }
+    }
+
+    fn toggle_message_at(&mut self, column: u16, row: u16) {
+        let frame_area = self.terminal.get_frame().area();
+        let areas = frame_areas(frame_area, &self.composer);
+        let transcript_area = areas[1];
+        let Some(index) = message_at_position(
+            &self.messages,
+            transcript_area,
+            self.scroll_from_bottom,
+            column,
+            row,
+        ) else {
+            return;
+        };
+        let message = &mut self.messages[index];
+        if message.is_collapsible() {
+            message.expanded = !message.expanded;
         }
     }
 
@@ -714,16 +856,20 @@ struct ViewModel<'a> {
     scroll_from_bottom: u16,
 }
 
-fn draw_frame(frame: &mut Frame<'_>, view: ViewModel<'_>) {
-    let composer_width = frame.area().width.saturating_sub(4).max(1) as usize;
-    let composer_height = (view.composer.visual_lines(composer_width) as u16 + 2).clamp(3, 8);
-    let areas = Layout::vertical([
+fn frame_areas(area: Rect, composer: &Composer) -> [Rect; 4] {
+    let composer_width = area.width.saturating_sub(4).max(1) as usize;
+    let composer_height = (composer.visual_lines(composer_width) as u16 + 2).clamp(3, 8);
+    Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(composer_height),
         Constraint::Length(1),
     ])
-    .split(frame.area());
+    .areas(area)
+}
+
+fn draw_frame(frame: &mut Frame<'_>, view: ViewModel<'_>) {
+    let areas = frame_areas(frame.area(), view.composer);
 
     draw_header(frame, areas[0], &view);
     draw_transcript(frame, areas[1], &view);
@@ -760,7 +906,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
-    let text = transcript_text(view.messages, view.color);
+    let text = transcript_text(view.messages, view.color, view.spinner);
     let paragraph = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .block(Block::default().padding(Padding::horizontal(1)));
@@ -784,9 +930,27 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
             },
         ),
         RunState::Running => (
-            " Working ",
+            if view.mode == Mode::Agent {
+                " Steer "
+            } else {
+                " Working "
+            },
             color(view.color, Color::Yellow),
-            format!("{} Running... Esc to interrupt", SPINNER[view.spinner]),
+            if view.mode == Mode::Agent {
+                if view.composer.text.is_empty() {
+                    format!(
+                        "{} Running... /steer <message>",
+                        SPINNER[view.spinner % SPINNER.len()]
+                    )
+                } else {
+                    view.composer.text.clone()
+                }
+            } else {
+                format!(
+                    "{} Running... Esc to interrupt",
+                    SPINNER[view.spinner % SPINNER.len()]
+                )
+            },
         ),
         RunState::Completed => (
             " Done ",
@@ -799,7 +963,10 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
             view.composer.text.clone(),
         ),
     };
-    let content_style = if view.state == RunState::Idle && view.composer.text.is_empty() {
+    let shows_placeholder = view.composer.text.is_empty()
+        && (view.state == RunState::Idle
+            || view.state == RunState::Running && view.mode == Mode::Agent);
+    let content_style = if shows_placeholder {
         Style::default().fg(color(view.color, Color::DarkGray))
     } else {
         Style::default()
@@ -818,7 +985,9 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
         area,
     );
 
-    if matches!(view.state, RunState::Idle | RunState::Failed) {
+    if matches!(view.state, RunState::Idle | RunState::Failed)
+        || view.state == RunState::Running && view.mode == Mode::Agent
+    {
         let inner_width = area.width.saturating_sub(4).max(1) as usize;
         let (cursor_x, cursor_y) = view.composer.visual_cursor(inner_width);
         frame.set_cursor_position(Position::new(
@@ -830,6 +999,9 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
     let hint = match view.state {
+        RunState::Running if view.mode == Mode::Agent => {
+            " Enter steer   Esc interrupt   Wheel/PgUp/PgDn scroll "
+        }
         RunState::Running => " Esc interrupt   Wheel/PgUp/PgDn scroll ",
         RunState::Completed => " Enter close   Wheel/PgUp/PgDn scroll ",
         _ => " Enter send   Ctrl+J newline   Wheel/PgUp/PgDn scroll   Ctrl+C quit ",
@@ -843,7 +1015,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
     );
 }
 
-fn transcript_text(messages: &[Message], use_color: bool) -> Text<'static> {
+fn transcript_text(messages: &[Message], use_color: bool, pulse: usize) -> Text<'static> {
     let mut lines = Vec::new();
     if messages.is_empty() {
         lines.push(Line::from(""));
@@ -872,19 +1044,126 @@ fn transcript_text(messages: &[Message], use_color: bool) -> Text<'static> {
         } else {
             format!("{marker} {}", message.title)
         };
-        lines.push(Line::from(Span::styled(
-            heading,
+        let disclosure = if message.is_collapsible() {
+            if message.expanded { "[-] " } else { "[+] " }
+        } else {
+            ""
+        };
+        let mut heading_spans = vec![Span::styled(
+            format!("{disclosure}{heading}"),
             Style::default()
                 .fg(color(use_color, marker_color))
                 .add_modifier(modifier),
-        )));
-        if !message.content.is_empty() {
+        )];
+        if message.stream_id.is_some() {
+            heading_spans.extend(output_status_spans(use_color, pulse));
+        }
+        lines.push(Line::from(heading_spans));
+        if message.shows_content() && !message.content.is_empty() {
             for content_line in message.content.lines() {
                 lines.push(Line::from(format!("  {content_line}")));
             }
         }
     }
     Text::from(lines)
+}
+
+fn output_status_spans(use_color: bool, tick: usize) -> Vec<Span<'static>> {
+    let head = tick % OUTPUT_ANIMATION_STEPS;
+    let mut spans = Vec::with_capacity(OUTPUT_STATUS.len() + 1);
+    spans.push(Span::raw("  "));
+    for (index, character) in OUTPUT_STATUS.chars().enumerate() {
+        let style = match head.checked_sub(index) {
+            Some(0) => Style::default()
+                .fg(color(use_color, Color::Yellow))
+                .add_modifier(Modifier::BOLD),
+            Some(1) => Style::default().fg(color(use_color, Color::White)),
+            Some(2) => Style::default().fg(color(use_color, Color::Gray)),
+            _ => Style::default()
+                .fg(color(use_color, Color::DarkGray))
+                .add_modifier(Modifier::DIM),
+        };
+        spans.push(Span::styled(character.to_string(), style));
+    }
+    spans
+}
+
+fn message_at_position(
+    messages: &[Message],
+    area: Rect,
+    scroll_from_bottom: u16,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    if row < area.top()
+        || row >= area.bottom()
+        || column <= area.left()
+        || column >= area.right().saturating_sub(1)
+    {
+        return None;
+    }
+
+    let width = area.width.saturating_sub(2);
+    let mut heading_ranges = Vec::with_capacity(messages.len());
+    let mut total_lines = 0u16;
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            total_lines = total_lines.saturating_add(1);
+        }
+        let heading_start = total_lines;
+        total_lines =
+            total_lines.saturating_add(wrapped_line_count(&message_heading(message, true), width));
+        heading_ranges.push((heading_start..total_lines, index));
+
+        if message.shows_content() {
+            for line in message.content.lines() {
+                total_lines =
+                    total_lines.saturating_add(wrapped_line_count(&format!("  {line}"), width));
+            }
+        }
+    }
+
+    let max_scroll = total_lines.saturating_sub(area.height);
+    let scroll = max_scroll.saturating_sub(scroll_from_bottom.min(max_scroll));
+    let clicked_line = scroll.saturating_add(row.saturating_sub(area.y));
+    heading_ranges
+        .into_iter()
+        .find_map(|(range, index)| range.contains(&clicked_line).then_some(index))
+}
+
+fn wrapped_line_count(line: &str, width: u16) -> u16 {
+    Paragraph::new(line)
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .min(u16::MAX as usize) as u16
+}
+
+fn message_heading(message: &Message, include_output_status: bool) -> String {
+    let marker = match message.kind {
+        MessageKind::User => ">",
+        MessageKind::Assistant => "*",
+        MessageKind::Reasoning => "-",
+        MessageKind::Tool => "$",
+        MessageKind::Workflow => "+",
+        MessageKind::System => "-",
+        MessageKind::Error => "!",
+    };
+    let disclosure = if message.is_collapsible() {
+        if message.expanded { "[-] " } else { "[+] " }
+    } else {
+        ""
+    };
+    let title = if message.title.is_empty() {
+        marker.to_string()
+    } else {
+        format!("{marker} {}", message.title)
+    };
+    let output_status = if include_output_status && message.stream_id.is_some() {
+        concat!("  ", "Outputting...")
+    } else {
+        ""
+    };
+    format!("{disclosure}{title}{output_status}")
 }
 
 fn plain_transcript(messages: &[Message]) -> String {
@@ -947,12 +1226,7 @@ fn append_stream_message(
         if let Some(message) = messages.last_mut() {
             message.stream_id = None;
         }
-        messages.push(Message {
-            kind,
-            title: title.to_string(),
-            content,
-            stream_id: Some(stream_id),
-        });
+        messages.push(Message::new(kind, title, content, Some(stream_id)));
     }
 }
 
@@ -997,6 +1271,18 @@ mod tests {
     }
 
     #[test]
+    fn steer_command_requires_fixed_prefix_and_content() {
+        assert_eq!(
+            parse_steer("/steer  use the new constraint"),
+            Some("use the new constraint")
+        );
+        assert_eq!(parse_steer("/steer\nsecond line"), Some("second line"));
+        assert_eq!(parse_steer("/steer"), None);
+        assert_eq!(parse_steer("/steering elsewhere"), None);
+        assert_eq!(parse_steer(" /steer too late"), None);
+    }
+
+    #[test]
     fn streaming_chunks_merge_into_one_message() {
         let mut messages = Vec::new();
         append_stream_message(
@@ -1019,15 +1305,70 @@ mod tests {
     }
 
     #[test]
+    fn non_model_details_are_collapsed_by_default() {
+        let tool = Message::new(MessageKind::Tool, "Called shell", "{\"cmd\":\"pwd\"}", None);
+        let assistant = Message::new(MessageKind::Assistant, "Assistant", "Answer", None);
+
+        assert!(tool.is_collapsible());
+        assert!(!tool.expanded);
+        assert!(!tool.shows_content());
+        assert!(assistant.expanded);
+        assert!(assistant.shows_content());
+    }
+
+    #[test]
+    fn collapsed_details_are_hidden_and_output_status_is_visible() {
+        let messages = vec![Message::new(
+            MessageKind::Reasoning,
+            "Thinking",
+            "private details",
+            Some("stream".to_string()),
+        )];
+
+        let text = transcript_text(&messages, false, 0);
+        let rendered = text
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("[+] - Thinking  Outputting..."));
+        assert!(!rendered.contains("private details"));
+    }
+
+    #[test]
+    fn output_status_highlight_moves_from_left_to_right() {
+        let first_frame = output_status_spans(true, 0);
+        let fourth_frame = output_status_spans(true, 3);
+
+        assert_eq!(first_frame[1].style.fg, Some(Color::Yellow));
+        assert_eq!(fourth_frame[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(fourth_frame[4].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn clicking_a_collapsed_heading_finds_its_message() {
+        let messages = vec![
+            Message::new(MessageKind::User, "You", "Question", None),
+            Message::new(MessageKind::Tool, "Called shell", "details", None),
+        ];
+        let area = Rect::new(0, 3, 40, 6);
+
+        assert_eq!(message_at_position(&messages, area, 0, 1, 6), Some(1));
+        assert_eq!(message_at_position(&messages, area, 0, 1, 5), None);
+    }
+
+    #[test]
     fn compact_layout_renders_without_overlap() {
         let backend = TestBackend::new(60, 16);
         let mut terminal = Terminal::new(backend).unwrap();
-        let messages = vec![Message {
-            kind: MessageKind::Assistant,
-            title: "Assistant".to_string(),
-            content: "A response that remains visible above the composer.".to_string(),
-            stream_id: None,
-        }];
+        let messages = vec![Message::new(
+            MessageKind::Assistant,
+            "Assistant",
+            "A response that remains visible above the composer.",
+            None,
+        )];
         let composer = Composer::default();
 
         terminal
@@ -1060,12 +1401,12 @@ mod tests {
     fn transcript_scrolls_to_last_word_wrapped_line() {
         let backend = TestBackend::new(20, 10);
         let mut terminal = Terminal::new(backend).unwrap();
-        let messages = vec![Message {
-            kind: MessageKind::Assistant,
-            title: "Assistant".to_string(),
-            content: "1234567890 1234567890 FINAL_END".to_string(),
-            stream_id: None,
-        }];
+        let messages = vec![Message::new(
+            MessageKind::Assistant,
+            "Assistant",
+            "1234567890 1234567890 FINAL_END",
+            None,
+        )];
         let composer = Composer::default();
 
         terminal
@@ -1094,18 +1435,13 @@ mod tests {
     #[test]
     fn plain_transcript_preserves_visible_conversation() {
         let messages = vec![
-            Message {
-                kind: MessageKind::User,
-                title: "You".to_string(),
-                content: "Question".to_string(),
-                stream_id: None,
-            },
-            Message {
-                kind: MessageKind::Assistant,
-                title: "Assistant".to_string(),
-                content: "First line\nSecond line".to_string(),
-                stream_id: None,
-            },
+            Message::new(MessageKind::User, "You", "Question", None),
+            Message::new(
+                MessageKind::Assistant,
+                "Assistant",
+                "First line\nSecond line",
+                None,
+            ),
         ];
 
         assert_eq!(
