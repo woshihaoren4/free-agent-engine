@@ -81,6 +81,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
     "temperature": 0.2,
     "max_tool_iterations": 8
   },
+  "prompt_sections": [],
   "tools": ["read_file"],
   "skills": [
     {
@@ -88,11 +89,14 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
       "value": "fae-agent"
     }
   ],
-  "mcp_servers": []
+  "mcp_servers": [],
+  "sub_agents": []
 }
 ```
 
-Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。
+Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。运行时会将其包装为
+`<setting>`，并在加载 History 前追加 `<skills>`、`<mcp>` 和 `<sub_agent>`。需要自定义区段时，
+在 `prompt_sections` 中配置英文 `tag` 与 `text`。
 
 ## 修改策略
 
@@ -102,6 +106,7 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
+- 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID。
 - 重新生成完整 config：
 
 ```bash

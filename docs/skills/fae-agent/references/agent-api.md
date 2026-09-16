@@ -81,6 +81,7 @@ ${FAE_HOST:-~/.fae}/
     "temperature": 0.2,
     "max_tool_iterations": 8
   },
+  "prompt_sections": [],
   "tools": ["read_file", "execute_command"],
   "skills": [
     {
@@ -92,7 +93,8 @@ ${FAE_HOST:-~/.fae}/
       "value": "/workspace/skills/reviewer/SKILL.md"
     }
   ],
-  "mcp_servers": ["maps"]
+  "mcp_servers": ["maps"],
+  "sub_agents": ["researcher"]
 }
 ```
 
@@ -132,10 +134,14 @@ ${FAE_HOST:-~/.fae}/
 | `tools` | Agent 可直接调用的内置工具 | `[]` |
 | `skills` | 注入到 Agent 上下文的 Skill | `[]` |
 | `mcp_servers` | Agent 可访问的 MCP server | `[]` |
+| `sub_agents` | 可通过 `call_sub_agent` 调用的 Agent ID | `[]` |
+| `prompt_sections` | 额外的 `{ "tag", "text" }` prompt 区段 | `[]` |
 
 ## 4. System Prompt
 
-`reviewer_prompt.txt` 只保存 Agent 的长期行为约束，例如：
+`reviewer_prompt.txt` 只保存 Agent 的长期行为约束。运行时会将内容包装在英文
+`<setting>` 标签中，并在读取 History 前按顺序追加自定义区段、`<skills>`、`<mcp>` 和
+`<sub_agent>`。例如：
 
 ```text
 You are a code reviewer.
@@ -160,6 +166,22 @@ Keep the final summary concise.
 - 密钥、token 或其他敏感信息。
 - 与 config 重复的模型名、会话 ID 或能力列表。
 - 无法通过当前 Tool、Skill 或 MCP 实现的承诺。
+
+可在 config 中追加任意英文标签区段：
+
+```json
+{
+  "prompt_sections": [
+    {
+      "tag": "project_context",
+      "text": "Repository-specific constraints."
+    }
+  ],
+  "sub_agents": ["researcher", "reviewer"]
+}
+```
+
+`tag` 必须以小写英文字母开头，且只能包含小写英文字母、数字和下划线。
 
 修改 prompt 后重新启动 `fae agent`，新会话运行会读取最新内容。
 

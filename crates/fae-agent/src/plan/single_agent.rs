@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::{Notify, RwLock};
 use tokio_stream::StreamExt;
 
+use crate::plan::to_plan_ty;
 use crate::{
     Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse, Plan, PlanBuilderWithEnv,
     PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput, SessionInputData,
@@ -57,11 +58,21 @@ pub struct SingleAgentConfig {
     pub agent: SingleAgentInfo,
     pub model: SingleAgentModelConfig,
     #[serde(default)]
+    pub prompt_sections: Vec<PromptSection>,
+    #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
     pub skills: Vec<SkillQuery>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+    #[serde(default)]
+    pub sub_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSection {
+    pub tag: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,11 +99,14 @@ const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without ass
 Continue the task from the available context and return either a tool call or a final answer.";
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
+const SUB_AGENT_TOOL_NAME: &str = "call_sub_agent";
 
 #[derive(Debug)]
 pub struct SingleAgentEnv {
     pub source: SingleAgentSource,
     pub input: String,
+    session_id: Option<String>,
+    ancestor_agents: Vec<String>,
     session: CommonSession,
 }
 
@@ -124,10 +138,22 @@ impl SingleAgentEnv {
             Self {
                 source,
                 input: input.into(),
+                session_id: None,
+                ancestor_agents: Vec::new(),
                 session: session.clone(),
             },
             session,
         )
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    fn with_ancestor_agents(mut self, ancestor_agents: Vec<String>) -> Self {
+        self.ancestor_agents = ancestor_agents;
+        self
     }
 
     pub fn session(&self) -> CommonSession {
@@ -146,6 +172,8 @@ impl SingleAgentEnv {
             Self {
                 source,
                 input: input.into(),
+                session_id: None,
+                ancestor_agents: Vec::new(),
                 session: session.clone(),
             },
             session,
@@ -511,11 +539,22 @@ impl SingleAgentPlanBuilder {
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
         anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
-        let (config, prompt) = self.load_config(&env.source).await?;
+        let (mut config, base_prompt) = self.load_config(&env.source).await?;
+        anyhow::ensure!(
+            !env.ancestor_agents.contains(&config.agent.name),
+            "recursive sub-agent call detected for `{}`",
+            config.agent.name
+        );
+        let mut ancestor_agents = env.ancestor_agents;
+        ancestor_agents.push(config.agent.name.clone());
+        if let Some(session_id) = env.session_id {
+            anyhow::ensure!(!session_id.trim().is_empty(), "session_id cannot be empty");
+            config.agent.session_id = session_id;
+        }
         let skills = resolve_skills(&rt, &config.skills).await?;
-        let prompt = prompt_with_skills(prompt, &skills);
         let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &config.tools).await?;
-        let (mcp_definitions, mcp_routes) = resolve_mcp_tools(&rt, &config.mcp_servers).await?;
+        let (mcp_definitions, mcp_routes, mcp_tools) =
+            resolve_mcp_tools(&rt, &config.mcp_servers).await?;
         for (name, route) in mcp_routes {
             anyhow::ensure!(
                 tool_routes.insert(name.clone(), route).is_none(),
@@ -523,12 +562,40 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             );
         }
         tool_definitions.extend(mcp_definitions);
+        let sub_agents = self
+            .resolve_sub_agents(&config.agent.name, &config.sub_agents)
+            .await?;
+        if !sub_agents.is_empty() {
+            anyhow::ensure!(
+                tool_routes
+                    .insert(
+                        SUB_AGENT_TOOL_NAME.to_string(),
+                        CallableRoute::SubAgent {
+                            sources: sub_agents
+                                .iter()
+                                .map(|agent| (agent.agent_id.clone(), agent.source.clone()))
+                                .collect(),
+                        },
+                    )
+                    .is_none(),
+                "configured tool name `{SUB_AGENT_TOOL_NAME}` conflicts with the sub-agent tool"
+            );
+            tool_definitions.push(sub_agent_tool_definition(&sub_agents));
+        }
+        let prompt = build_prompt(
+            &base_prompt,
+            &config.prompt_sections,
+            &skills,
+            &mcp_tools,
+            &sub_agents,
+        )?;
         let template = SingleAgentTemplate {
             agent: config.agent,
             prompt,
             model: config.model,
             tool_definitions,
             tool_routes,
+            ancestor_agents,
         };
         let binding = SingleAgentBinding {
             rt: rt.clone(),
@@ -544,6 +611,42 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             turn_id,
             env.session,
         )))
+    }
+}
+
+impl SingleAgentPlanBuilder {
+    async fn resolve_sub_agents(
+        &self,
+        parent_agent_name: &str,
+        agent_ids: &[String],
+    ) -> anyhow::Result<Vec<ResolvedSubAgent>> {
+        let mut agents = Vec::with_capacity(agent_ids.len());
+        let mut seen = std::collections::HashSet::with_capacity(agent_ids.len());
+        for agent_id in agent_ids {
+            validate_agent_id(agent_id)?;
+            anyhow::ensure!(
+                agent_id != parent_agent_name,
+                "agent `{parent_agent_name}` cannot mount itself as a sub-agent"
+            );
+            anyhow::ensure!(
+                seen.insert(agent_id.clone()),
+                "sub-agent `{agent_id}` is configured more than once"
+            );
+            let source = SingleAgentSource::AgentId(agent_id.clone());
+            let (config, _) = self.load_config(&source).await.map_err(|error| {
+                anyhow::anyhow!("load sub-agent `{agent_id}` configuration: {error}")
+            })?;
+            let agents_dir = self.home_dir.join("agents");
+            agents.push(ResolvedSubAgent {
+                agent_id: agent_id.clone(),
+                info: config.agent,
+                source: SingleAgentSource::Paths {
+                    config: agents_dir.join(format!("{agent_id}_config.json")),
+                    prompt: agents_dir.join(format!("{agent_id}_prompt.txt")),
+                },
+            });
+        }
+        Ok(agents)
     }
 }
 
@@ -572,6 +675,9 @@ fn validate_config(config: &SingleAgentConfig) -> anyhow::Result<()> {
         config.model.max_tool_iterations > 0,
         "max_tool_iterations must be positive"
     );
+    for section in &config.prompt_sections {
+        validate_prompt_tag(&section.tag)?;
+    }
     Ok(())
 }
 
@@ -651,29 +757,118 @@ async fn resolve_skills(rt: &RT, queries: &[SkillQuery]) -> anyhow::Result<Vec<S
     Ok(skills)
 }
 
-fn prompt_with_skills(mut prompt: String, skills: &[SkillInfo]) -> String {
-    if skills.is_empty() {
-        return prompt;
+fn validate_prompt_tag(tag: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !tag.is_empty()
+            && tag
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| byte.is_ascii_lowercase()
+                    || (index > 0 && (byte.is_ascii_digit() || byte == b'_'))),
+        "prompt section tag `{tag}` must use lowercase English letters, digits, or underscores and start with a letter"
+    );
+    Ok(())
+}
+
+fn append_prompt_section(
+    prompt: &mut String,
+    tag: &str,
+    text: impl AsRef<str>,
+) -> anyhow::Result<()> {
+    validate_prompt_tag(tag)?;
+    let text = text.as_ref().trim();
+    if text.is_empty() {
+        return Ok(());
     }
-    prompt.push_str("\n\n## Available Skills\n");
-    prompt.push_str("Read the matching SKILL.md file before applying a skill.\n");
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push('<');
+    prompt.push_str(tag);
+    prompt.push_str(">\n");
+    prompt.push_str(text);
+    prompt.push_str("\n</");
+    prompt.push_str(tag);
+    prompt.push('>');
+    Ok(())
+}
+
+fn build_prompt(
+    base_prompt: &str,
+    extra_sections: &[PromptSection],
+    skills: &[SkillInfo],
+    mcp_tools: &[McpToolInfo],
+    sub_agents: &[ResolvedSubAgent],
+) -> anyhow::Result<String> {
+    let mut prompt = String::new();
+    append_prompt_section(&mut prompt, "setting", base_prompt)?;
+    for section in extra_sections {
+        append_prompt_section(&mut prompt, &section.tag, &section.text)?;
+    }
+    append_prompt_section(&mut prompt, "skills", skills_prompt(skills))?;
+    append_prompt_section(&mut prompt, "mcp", mcp_prompt(mcp_tools))?;
+    append_prompt_section(&mut prompt, "sub_agent", sub_agents_prompt(sub_agents))?;
+    Ok(prompt)
+}
+
+fn skills_prompt(skills: &[SkillInfo]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from("Read the matching SKILL.md file before applying a skill.\n");
     for skill in skills {
-        prompt.push_str(&format!(
+        text.push_str(&format!(
             "- {}: {} (path: {})\n",
             skill.name,
             skill.description,
             skill.path.display()
         ));
     }
-    prompt
+    text
+}
+
+fn mcp_prompt(tools: &[McpToolInfo]) -> String {
+    let mut text = String::new();
+    for tool in tools {
+        text.push_str(&format!(
+            "- {}: {} (server: {}, tool: {})\n",
+            tool.model_name(),
+            tool.description,
+            tool.server,
+            tool.name
+        ));
+    }
+    text
+}
+
+fn sub_agents_prompt(agents: &[ResolvedSubAgent]) -> String {
+    if agents.is_empty() {
+        return String::new();
+    }
+    let mut text =
+        String::from("Use the call_sub_agent tool to delegate a task to one of these agents.\n");
+    for agent in agents {
+        text.push_str(&format!(
+            "- {}: name={}, metadata={}\n",
+            agent.agent_id,
+            agent.info.name,
+            serde_json::to_string(&agent.info.metadata).unwrap_or_else(|_| "{}".to_string())
+        ));
+    }
+    text
 }
 
 async fn resolve_mcp_tools(
     rt: &RT,
     servers: &[String],
-) -> anyhow::Result<(Vec<ChatCompletionTools>, HashMap<String, CallableRoute>)> {
+) -> anyhow::Result<(
+    Vec<ChatCompletionTools>,
+    HashMap<String, CallableRoute>,
+    Vec<McpToolInfo>,
+)> {
     let mut definitions = Vec::new();
     let mut routes = HashMap::new();
+    let mut resolved_tools = Vec::new();
     for server in servers {
         let tools = rt
             .select::<_, Vec<McpToolInfo>>(TaskType::Mcp, McpQuery::new(server))
@@ -685,8 +880,8 @@ async fn resolve_mcp_tools(
                     .insert(
                         model_name.clone(),
                         CallableRoute::Mcp {
-                            server: tool.server,
-                            tool_name: tool.name,
+                            server: tool.server.clone(),
+                            tool_name: tool.name.clone(),
                         },
                     )
                     .is_none(),
@@ -696,21 +891,64 @@ async fn resolve_mcp_tools(
                 async_openai::types::chat::ChatCompletionTool {
                     function: FunctionObject {
                         name: model_name,
-                        description: (!tool.description.is_empty()).then_some(tool.description),
-                        parameters: Some(tool.input_schema),
+                        description: (!tool.description.is_empty())
+                            .then_some(tool.description.clone()),
+                        parameters: Some(tool.input_schema.clone()),
                         strict: None,
                     },
                 },
             ));
+            resolved_tools.push(tool);
         }
     }
-    Ok((definitions, routes))
+    Ok((definitions, routes, resolved_tools))
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedSubAgent {
+    agent_id: String,
+    info: SingleAgentInfo,
+    source: SingleAgentSource,
+}
+
+fn sub_agent_tool_definition(agents: &[ResolvedSubAgent]) -> ChatCompletionTools {
+    ChatCompletionTools::Function(async_openai::types::chat::ChatCompletionTool {
+        function: FunctionObject {
+            name: SUB_AGENT_TOOL_NAME.to_string(),
+            description: Some("Delegate a task to a configured sub-agent.".to_string()),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "enum": agents
+                            .iter()
+                            .map(|agent| agent.agent_id.clone())
+                            .collect::<Vec<_>>()
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "The complete task and context for the sub-agent."
+                    }
+                },
+                "required": ["agent_id", "input"],
+                "additionalProperties": false
+            })),
+            strict: Some(true),
+        },
+    })
 }
 
 #[derive(Debug, Clone)]
 enum CallableRoute {
     Tool(String),
-    Mcp { server: String, tool_name: String },
+    Mcp {
+        server: String,
+        tool_name: String,
+    },
+    SubAgent {
+        sources: HashMap<String, SingleAgentSource>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -727,12 +965,14 @@ struct SingleAgentTemplate {
     model: SingleAgentModelConfig,
     tool_definitions: Vec<ChatCompletionTools>,
     tool_routes: HashMap<String, CallableRoute>,
+    ancestor_agents: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum PendingCallKind {
     Tool,
     Mcp,
+    SubAgent(CommonSession),
 }
 
 #[derive(Debug)]
@@ -740,6 +980,12 @@ struct PendingCall {
     call_id: String,
     tool_name: String,
     kind: PendingCallKind,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubAgentCall {
+    agent_id: String,
+    input: String,
 }
 
 #[derive(Debug)]
@@ -1157,6 +1403,33 @@ impl SingleAgentPlan {
                     self.task(TaskType::Mcp, McpRequest::new(server, tool_name, arguments)),
                     PendingCallKind::Mcp,
                 ),
+                CallableRoute::SubAgent { sources } => {
+                    let call: SubAgentCall = serde_json::from_str(&arguments).map_err(|error| {
+                        anyhow::anyhow!("invalid `{SUB_AGENT_TOOL_NAME}` arguments: {error}")
+                    })?;
+                    anyhow::ensure!(
+                        !call.input.trim().is_empty(),
+                        "sub-agent input cannot be empty"
+                    );
+                    let source = sources.get(&call.agent_id).cloned().ok_or_else(|| {
+                        anyhow::anyhow!("sub-agent `{}` is not configured", call.agent_id)
+                    })?;
+                    let (env, session) = SingleAgentEnv::new(source, call.input);
+                    let env = env.with_ancestor_agents(self.template.ancestor_agents.clone());
+                    let child = self
+                        .ctx
+                        .get_engine()
+                        .call(
+                            self.ctx.clone(),
+                            to_plan_ty::<SingleAgentEnv>(),
+                            Box::new(env),
+                        )
+                        .await?;
+                    (
+                        self.task(TaskType::Plan, child),
+                        PendingCallKind::SubAgent(session),
+                    )
+                }
             };
             self.pending_tools.insert(
                 task.meta.id.clone(),
@@ -1319,7 +1592,7 @@ impl Plan for SingleAgentPlan {
                 let kind = self
                     .pending_tools
                     .get(&task_id)
-                    .map(|pending| pending.kind)
+                    .map(|pending| pending.kind.clone())
                     .ok_or_else(|| anyhow::anyhow!("unknown tool task `{task_id}`"))?;
                 match kind {
                     PendingCallKind::Tool => {
@@ -1332,6 +1605,30 @@ impl Plan for SingleAgentPlan {
                         let response = TaskResp::<McpResponse>::try_from_response(&mut task_result)
                             .ok_or_else(|| anyhow::anyhow!("expected McpResponse"))?;
                         self.handle_mcp_response(task_id, response.resp).await
+                    }
+                    PendingCallKind::SubAgent(session) => {
+                        TaskResp::<()>::try_from_response(&mut task_result).ok_or_else(|| {
+                            anyhow::anyhow!("expected child plan response after sub-agent call")
+                        })?;
+                        let output = session.result().await?;
+                        let output = match output {
+                            Value::String(output) => output,
+                            output => serde_json::to_string(&output)?,
+                        };
+                        let pending = self
+                            .pending_tools
+                            .remove(&task_id)
+                            .ok_or_else(|| anyhow::anyhow!("unknown sub-agent task `{task_id}`"))?;
+                        self.emit(
+                            pending.tool_name.clone(),
+                            SessionEventData::ToolOutput {
+                                call_id: pending.call_id.clone(),
+                                output: output.clone(),
+                                completed: true,
+                            },
+                        )
+                        .await?;
+                        self.finish_tool_call(pending, output).await
                     }
                 }
             }
@@ -1477,9 +1774,11 @@ mod tests {
                 temperature: Some(0.0),
                 max_tool_iterations: 4,
             },
+            prompt_sections: Vec::new(),
             tools: vec!["read_file".to_string()],
             skills: Vec::new(),
             mcp_servers: Vec::new(),
+            sub_agents: Vec::new(),
         }
     }
 
@@ -1570,11 +1869,103 @@ mod tests {
         tokio::fs::remove_dir_all(dir).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn builder_resolves_configured_sub_agents() {
+        let home = std::env::temp_dir().join(format!(
+            "fae-single-agent-sub-agents-{}-{}",
+            std::process::id(),
+            wd_tools::uuid::v4()
+        ));
+        let agents_dir = home.join("agents");
+        tokio::fs::create_dir_all(&agents_dir).await.unwrap();
+        let mut researcher = test_config();
+        researcher.agent.name = "researcher".to_string();
+        researcher.agent.metadata.insert(
+            "description".to_string(),
+            "Research focused topics".to_string(),
+        );
+        tokio::fs::write(
+            agents_dir.join("researcher_config.json"),
+            serde_json::to_vec(&researcher).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            agents_dir.join("researcher_prompt.txt"),
+            "Research carefully.",
+        )
+        .await
+        .unwrap();
+
+        let builder = SingleAgentPlanBuilder::with_home_dir(&home);
+        let agents = builder
+            .resolve_sub_agents("coordinator", &["researcher".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].agent_id, "researcher");
+        assert_eq!(
+            agents[0].info.metadata["description"],
+            "Research focused topics"
+        );
+        assert!(matches!(
+            &agents[0].source,
+            SingleAgentSource::Paths { config, prompt }
+                if config == &agents_dir.join("researcher_config.json")
+                    && prompt == &agents_dir.join("researcher_prompt.txt")
+        ));
+        tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_self_and_duplicate_sub_agents() {
+        let builder = SingleAgentPlanBuilder::with_home_dir("/unused");
+        let self_error = builder
+            .resolve_sub_agents("reviewer", &["reviewer".to_string()])
+            .await
+            .unwrap_err();
+        assert!(self_error.to_string().contains("cannot mount itself"));
+
+        let home =
+            std::env::temp_dir().join(format!("fae-duplicate-sub-agent-{}", wd_tools::uuid::v4()));
+        let agents_dir = home.join("agents");
+        tokio::fs::create_dir_all(&agents_dir).await.unwrap();
+        tokio::fs::write(
+            agents_dir.join("worker_config.json"),
+            serde_json::to_vec(&{
+                let mut config = test_config();
+                config.agent.name = "worker".to_string();
+                config
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(agents_dir.join("worker_prompt.txt"), "Work.")
+            .await
+            .unwrap();
+        let duplicate_error = SingleAgentPlanBuilder::with_home_dir(&home)
+            .resolve_sub_agents("reviewer", &["worker".to_string(), "worker".to_string()])
+            .await
+            .unwrap_err();
+        assert!(duplicate_error.to_string().contains("more than once"));
+        tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
     #[test]
     fn agent_id_rejects_path_components() {
         assert!(validate_agent_id("../reviewer").is_err());
         assert!(validate_agent_id("team/reviewer").is_err());
         assert!(validate_agent_id("reviewer").is_ok());
+    }
+
+    #[test]
+    fn environment_accepts_session_id_override() {
+        let (env, _) = SingleAgentEnv::from_agent_id("reviewer", "hello");
+        let env = env.with_session_id("issue-42");
+
+        assert_eq!(env.session_id.as_deref(), Some("issue-42"));
     }
 
     #[test]
@@ -1757,9 +2148,13 @@ mod tests {
     }
 
     #[test]
-    fn skill_metadata_is_added_to_the_system_prompt() {
-        let prompt = prompt_with_skills(
-            "base prompt".to_string(),
+    fn prompt_uses_tagged_sections_in_order() {
+        let prompt = build_prompt(
+            "base prompt",
+            &[PromptSection {
+                tag: "project".to_string(),
+                text: "project context".to_string(),
+            }],
             &[SkillInfo {
                 name: "review".to_string(),
                 description: "Review Rust code".to_string(),
@@ -1767,10 +2162,83 @@ mod tests {
                 version: None,
                 metadata: None,
             }],
-        );
+            &[McpToolInfo {
+                server: "maps".to_string(),
+                name: "search".to_string(),
+                description: "Search places".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            &[ResolvedSubAgent {
+                agent_id: "researcher".to_string(),
+                info: SingleAgentInfo {
+                    name: "researcher".to_string(),
+                    user_id: "test-user".to_string(),
+                    session_id: "test-session".to_string(),
+                    metadata: HashMap::from([(
+                        "description".to_string(),
+                        "Research a focused topic".to_string(),
+                    )]),
+                },
+                source: SingleAgentSource::AgentId("researcher".to_string()),
+            }],
+        )
+        .unwrap();
 
+        assert!(prompt.starts_with("<setting>\nbase prompt\n</setting>"));
+        assert!(prompt.contains("<project>\nproject context\n</project>"));
+        assert!(prompt.contains("<skills>"));
         assert!(prompt.contains("review: Review Rust code"));
         assert!(prompt.contains("/tmp/review/SKILL.md"));
+        assert!(prompt.contains("<mcp>"));
+        assert!(prompt.contains("maps__search"));
+        assert!(prompt.contains("<sub_agent>"));
+        assert!(prompt.contains("researcher"));
+        assert!(
+            prompt.find("<setting>").unwrap() < prompt.find("<skills>").unwrap()
+                && prompt.find("<skills>").unwrap() < prompt.find("<mcp>").unwrap()
+                && prompt.find("<mcp>").unwrap() < prompt.find("<sub_agent>").unwrap()
+        );
+    }
+
+    #[test]
+    fn prompt_section_rejects_non_english_tag_syntax() {
+        let error = build_prompt(
+            "base",
+            &[PromptSection {
+                tag: "子_agent".to_string(),
+                text: "invalid".to_string(),
+            }],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("lowercase English letters"));
+    }
+
+    #[test]
+    fn sub_agent_tool_restricts_calls_to_configured_agents() {
+        let definition = sub_agent_tool_definition(&[
+            ResolvedSubAgent {
+                agent_id: "researcher".to_string(),
+                info: test_config().agent,
+                source: SingleAgentSource::AgentId("researcher".to_string()),
+            },
+            ResolvedSubAgent {
+                agent_id: "reviewer".to_string(),
+                info: test_config().agent,
+                source: SingleAgentSource::AgentId("reviewer".to_string()),
+            },
+        ]);
+        let value = serde_json::to_value(definition).unwrap();
+
+        assert_eq!(value["function"]["name"], SUB_AGENT_TOOL_NAME);
+        assert_eq!(
+            value["function"]["parameters"]["properties"]["agent_id"]["enum"],
+            serde_json::json!(["researcher", "reviewer"])
+        );
+        assert_eq!(value["function"]["strict"], true);
     }
 
     #[tokio::test]
@@ -1841,6 +2309,62 @@ mod tests {
             plan.messages.last(),
             Some(ChatCompletionRequestMessage::Tool(message))
                 if message.tool_call_id == "call-1"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sub_agent_result_is_returned_to_the_parent_model() -> anyhow::Result<()> {
+        let parent_session = CommonSession::new();
+        parent_session.activate_turn()?;
+        let child_session = CommonSession::new();
+        child_session.emit_agent(
+            1,
+            "researcher",
+            SessionEventData::Completed {
+                content: "research result".to_string(),
+            },
+        )?;
+        let ctx = Ctx::null();
+        let mut plan = SingleAgentPlan::new(
+            ctx.clone(),
+            test_template(),
+            "delegate this".to_string(),
+            1,
+            parent_session,
+        );
+        plan.stage = SingleAgentStage::Tools { remaining: 1 };
+        plan.pending_tools.insert(
+            "sub-agent-task".to_string(),
+            PendingCall {
+                call_id: "call-1".to_string(),
+                tool_name: SUB_AGENT_TOOL_NAME.to_string(),
+                kind: PendingCallKind::SubAgent(child_session),
+            },
+        );
+
+        let next = plan
+            .next(
+                TaskResp {
+                    ctx,
+                    meta: TaskMeta {
+                        id: "sub-agent-task".to_string(),
+                        ..Default::default()
+                    },
+                    resp: (),
+                }
+                .into_response(),
+            )
+            .await?;
+
+        assert!(matches!(next, PlanNext::Tasks(tasks) if tasks.len() == 1));
+        assert!(matches!(
+            plan.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(message))
+                if message.tool_call_id == "call-1"
+                    && serde_json::to_string(&message.content)
+                        .unwrap()
+                        .contains("research result")
         ));
         Ok(())
     }
@@ -2339,6 +2863,7 @@ mod tests {
             },
             tool_definitions: Vec::new(),
             tool_routes: HashMap::new(),
+            ancestor_agents: vec!["test-agent".to_string()],
         }
     }
 }

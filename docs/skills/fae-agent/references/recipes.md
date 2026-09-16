@@ -55,7 +55,8 @@ Do not modify files unless the user explicitly asks for fixes.
       "value": "fae-agent"
     }
   ],
-  "mcp_servers": []
+  "mcp_servers": [],
+  "sub_agents": []
 }
 ```
 

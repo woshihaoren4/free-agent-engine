@@ -4,6 +4,7 @@ set -euo pipefail
 BIN_NAME="${BIN_NAME:-fae}"
 BASE_URL="${FAE_INSTALL_BASE_URL:-https://woshihaoren4.github.io/free-agent-engine/bin}"
 SKILLS_BASE_URL="${FAE_SKILLS_BASE_URL:-${BASE_URL%/bin}/skills}"
+DRAWIO_SKILL_URL="${FAE_DRAWIO_SKILL_URL:-${SKILLS_BASE_URL}/drawio-skill.zip}"
 AGENT_PROMPT_URL="${FAE_AGENT_PROMPT_URL:-${BASE_URL%/bin}/agents/fae_prompt.txt}"
 
 die() {
@@ -129,6 +130,22 @@ for skill_file in "${skill_files[@]}"; do
     die "downloaded skill file is empty: ${skill_file}"
 done
 
+tmp_drawio_skill_zip="${tmp_dir}/drawio-skill.zip"
+if [[ -n "${local_skills_dir}" && -f "${local_skills_dir}/drawio-skill.zip" ]]; then
+  cp "${local_skills_dir}/drawio-skill.zip" "${tmp_drawio_skill_zip}"
+else
+  download "${DRAWIO_SKILL_URL}" "${tmp_drawio_skill_zip}" ||
+    die "failed to download drawio skill archive"
+fi
+[[ -s "${tmp_drawio_skill_zip}" ]] ||
+  die "downloaded drawio skill archive is empty"
+command -v unzip >/dev/null 2>&1 ||
+  die "unzip is required to install the drawio skill"
+unzip -q "${tmp_drawio_skill_zip}" "drawio-skill/*" -d "${tmp_skills_dir}" ||
+  die "failed to extract drawio skill archive"
+[[ -s "${tmp_skills_dir}/drawio-skill/SKILL.md" ]] ||
+  die "drawio skill archive does not contain drawio-skill/SKILL.md"
+
 tmp_agent_prompt="${tmp_dir}/fae_prompt.txt"
 if [[ -n "${local_agent_prompt}" && -f "${local_agent_prompt}" ]]; then
   cp "${local_agent_prompt}" "${tmp_agent_prompt}"
@@ -160,6 +177,12 @@ for skill_file in "${skill_files[@]}"; do
   install -m 644 "${tmp_skills_dir}/${skill_file}" "${skill_target}" ||
     die "cannot install skill file ${skill_target}"
 done
+
+drawio_skill_target="${skills_dir}/drawio-skill"
+mkdir -p "${drawio_skill_target}" ||
+  die "cannot create drawio skill directory ${drawio_skill_target}"
+cp -R "${tmp_skills_dir}/drawio-skill/." "${drawio_skill_target}/" ||
+  die "cannot install drawio skill to ${drawio_skill_target}"
 
 agent_prompt_target="${agents_dir}/fae_prompt.txt"
 mkdir -p "${agents_dir}" ||

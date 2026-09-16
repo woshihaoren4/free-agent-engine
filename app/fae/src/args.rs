@@ -29,7 +29,7 @@ pub enum Command {
     Init(InitArgs),
     /// Remove the currently running fae executable
     Uninstall,
-    /// Start an interactive single-agent session
+    /// Run a single-agent conversation
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
     Workflow(WorkflowArgs),
@@ -55,6 +55,10 @@ pub struct AgentArgs {
     /// Agent ID loaded from FAE_HOME/agents
     #[arg(long, default_value = "fae")]
     pub agent_id: String,
+
+    /// Session ID used to load and save conversation history
+    #[arg(long)]
+    pub session_id: Option<String>,
 
     /// Explicit agent config path; requires --agent-prompt
     #[arg(long, requires = "agent_prompt")]
@@ -134,6 +138,41 @@ mod tests {
         };
         assert_eq!(agent.prompt, ["review", "this"]);
         assert_eq!(agent.agent_id, "fae");
+    }
+
+    #[test]
+    fn parses_agent_session_id_and_prompt() {
+        let cli = Cli::try_parse_from(with_default_agent(
+            [
+                "fae",
+                "agent",
+                "--agent-id",
+                "fae-coding",
+                "--session-id",
+                "issue-42",
+                "你好",
+            ]
+            .map(Into::into),
+        ))
+        .unwrap();
+
+        let Some(Command::Agent(agent)) = cli.command else {
+            panic!("expected agent command");
+        };
+        assert_eq!(agent.agent_id, "fae-coding");
+        assert_eq!(agent.session_id.as_deref(), Some("issue-42"));
+        assert_eq!(agent.prompt, ["你好"]);
+    }
+
+    #[test]
+    fn agent_without_prompt_selects_interactive_mode() {
+        let cli =
+            Cli::try_parse_from(with_default_agent(["fae", "agent"].map(Into::into))).unwrap();
+
+        let Some(Command::Agent(agent)) = cli.command else {
+            panic!("expected agent command");
+        };
+        assert!(agent.prompt.is_empty());
     }
 
     #[test]

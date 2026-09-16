@@ -1,10 +1,13 @@
-use std::path::PathBuf;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use fae_agent::{
-    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SingleAgentEnv,
-    SingleAgentPlanBuilder, SingleAgentSource, TaskError, TaskReq, TaskResp, TaskType,
-    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
+    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEventData,
+    SingleAgentEnv, SingleAgentPlanBuilder, SingleAgentSource, TaskError, TaskReq, TaskResp,
+    TaskType, WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::{
     CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
@@ -86,25 +89,33 @@ async fn run_agent(
     };
     let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
     let (config, _) = agent_builder.load_config(&source).await?;
-    let session_id = config.agent.session_id;
+    let session_id = args.session_id.unwrap_or(config.agent.session_id);
+    anyhow::ensure!(!session_id.trim().is_empty(), "session_id cannot be empty");
     let model = config.model.model;
     let engine = build_engine(loader, agent_builder).await;
 
-    let mut ui = TerminalUi::new(Mode::Agent, &model, &session_id, color, no_alt_screen)?;
-    let first_input = if args.prompt.is_empty() {
-        next_agent_input(&mut ui, &model, &session_id).await?
-    } else {
+    if !args.prompt.is_empty() {
         let input = args.prompt.join(" ");
-        ui.push_user(&input);
-        Some(input)
-    };
+        let (env, session) = SingleAgentEnv::new(source, input);
+        let execution = engine.launch(env.with_session_id(session_id)).await?;
+        let result = stream_agent_output(&session).await;
+        let execution_result = execution.result::<()>().await;
+        engine.exit().await?;
+        result?;
+        return execution_result;
+    }
+
+    let mut ui = TerminalUi::new(Mode::Agent, &model, &session_id, color, no_alt_screen)?;
+    let first_input = next_agent_input(&mut ui, &model, &session_id).await?;
 
     let result = async {
         let Some(input) = first_input else {
             return Ok(());
         };
         let (env, session) = SingleAgentEnv::new(source, input);
-        let execution = engine.launch(env).await?;
+        let execution = engine
+            .launch(env.with_session_id(session_id.clone()))
+            .await?;
 
         if !ui
             .run_session(
@@ -143,6 +154,32 @@ async fn run_agent(
     drop(ui);
     engine.exit().await?;
     result
+}
+
+async fn stream_agent_output(
+    session: &impl Session<fae_agent::SessionInput, fae_agent::SessionOutput>,
+) -> anyhow::Result<()> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let mut wrote_output = false;
+
+    while let Some(event) = session.answer().await? {
+        let terminal = event.is_terminal();
+        if let SessionEventData::ModelOutput { content } = event.event_data()? {
+            stdout.write_all(content.as_bytes())?;
+            stdout.flush()?;
+            wrote_output = true;
+        }
+        if terminal {
+            break;
+        }
+    }
+
+    if wrote_output {
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
+    Ok(())
 }
 
 async fn run_workflow(

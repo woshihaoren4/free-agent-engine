@@ -249,7 +249,12 @@ fn agent_step(action: &str, payload: Value) -> WorkflowAction {
 
 async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<AgentSetup> {
     let source = SingleAgentSource::AgentId(agent_id.to_string());
-    let (config, mut prompt) = SingleAgentPlanBuilder::new().load_config(&source).await?;
+    let (config, base_prompt) = SingleAgentPlanBuilder::new().load_config(&source).await?;
+    let mut prompt = String::new();
+    append_prompt_section(&mut prompt, "setting", &base_prompt);
+    for section in &config.prompt_sections {
+        append_prompt_section(&mut prompt, &section.tag, &section.text);
+    }
 
     let mut skills = Vec::new();
     for query in &config.skills {
@@ -259,20 +264,22 @@ async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<Age
         );
     }
     if !skills.is_empty() {
-        prompt.push_str("\n\n## Available Skills\n");
-        prompt.push_str("Read the matching SKILL.md file before applying a skill.\n");
+        let mut skill_text =
+            String::from("Read the matching SKILL.md file before applying a skill.\n");
         for skill in skills {
-            prompt.push_str(&format!(
+            skill_text.push_str(&format!(
                 "- {}: {} (path: {})\n",
                 skill.name,
                 skill.description,
                 skill.path.display()
             ));
         }
+        append_prompt_section(&mut prompt, "skills", &skill_text);
     }
 
     let mut tool_definitions = Vec::new();
     let mut tool_routes = HashMap::new();
+    let mut mcp_text = String::new();
     for tool_name in &config.tools {
         let description = rt
             .select::<_, Value>(TaskType::Tool, tool_name.clone())
@@ -301,6 +308,10 @@ async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<Age
             .await?;
         for tool in tools {
             let model_name = tool.model_name();
+            mcp_text.push_str(&format!(
+                "- {model_name}: {} (server: {}, tool: {})\n",
+                tool.description, tool.server, tool.name
+            ));
             anyhow::ensure!(
                 tool_routes
                     .insert(
@@ -323,6 +334,7 @@ async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<Age
             }));
         }
     }
+    append_prompt_section(&mut prompt, "mcp", &mcp_text);
 
     Ok(AgentSetup {
         config,
@@ -330,6 +342,17 @@ async fn prepare_agent(rt: &fae_agent::RT, agent_id: &str) -> anyhow::Result<Age
         tool_definitions,
         tool_routes,
     })
+}
+
+fn append_prompt_section(prompt: &mut String, tag: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(&format!("<{tag}>\n{text}\n</{tag}>"));
 }
 
 async fn initial_model(

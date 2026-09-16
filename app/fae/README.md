@@ -39,6 +39,7 @@ The generated configuration has this shape:
     "temperature": null,
     "max_tool_iterations": 8
   },
+  "prompt_sections": [],
   "tools": [
     "execute_command",
     "read_file",
@@ -62,9 +63,28 @@ The generated configuration has this shape:
       "value": "weather"
     }
   ],
-  "mcp_servers": []
+  "mcp_servers": [],
+  "sub_agents": []
 }
 ```
+
+The prompt file is wrapped in `<setting>`. Resolved capabilities are appended
+before history as `<skills>`, `<mcp>`, and `<sub_agent>` sections. Add arbitrary
+English-tagged sections through `prompt_sections`:
+
+```json
+{
+  "prompt_sections": [
+    {
+      "tag": "project_context",
+      "text": "Repository-specific constraints."
+    }
+  ],
+  "sub_agents": ["reviewer", "researcher"]
+}
+```
+
+Configured sub-agents are exposed through the `call_sub_agent` model tool.
 
 The install script places the bundled
 [`fae_prompt.txt`](../../docs/agents/fae_prompt.txt) at
@@ -75,10 +95,26 @@ it if needed, then start an interactive session:
 cargo run -p fae
 ```
 
-Select another agent ID or explicit files:
+Passing a prompt runs one conversation without entering the TUI. The assistant
+response is streamed to standard output, and the process exits when the
+conversation finishes:
 
 ```bash
-cargo run -p fae -- agent --agent-id reviewer "review this workspace"
+cargo run -p fae -- agent --agent-id fae-coding "你好"
+```
+
+Use `--session-id` to select the conversation history for either interactive
+or direct mode:
+
+```bash
+cargo run -p fae -- agent --agent-id reviewer \
+  --session-id issue-42 \
+  "review this workspace"
+```
+
+An explicit config and prompt can be used instead of an agent ID:
+
+```bash
 cargo run -p fae -- agent \
   --agent-config ./reviewer.json \
   --agent-prompt ./reviewer.txt \

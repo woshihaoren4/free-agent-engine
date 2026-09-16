@@ -60,12 +60,14 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
             temperature: None,
             max_tool_iterations: 8,
         },
+        prompt_sections: Vec::new(),
         tools: DEFAULT_TOOL_NAMES
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
         skills: skills.iter().cloned().map(SkillQuery::Name).collect(),
         mcp_servers: Vec::new(),
+        sub_agents: Vec::new(),
     };
     let mut config_bytes = serde_json::to_vec_pretty(&config)?;
     config_bytes.push(b'\n');
