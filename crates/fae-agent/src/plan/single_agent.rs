@@ -83,7 +83,7 @@ pub enum SingleAgentSource {
 }
 
 const fn default_max_tool_iterations() -> usize {
-    32
+    128
 }
 
 const fn default_trigger_compression_size() -> usize {
@@ -1792,6 +1792,7 @@ mod tests {
 
         assert_eq!(config.trigger_compression_size, 32_000);
         assert_eq!(config.max_completion_tokens, Some(32_000));
+        assert_eq!(config.max_tool_iterations, 128);
     }
 
     #[test]

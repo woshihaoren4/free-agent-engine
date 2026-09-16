@@ -8,11 +8,13 @@ use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
+        supports_keyboard_enhancement,
     },
 };
 use fae_agent::{Ctx, Session, SessionEventData, SessionOutput};
@@ -221,6 +223,8 @@ pub struct TerminalUi {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     events: EventStream,
     alternate_screen: bool,
+    keyboard_enhancement: bool,
+    copy_mode: bool,
     color: bool,
     mode: Mode,
     model: String,
@@ -251,7 +255,16 @@ impl TerminalUi {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         let alternate_screen = !no_alt_screen;
+        let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
         let terminal = (|| -> anyhow::Result<_> {
+            if keyboard_enhancement {
+                execute!(
+                    stdout,
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                )?;
+            }
             execute!(stdout, EnableBracketedPaste, EnableMouseCapture)?;
             if alternate_screen {
                 execute!(stdout, EnterAlternateScreen)?;
@@ -278,6 +291,9 @@ impl TerminalUi {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
                 let _ = execute!(stdout, DisableMouseCapture, DisableBracketedPaste);
+                if keyboard_enhancement {
+                    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+                }
                 if alternate_screen {
                     let _ = execute!(stdout, LeaveAlternateScreen);
                 }
@@ -294,6 +310,8 @@ impl TerminalUi {
             terminal,
             events: EventStream::new(),
             alternate_screen,
+            keyboard_enhancement,
+            copy_mode: false,
             color,
             mode,
             model: model.into(),
@@ -360,6 +378,9 @@ impl TerminalUi {
             };
             match event? {
                 TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    if self.handle_copy_mode_key(key)? {
+                        continue;
+                    }
                     match (key.code, key.modifiers) {
                         (KeyCode::Enter | KeyCode::Esc, _)
                         | (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => return Ok(()),
@@ -368,7 +389,7 @@ impl TerminalUi {
                         _ => {}
                     }
                 }
-                TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                TerminalEvent::Mouse(mouse) if !self.copy_mode => self.handle_mouse(mouse),
                 TerminalEvent::Resize(_, _) => {}
                 _ => {}
             }
@@ -387,12 +408,17 @@ impl TerminalUi {
                     };
                     match event? {
                         TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                            if self.handle_copy_mode_key(key)? {
+                                continue;
+                            }
                             if let Some(action) = self.handle_prompt_key(key) {
                                 return Ok(action);
                             }
                         }
-                        TerminalEvent::Paste(content) => self.composer.insert(&content),
-                        TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                        TerminalEvent::Paste(content) if !self.copy_mode => {
+                            self.composer.insert(&content);
+                        }
+                        TerminalEvent::Mouse(mouse) if !self.copy_mode => self.handle_mouse(mouse),
                         TerminalEvent::Resize(_, _) => {}
                         _ => {}
                     }
@@ -436,6 +462,9 @@ impl TerminalUi {
                     };
                     match input? {
                         TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                            if self.handle_copy_mode_key(key)? {
+                                continue;
+                            }
                             match self.handle_running_key(key, supplement.is_some()) {
                                 RunningAction::None => {}
                                 RunningAction::Interrupt => {
@@ -464,10 +493,14 @@ impl TerminalUi {
                                 }
                             }
                         }
-                        TerminalEvent::Paste(content) if supplement.is_some() => {
+                        TerminalEvent::Paste(content)
+                            if !self.copy_mode && supplement.is_some() =>
+                        {
                             self.composer.insert(&content);
                         }
-                        TerminalEvent::Mouse(mouse) => self.handle_mouse(mouse),
+                        TerminalEvent::Mouse(mouse) if !self.copy_mode => {
+                            self.handle_mouse(mouse);
+                        }
                         TerminalEvent::Resize(_, _) => {}
                         _ => {}
                     }
@@ -598,6 +631,38 @@ impl TerminalUi {
         if let Some(message) = self.messages.last_mut() {
             message.stream_id = None;
         }
+    }
+
+    fn handle_copy_mode_key(&mut self, key: KeyEvent) -> anyhow::Result<bool> {
+        if self.copy_mode {
+            if matches!(key.code, KeyCode::F(2) | KeyCode::Esc) {
+                self.set_copy_mode(false)?;
+            }
+            return Ok(true);
+        }
+        if key.code == KeyCode::F(2) {
+            self.set_copy_mode(true)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn set_copy_mode(&mut self, enabled: bool) -> anyhow::Result<()> {
+        if self.copy_mode == enabled {
+            return Ok(());
+        }
+        if enabled {
+            self.copy_mode = true;
+            self.draw_current()?;
+            if let Err(error) = execute!(self.terminal.backend_mut(), DisableMouseCapture) {
+                self.copy_mode = false;
+                return Err(error.into());
+            }
+        } else {
+            execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+            self.copy_mode = false;
+        }
+        Ok(())
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Option<PromptAction> {
@@ -785,6 +850,13 @@ impl TerminalUi {
     }
 
     fn draw(&mut self) -> anyhow::Result<()> {
+        if self.copy_mode {
+            return Ok(());
+        }
+        self.draw_current()
+    }
+
+    fn draw_current(&mut self) -> anyhow::Result<()> {
         let color = self.color;
         let mode = self.mode;
         let model = self.model.clone();
@@ -795,6 +867,7 @@ impl TerminalUi {
         let messages = &self.messages;
         let composer = &self.composer;
         let scroll_from_bottom = self.scroll_from_bottom;
+        let copy_mode = self.copy_mode;
 
         self.terminal.draw(|frame| {
             draw_frame(
@@ -810,6 +883,7 @@ impl TerminalUi {
                     messages,
                     composer,
                     scroll_from_bottom,
+                    copy_mode,
                 },
             );
         })?;
@@ -828,6 +902,9 @@ impl Drop for TerminalUi {
             DisableMouseCapture,
             DisableBracketedPaste
         );
+        if self.keyboard_enhancement {
+            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
+        }
         if self.alternate_screen {
             let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         }
@@ -854,6 +931,7 @@ struct ViewModel<'a> {
     messages: &'a [Message],
     composer: &'a Composer,
     scroll_from_bottom: u16,
+    copy_mode: bool,
 }
 
 fn frame_areas(area: Rect, composer: &Composer) -> [Rect; 4] {
@@ -985,8 +1063,9 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
         area,
     );
 
-    if matches!(view.state, RunState::Idle | RunState::Failed)
-        || view.state == RunState::Running && view.mode == Mode::Agent
+    if !view.copy_mode
+        && (matches!(view.state, RunState::Idle | RunState::Failed)
+            || view.state == RunState::Running && view.mode == Mode::Agent)
     {
         let inner_width = area.width.saturating_sub(4).max(1) as usize;
         let (cursor_x, cursor_y) = view.composer.visual_cursor(inner_width);
@@ -998,13 +1077,19 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
-    let hint = match view.state {
-        RunState::Running if view.mode == Mode::Agent => {
-            " Enter steer   Esc interrupt   Wheel/PgUp/PgDn scroll "
+    let hint = if view.copy_mode {
+        " COPY MODE   Drag to select   Use terminal copy shortcut   F2/Esc resume "
+    } else {
+        match view.state {
+            RunState::Running if view.mode == Mode::Agent => {
+                " Enter steer   Esc interrupt   F2 copy   Wheel/PgUp/PgDn scroll "
+            }
+            RunState::Running => " Esc interrupt   F2 copy   Wheel/PgUp/PgDn scroll ",
+            RunState::Completed => " Enter close   F2 copy   Wheel/PgUp/PgDn scroll ",
+            _ => {
+                " Enter send   Shift+Enter newline   F2 copy   Wheel/PgUp/PgDn scroll   Ctrl+C quit "
+            }
         }
-        RunState::Running => " Esc interrupt   Wheel/PgUp/PgDn scroll ",
-        RunState::Completed => " Enter close   Wheel/PgUp/PgDn scroll ",
-        _ => " Enter send   Ctrl+J newline   Wheel/PgUp/PgDn scroll   Ctrl+C quit ",
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1386,6 +1471,7 @@ mod tests {
                         messages: &messages,
                         composer: &composer,
                         scroll_from_bottom: 0,
+                        copy_mode: false,
                     },
                 )
             })
@@ -1395,6 +1481,7 @@ mod tests {
         assert!(content.contains("A response that remains visible"));
         assert!(content.contains("Message"));
         assert!(content.contains("Enter send"));
+        assert!(content.contains("F2 copy"));
     }
 
     #[test]
@@ -1424,6 +1511,7 @@ mod tests {
                         messages: &messages,
                         composer: &composer,
                         scroll_from_bottom: 0,
+                        copy_mode: false,
                     },
                 )
             })

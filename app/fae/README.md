@@ -37,7 +37,7 @@ The generated configuration has this shape:
     "history_turns": 20,
     "max_completion_tokens": 65536,
     "temperature": null,
-    "max_tool_iterations": 8
+    "max_tool_iterations": 128
   },
   "prompt_sections": [],
   "tools": [
@@ -129,6 +129,7 @@ Keyboard controls:
 - `Ctrl+J` or `Shift+Enter`: insert a newline
 - `Up` / `Down`: browse input history
 - `PageUp` / `PageDown`: scroll the transcript
+- `F2`: enter copy mode; drag to select output, then press `F2` or `Esc` to resume
 - `Esc`: interrupt the active run
 - `Ctrl+C`: exit while idle, interrupt while running
 

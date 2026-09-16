@@ -79,7 +79,7 @@ ${FAE_HOST:-~/.fae}/
     "history_turns": 20,
     "max_completion_tokens": 65536,
     "temperature": 0.2,
-    "max_tool_iterations": 8
+    "max_tool_iterations": 128
   },
   "prompt_sections": [],
   "tools": ["read_file", "execute_command"],
@@ -118,7 +118,7 @@ ${FAE_HOST:-~/.fae}/
 | `model.history_turns` | 可为 0；控制读取多少轮历史 |
 | `model.max_completion_tokens` | 可省略，默认 `65536`；设为 `null` 时不向模型传递该限制 |
 | `model.temperature` | 可省略或为 `null` |
-| `model.max_tool_iterations` | 可省略，默认 8；显式值必须大于 0 |
+| `model.max_tool_iterations` | 可省略，默认 128；显式值必须大于 0 |
 
 `max_tool_iterations` 用于限制单轮连续工具调用，避免 Agent 无限循环。只有确认任务确实需要更多
 步骤时才提高。
