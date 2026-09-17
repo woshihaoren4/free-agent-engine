@@ -1,16 +1,20 @@
+mod agent;
 mod command;
 mod file;
 mod http;
 mod python;
+mod workflow;
 
 use crate::ToolsRuntime;
 use fae_agent::{Ctx, ToolRequest, ToolResponse, Tools};
 use serde_json::{Value, json};
 
+pub use agent::AgentTool;
 pub use command::{ApplyPatchTool, ExecuteCommandTool};
 pub use file::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 pub use http::SendHttpRequestTool;
 pub use python::ExecutePythonTool;
+pub use workflow::WorkflowTool;
 
 pub const DEFAULT_CHANNEL: &str = "default";
 pub const EXECUTE_COMMAND: &str = "execute_command";
@@ -20,6 +24,8 @@ pub const LIST_DIRECTORY: &str = "list_directory";
 pub const APPLY_PATCH: &str = "apply_patch";
 pub const SEND_HTTP_REQUEST: &str = "send_http_request";
 pub const EXECUTE_PYTHON: &str = "execute_python";
+pub const WORKFLOW: &str = "workflow";
+pub const AGENT: &str = "agent";
 pub const DEFAULT_TOOL_NAMES: &[&str] = &[
     EXECUTE_COMMAND,
     READ_FILE,
@@ -28,6 +34,8 @@ pub const DEFAULT_TOOL_NAMES: &[&str] = &[
     APPLY_PATCH,
     SEND_HTTP_REQUEST,
     EXECUTE_PYTHON,
+    WORKFLOW,
+    AGENT,
 ];
 
 pub fn register_default_tools(runtime: &mut ToolsRuntime) {
@@ -43,6 +51,8 @@ pub struct DefaultTools {
     apply_patch: ApplyPatchTool,
     send_http_request: SendHttpRequestTool,
     execute_python: ExecutePythonTool,
+    workflow: WorkflowTool,
+    agent: AgentTool,
 }
 
 #[async_trait::async_trait]
@@ -64,6 +74,8 @@ impl Tools for DefaultTools {
             APPLY_PATCH => self.apply_patch.desc(ctx, tool_name).await,
             SEND_HTTP_REQUEST => self.send_http_request.desc(ctx, tool_name).await,
             EXECUTE_PYTHON => self.execute_python.desc(ctx, tool_name).await,
+            WORKFLOW => self.workflow.desc(ctx, tool_name).await,
+            AGENT => self.agent.desc(ctx, tool_name).await,
             _ => Err(unsupported_tool(tool_name)),
         }
     }
@@ -79,6 +91,8 @@ impl Tools for DefaultTools {
             APPLY_PATCH => self.apply_patch.exec(ctx, req).await,
             SEND_HTTP_REQUEST => self.send_http_request.exec(ctx, req).await,
             EXECUTE_PYTHON => self.execute_python.exec(ctx, req).await,
+            WORKFLOW => self.workflow.exec(ctx, req).await,
+            AGENT => self.agent.exec(ctx, req).await,
             _ => Err(unsupported_tool(req.get_tool_name())),
         }
     }

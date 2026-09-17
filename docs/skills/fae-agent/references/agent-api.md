@@ -136,7 +136,7 @@ ${FAE_HOST:-~/.fae}/
 | `tools` | Agent 可直接调用的内置工具 | `[]` |
 | `skills` | 注入到 Agent 上下文的 Skill | `[]` |
 | `mcp_servers` | Agent 可访问的 MCP server | `[]` |
-| `sub_agents` | 可通过 `call_sub_agent` 调用的 Agent ID | `[]` |
+| `sub_agents` | 可通过 `agent` 工具调用的 Agent ID | `[]` |
 | `prompt_sections` | 额外的 `{ "tag", "text" }` prompt 区段 | `[]` |
 
 `agent.desc` 省略时默认为空字符串，以兼容已有配置。Agent 独立运行时允许为空；一旦被列入

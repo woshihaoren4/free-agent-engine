@@ -62,6 +62,9 @@ pub struct SessionOutput {
     pub plan_id: Option<String>,
     /// Current workflow node ID.
     pub node_id: Option<String>,
+    /// Agent that produced this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     /// Runtime or event source ID.
     pub runtime_id: Option<String>,
     /// Output event type.
@@ -140,9 +143,13 @@ pub struct SessionEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     #[serde(rename = "name")]
     pub source: String,
     #[serde(flatten)]
@@ -153,8 +160,27 @@ impl SessionEvent {
     pub fn single_agent(turn_id: u64, source: impl Into<String>, data: SessionEventData) -> Self {
         Self {
             workflow_id: None,
+            parent_agent_name: None,
             node_id: None,
             turn_id: Some(turn_id),
+            agent_name: None,
+            source: source.into(),
+            data,
+        }
+    }
+
+    pub fn single_agent_for(
+        agent_name: impl Into<String>,
+        turn_id: u64,
+        source: impl Into<String>,
+        data: SessionEventData,
+    ) -> Self {
+        Self {
+            workflow_id: None,
+            parent_agent_name: None,
+            node_id: None,
+            turn_id: Some(turn_id),
+            agent_name: Some(agent_name.into()),
             source: source.into(),
             data,
         }
@@ -168,9 +194,11 @@ impl SessionEvent {
         let node_id = node_id.into();
         Self {
             workflow_id: Some(workflow_id.into()),
+            parent_agent_name: None,
             source: node_id.clone(),
             node_id: Some(node_id),
             turn_id: None,
+            agent_name: None,
             data,
         }
     }
@@ -184,8 +212,47 @@ impl SessionEvent {
     ) -> Self {
         Self {
             workflow_id: Some(workflow_id.into()),
+            parent_agent_name: None,
             node_id: Some(node_id.into()),
             turn_id: Some(turn_id),
+            agent_name: None,
+            source: source.into(),
+            data,
+        }
+    }
+
+    pub fn agent_in_workflow(
+        workflow_id: impl Into<String>,
+        node_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        turn_id: u64,
+        source: impl Into<String>,
+        data: SessionEventData,
+    ) -> Self {
+        Self {
+            workflow_id: Some(workflow_id.into()),
+            parent_agent_name: None,
+            node_id: Some(node_id.into()),
+            turn_id: Some(turn_id),
+            agent_name: Some(agent_name.into()),
+            source: source.into(),
+            data,
+        }
+    }
+
+    pub fn nested_agent(
+        parent_agent_name: impl Into<String>,
+        agent_name: impl Into<String>,
+        turn_id: u64,
+        source: impl Into<String>,
+        data: SessionEventData,
+    ) -> Self {
+        Self {
+            workflow_id: None,
+            parent_agent_name: Some(parent_agent_name.into()),
+            node_id: None,
+            turn_id: Some(turn_id),
+            agent_name: Some(agent_name.into()),
             source: source.into(),
             data,
         }
@@ -208,7 +275,7 @@ impl SessionEvent {
     }
 
     pub fn is_terminal(&self) -> bool {
-        if self.workflow_id.is_some() {
+        if self.workflow_id.is_some() || self.parent_agent_name.is_some() {
             matches!(
                 self.data,
                 SessionEventData::NodeCompleted { finished: true, .. }
@@ -334,12 +401,15 @@ impl From<SessionEvent> for SessionOutput {
     fn from(event: SessionEvent) -> Self {
         let SessionEvent {
             workflow_id,
+            parent_agent_name,
             node_id,
             turn_id,
+            agent_name,
             source,
             data,
         } = event;
-        let (parament_plan_id, plan_id) = match (workflow_id, turn_id) {
+        let parent_plan_id = workflow_id.or(parent_agent_name);
+        let (parament_plan_id, plan_id) = match (parent_plan_id, turn_id) {
             (Some(workflow_id), Some(turn_id)) => (Some(workflow_id), Some(turn_id.to_string())),
             (Some(workflow_id), None) => (None, Some(workflow_id)),
             (None, Some(turn_id)) => (None, Some(turn_id.to_string())),
@@ -349,6 +419,7 @@ impl From<SessionEvent> for SessionOutput {
             parament_plan_id,
             plan_id,
             node_id,
+            agent_name,
             runtime_id: Some(source),
             input_type: data.event_type().to_string(),
             output: data.content(),

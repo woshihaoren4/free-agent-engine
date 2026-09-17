@@ -24,6 +24,20 @@ use crate::{
 
 const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 
+#[derive(Debug, PartialEq, Eq)]
+enum AgentPromptAction {
+    Submit(String),
+    RestartSession,
+    Exit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionCommand {
+    New,
+    Switch(String),
+    Clean,
+}
+
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Init(args)) => {
@@ -89,9 +103,12 @@ async fn run_agent(
     };
     let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
     let (config, _) = agent_builder.load_config(&source).await?;
-    let session_id = args.session_id.unwrap_or(config.agent.session_id);
+    let mut session_id = args.session_id.unwrap_or(config.agent.session_id);
     anyhow::ensure!(!session_id.trim().is_empty(), "session_id cannot be empty");
+    let agent_name = config.agent.name;
     let model = config.model.model;
+    let user_id = config.agent.user_id;
+    let session_runtime = SessionRuntime::with_host_dir(loader.home_dir());
     let engine = build_engine(loader, agent_builder).await;
 
     if !args.prompt.is_empty() {
@@ -105,49 +122,73 @@ async fn run_agent(
         return execution_result;
     }
 
-    let mut ui = TerminalUi::new(Mode::Agent, &model, &session_id, color, no_alt_screen)?;
-    let first_input = next_agent_input(&mut ui, &model, &session_id).await?;
+    let mut ui = TerminalUi::new(
+        Mode::Agent,
+        &agent_name,
+        &model,
+        &session_id,
+        color,
+        no_alt_screen,
+    )?;
 
     let result = async {
-        let Some(input) = first_input else {
-            return Ok(());
-        };
-        let (env, session) = SingleAgentEnv::new(source, input);
-        let execution = engine
-            .launch(env.with_session_id(session_id.clone()))
-            .await?;
-
-        if !ui
-            .run_session(
-                &session,
-                Some(&execution),
-                Some(|content| fae_agent::SessionInput::Supplement(content.into())),
-            )
-            .await?
-        {
-            return Ok(());
-        }
-        execution.result::<()>().await?;
-
-        loop {
-            let Some(input) = next_agent_input(&mut ui, &model, &session_id).await? else {
-                break;
+        'sessions: loop {
+            let input = loop {
+                match next_agent_input(&mut ui, &model, &mut session_id, &user_id, &session_runtime)
+                    .await?
+                {
+                    AgentPromptAction::Submit(input) => break input,
+                    AgentPromptAction::RestartSession => continue,
+                    AgentPromptAction::Exit => return Ok(()),
+                }
             };
-            session
-                .call(fae_agent::SessionInput::NewChat(input.into()))
+
+            let (env, session) = SingleAgentEnv::new(source.clone(), input);
+            let execution = engine
+                .launch(env.with_session_id(session_id.clone()))
                 .await?;
+
             if !ui
                 .run_session(
                     &session,
-                    None,
+                    Some(&execution),
                     Some(|content| fae_agent::SessionInput::Supplement(content.into())),
                 )
                 .await?
             {
-                break;
+                return Ok(());
+            }
+            execution.result::<()>().await?;
+
+            loop {
+                let input = match next_agent_input(
+                    &mut ui,
+                    &model,
+                    &mut session_id,
+                    &user_id,
+                    &session_runtime,
+                )
+                .await?
+                {
+                    AgentPromptAction::Submit(input) => input,
+                    AgentPromptAction::RestartSession => continue 'sessions,
+                    AgentPromptAction::Exit => return Ok(()),
+                };
+                session
+                    .call(fae_agent::SessionInput::NewChat(input.into()))
+                    .await?;
+                if !ui
+                    .run_session(
+                        &session,
+                        None,
+                        Some(|content| fae_agent::SessionInput::Supplement(content.into())),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
             }
         }
-        Ok(())
     }
     .await;
 
@@ -165,7 +206,9 @@ async fn stream_agent_output(
 
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
-        if let SessionEventData::ModelOutput { content } = event.event_data()? {
+        if event.parament_plan_id.is_none()
+            && let SessionEventData::ModelOutput { content } = event.event_data()?
+        {
             stdout.write_all(content.as_bytes())?;
             stdout.flush()?;
             wrote_output = true;
@@ -196,7 +239,14 @@ async fn run_workflow(
     let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
     let engine = build_engine(loader.clone(), agent_builder).await;
     let model = std::env::var("FAE_DEFAULT_MODEL").unwrap_or_else(|_| "workflow".to_string());
-    let mut ui = TerminalUi::new(Mode::Workflow, model, &args.id, color, no_alt_screen)?;
+    let mut ui = TerminalUi::new(
+        Mode::Workflow,
+        &args.id,
+        model,
+        &args.id,
+        color,
+        no_alt_screen,
+    )?;
     ui.push_system(format!(
         "Loading {} from {}",
         args.id,
@@ -224,32 +274,95 @@ async fn run_workflow(
 async fn next_agent_input(
     ui: &mut TerminalUi,
     model: &str,
-    session_id: &str,
-) -> anyhow::Result<Option<String>> {
+    session_id: &mut String,
+    user_id: &str,
+    session_runtime: &SessionRuntime,
+) -> anyhow::Result<AgentPromptAction> {
     loop {
         let PromptAction::Submit(input) = ui.prompt().await? else {
-            return Ok(None);
+            return Ok(AgentPromptAction::Exit);
         };
         match input.as_str() {
-            "/exit" | "/quit" => return Ok(None),
+            "/exit" | "/quit" => return Ok(AgentPromptAction::Exit),
             "/help" => {
                 ui.push_system(
-                    "/help  show commands\n/status  show model and session\n/clear  clear the transcript\n/steer <message>  supplement a running agent\n/exit  leave the session",
+                    "/help  show commands\n/status  show model and session\n/session new  start a new session\n/session id=<id>  switch sessions\n/session clean, /clean  clear current session history\n/clear  clear the transcript\n/steer <message>  supplement a running agent\n/exit  leave the session",
                 );
             }
             "/status" => {
                 ui.push_system(format!("model: {model}\nsession: {session_id}"));
             }
             "/clear" => ui.clear_transcript(),
-            command if command.starts_with('/') => {
-                ui.push_system(format!("Unknown command `{command}`. Use /help."));
-            }
-            _ => {
-                ui.push_user(&input);
-                return Ok(Some(input));
+            command => {
+                let Some(command) = parse_session_command(command) else {
+                    if command.starts_with('/') {
+                        ui.push_system(format!("Unknown command `{command}`. Use /help."));
+                        continue;
+                    }
+                    ui.push_user(&input);
+                    return Ok(AgentPromptAction::Submit(input));
+                };
+                match command {
+                    Ok(SessionCommand::New) => {
+                        *session_id = wd_tools::uuid::v4();
+                        reset_session_ui(ui, session_id, "New session");
+                        return Ok(AgentPromptAction::RestartSession);
+                    }
+                    Ok(SessionCommand::Switch(id)) => {
+                        if let Err(error) = session_runtime.session_path(user_id, &id) {
+                            ui.push_system(format!("Invalid session ID\n{error}"));
+                            continue;
+                        }
+                        *session_id = id;
+                        reset_session_ui(ui, session_id, "Switched session");
+                        return Ok(AgentPromptAction::RestartSession);
+                    }
+                    Ok(SessionCommand::Clean) => {
+                        session_runtime.delete(user_id, session_id).await?;
+                        reset_session_ui(ui, session_id, "Cleaned session history");
+                        return Ok(AgentPromptAction::RestartSession);
+                    }
+                    Err(message) => ui.push_system(message),
+                }
             }
         }
     }
+}
+
+fn parse_session_command(input: &str) -> Option<Result<SessionCommand, String>> {
+    if input == "/clean" {
+        return Some(Ok(SessionCommand::Clean));
+    }
+    let arguments = input.strip_prefix("/session")?;
+    if !arguments.is_empty() && !arguments.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let arguments = arguments.trim();
+    let command = match arguments {
+        "new" => SessionCommand::New,
+        "clean" => SessionCommand::Clean,
+        value
+            if value.starts_with("id=")
+                && !value[3..].is_empty()
+                && !value[3..].contains(char::is_whitespace) =>
+        {
+            SessionCommand::Switch(value[3..].to_string())
+        }
+        _ => {
+            return Some(Err(
+                "Invalid session command\nUse `/session new`, `/session id=<id>`, or `/session clean`."
+                    .to_string(),
+            ));
+        }
+    };
+    Some(Ok(command))
+}
+
+fn reset_session_ui(ui: &mut TerminalUi, session_id: &str, message: &str) {
+    ui.clear_transcript();
+    ui.set_subject(session_id);
+    ui.push_notice(format!("{message}\nsession: {session_id}"));
 }
 
 async fn parse_workflow_input(input: &str) -> anyhow::Result<Value> {
@@ -431,6 +544,42 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn parses_session_commands() {
+        assert_eq!(
+            parse_session_command("/session new"),
+            Some(Ok(SessionCommand::New))
+        );
+        assert_eq!(
+            parse_session_command("/session id=issue-42"),
+            Some(Ok(SessionCommand::Switch("issue-42".to_string())))
+        );
+        assert_eq!(
+            parse_session_command("/session clean"),
+            Some(Ok(SessionCommand::Clean))
+        );
+        assert_eq!(
+            parse_session_command("/clean"),
+            Some(Ok(SessionCommand::Clean))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_session_commands() {
+        for input in [
+            "/session",
+            "/session id=",
+            "/session id=one two",
+            "/session clean now",
+        ] {
+            assert!(
+                matches!(parse_session_command(input), Some(Err(_))),
+                "{input}"
+            );
+        }
+        assert_eq!(parse_session_command("/sessions"), None);
+    }
 
     #[tokio::test]
     async fn parses_inline_and_file_workflow_input() {

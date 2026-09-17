@@ -1726,6 +1726,7 @@ mod tests {
         child_session
             .emit_agent(
                 1,
+                "agent",
                 "model",
                 SessionEventData::ModelOutput {
                     content: "hel".to_string(),
@@ -1749,6 +1750,7 @@ mod tests {
         child_session
             .emit_agent(
                 1,
+                "agent",
                 "agent",
                 SessionEventData::Completed {
                     content: "hello".to_string(),

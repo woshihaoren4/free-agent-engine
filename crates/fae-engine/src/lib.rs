@@ -11,9 +11,12 @@ pub use tools::*;
 impl Engine {
     pub async fn default() -> Self {
         let mut builder = EngineBuilder::new();
+        let workflow_loader = fae_agent::FAEWorkflowMetadataLoader::new();
 
         builder.add_runtime(PlanRuntime::new());
-        builder.add_runtime(WorkflowRuntime::new());
+        builder.add_runtime(WorkflowRuntime::with_metadata_loader(
+            workflow_loader.clone(),
+        ));
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(CompressionRuntime::default());
         builder.add_runtime(SessionRuntime::new());
@@ -25,6 +28,7 @@ impl Engine {
         builder.add_runtime(tools_runtime);
 
         builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
+        builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(workflow_loader));
 
         builder.build().await
     }
@@ -167,6 +171,45 @@ mod tests {
                 event.event_data().unwrap(),
                 SessionEventData::NodeCompleted { .. }
             ));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_workflow_is_callable_as_a_tool_bits_ut() -> anyhow::Result<()> {
+        let mut workflow = WorkflowMetadataBuilder::new("tool-workflow");
+        workflow.start("start", "end")?;
+        workflow.end("end", Some(json!({"value": "{$input.value}"})))?;
+
+        let loader = FAEWorkflowMetadataLoader::new();
+        loader.add(workflow.build()?)?;
+        let engine = engine_with_workflow(loader).await;
+        let response = engine
+            .rt()
+            .exec::<ToolRequest, ToolResponse>(tool_task(
+                engine.ctx(),
+                WORKFLOW,
+                json!({
+                    "workflow_id": "tool-workflow",
+                    "input": {"value": 42}
+                }),
+            ))
+            .await?;
+
+        assert_eq!(completed_json(response.resp).await?, json!({"value": 42}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_default_tools_expose_agent_and_workflow_bits_ut() -> anyhow::Result<()> {
+        let engine = Engine::default().await;
+
+        for tool_name in [AGENT, WORKFLOW] {
+            let description = engine
+                .rt()
+                .select::<String, Value>(TaskType::Tool, tool_name.to_string())
+                .await?;
+            assert_eq!(description["name"], tool_name);
         }
         Ok(())
     }

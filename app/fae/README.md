@@ -48,7 +48,9 @@ The generated configuration has this shape:
     "list_directory",
     "apply_patch",
     "send_http_request",
-    "execute_python"
+    "execute_python",
+    "workflow",
+    "agent"
   ],
   "skills": [
     {
@@ -85,7 +87,7 @@ English-tagged sections through `prompt_sections`:
 }
 ```
 
-Configured sub-agents are exposed through the `call_sub_agent` model tool. The
+Configured sub-agents are exposed through the `agent` model tool. The
 parent prompt receives only each sub-agent's ID and non-empty `agent.desc`.
 
 The install script places the bundled
