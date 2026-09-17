@@ -69,6 +69,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
 {
   "agent": {
     "name": "reviewer",
+    "desc": "Reviews code changes for correctness and regressions.",
     "user_id": "local",
     "session_id": "review-session",
     "metadata": {}
@@ -101,12 +102,14 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 ## 修改策略
 
 - 改模型或上下文：编辑 `model`。
+- 改 Agent 的简短职责说明：编辑 `agent.desc`；该 Agent 被挂载为子 Agent 时，父 Agent 只会看到此说明。
 - 改身份或输出风格：编辑 prompt，避免把行为规则散落到 config。
 - 改会话隔离：修改 `agent.user_id` 或 `agent.session_id`。
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
-- 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID。
+- 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
+  Agent 的 config 都包含非空 `agent.desc`。
 - 重新生成完整 config：
 
 ```bash

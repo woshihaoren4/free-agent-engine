@@ -33,6 +33,8 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleAgentInfo {
     pub name: String,
+    #[serde(default)]
+    pub desc: String,
     pub user_id: String,
     pub session_id: String,
     #[serde(default)]
@@ -636,10 +638,14 @@ impl SingleAgentPlanBuilder {
             let (config, _) = self.load_config(&source).await.map_err(|error| {
                 anyhow::anyhow!("load sub-agent `{agent_id}` configuration: {error}")
             })?;
+            anyhow::ensure!(
+                !config.agent.desc.trim().is_empty(),
+                "sub-agent `{agent_id}` description cannot be empty"
+            );
             let agents_dir = self.home_dir.join("agents");
             agents.push(ResolvedSubAgent {
                 agent_id: agent_id.clone(),
-                info: config.agent,
+                desc: config.agent.desc,
                 source: SingleAgentSource::Paths {
                     config: agents_dir.join(format!("{agent_id}_config.json")),
                     prompt: agents_dir.join(format!("{agent_id}_prompt.txt")),
@@ -848,12 +854,7 @@ fn sub_agents_prompt(agents: &[ResolvedSubAgent]) -> String {
     let mut text =
         String::from("Use the call_sub_agent tool to delegate a task to one of these agents.\n");
     for agent in agents {
-        text.push_str(&format!(
-            "- {}: name={}, metadata={}\n",
-            agent.agent_id,
-            agent.info.name,
-            serde_json::to_string(&agent.info.metadata).unwrap_or_else(|_| "{}".to_string())
-        ));
+        text.push_str(&format!("- {}: {}\n", agent.agent_id, agent.desc));
     }
     text
 }
@@ -907,7 +908,7 @@ async fn resolve_mcp_tools(
 #[derive(Debug, Clone)]
 struct ResolvedSubAgent {
     agent_id: String,
-    info: SingleAgentInfo,
+    desc: String,
     source: SingleAgentSource,
 }
 
@@ -1762,6 +1763,7 @@ mod tests {
         SingleAgentConfig {
             agent: SingleAgentInfo {
                 name: "reviewer".to_string(),
+                desc: "Review code changes".to_string(),
                 user_id: "test-user".to_string(),
                 session_id: "test-session".to_string(),
                 metadata: HashMap::new(),
@@ -1808,6 +1810,16 @@ mod tests {
         let value = serde_json::to_value(config).unwrap();
         assert_eq!(value["trigger_compression_size"], 16_000);
         assert!(value.get("context_size").is_none());
+    }
+
+    #[test]
+    fn config_defaults_description_for_legacy_files() {
+        let mut value = serde_json::to_value(test_config()).unwrap();
+        value["agent"].as_object_mut().unwrap().remove("desc");
+
+        let config: SingleAgentConfig = serde_json::from_value(value).unwrap();
+
+        assert!(config.agent.desc.is_empty());
     }
 
     #[tokio::test]
@@ -1881,10 +1893,7 @@ mod tests {
         tokio::fs::create_dir_all(&agents_dir).await.unwrap();
         let mut researcher = test_config();
         researcher.agent.name = "researcher".to_string();
-        researcher.agent.metadata.insert(
-            "description".to_string(),
-            "Research focused topics".to_string(),
-        );
+        researcher.agent.desc = "Research focused topics".to_string();
         tokio::fs::write(
             agents_dir.join("researcher_config.json"),
             serde_json::to_vec(&researcher).unwrap(),
@@ -1906,10 +1915,7 @@ mod tests {
 
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent_id, "researcher");
-        assert_eq!(
-            agents[0].info.metadata["description"],
-            "Research focused topics"
-        );
+        assert_eq!(agents[0].desc, "Research focused topics");
         assert!(matches!(
             &agents[0].source,
             SingleAgentSource::Paths { config, prompt }
@@ -1951,6 +1957,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(duplicate_error.to_string().contains("more than once"));
+        tokio::fs::remove_dir_all(home).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_sub_agent_without_description() {
+        let home =
+            std::env::temp_dir().join(format!("fae-empty-sub-agent-desc-{}", wd_tools::uuid::v4()));
+        let agents_dir = home.join("agents");
+        tokio::fs::create_dir_all(&agents_dir).await.unwrap();
+        let mut config = test_config();
+        config.agent.name = "worker".to_string();
+        config.agent.desc.clear();
+        tokio::fs::write(
+            agents_dir.join("worker_config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(agents_dir.join("worker_prompt.txt"), "Work.")
+            .await
+            .unwrap();
+
+        let error = SingleAgentPlanBuilder::with_home_dir(&home)
+            .resolve_sub_agents("reviewer", &["worker".to_string()])
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("sub-agent `worker` description cannot be empty")
+        );
         tokio::fs::remove_dir_all(home).await.unwrap();
     }
 
@@ -2171,15 +2209,7 @@ mod tests {
             }],
             &[ResolvedSubAgent {
                 agent_id: "researcher".to_string(),
-                info: SingleAgentInfo {
-                    name: "researcher".to_string(),
-                    user_id: "test-user".to_string(),
-                    session_id: "test-session".to_string(),
-                    metadata: HashMap::from([(
-                        "description".to_string(),
-                        "Research a focused topic".to_string(),
-                    )]),
-                },
+                desc: "Research a focused topic".to_string(),
                 source: SingleAgentSource::AgentId("researcher".to_string()),
             }],
         )
@@ -2193,7 +2223,10 @@ mod tests {
         assert!(prompt.contains("<mcp>"));
         assert!(prompt.contains("maps__search"));
         assert!(prompt.contains("<sub_agent>"));
-        assert!(prompt.contains("researcher"));
+        assert!(prompt.contains("- researcher: Research a focused topic"));
+        assert!(!prompt.contains("test-user"));
+        assert!(!prompt.contains("test-session"));
+        assert!(!prompt.contains("metadata"));
         assert!(
             prompt.find("<setting>").unwrap() < prompt.find("<skills>").unwrap()
                 && prompt.find("<skills>").unwrap() < prompt.find("<mcp>").unwrap()
@@ -2223,12 +2256,12 @@ mod tests {
         let definition = sub_agent_tool_definition(&[
             ResolvedSubAgent {
                 agent_id: "researcher".to_string(),
-                info: test_config().agent,
+                desc: "Research focused topics".to_string(),
                 source: SingleAgentSource::AgentId("researcher".to_string()),
             },
             ResolvedSubAgent {
                 agent_id: "reviewer".to_string(),
-                info: test_config().agent,
+                desc: "Review code changes".to_string(),
                 source: SingleAgentSource::AgentId("reviewer".to_string()),
             },
         ]);
@@ -2849,6 +2882,7 @@ mod tests {
         SingleAgentTemplate {
             agent: SingleAgentInfo {
                 name: "test-agent".to_string(),
+                desc: "a test agent".to_string(),
                 user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
                 metadata: HashMap::new(),

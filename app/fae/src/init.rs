@@ -48,6 +48,7 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
     let config = SingleAgentConfig {
         agent: SingleAgentInfo {
             name: args.agent_id.clone(),
+            desc: format!("{} agent", args.agent_id),
             user_id: "local".to_string(),
             session_id: "default".to_string(),
             metadata: HashMap::new(),
@@ -161,6 +162,7 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&result.config_path).await.unwrap()).unwrap();
 
         assert_eq!(config.agent.name, "fae");
+        assert_eq!(config.agent.desc, "fae agent");
         assert_eq!(config.model.model, "test-model");
         assert_eq!(config.model.max_completion_tokens, Some(65_536));
         assert_eq!(config.model.max_tool_iterations, 128);

@@ -27,6 +27,7 @@ The generated configuration has this shape:
 {
   "agent": {
     "name": "fae",
+    "desc": "fae agent",
     "user_id": "local",
     "session_id": "default",
     "metadata": {}
@@ -84,7 +85,8 @@ English-tagged sections through `prompt_sections`:
 }
 ```
 
-Configured sub-agents are exposed through the `call_sub_agent` model tool.
+Configured sub-agents are exposed through the `call_sub_agent` model tool. The
+parent prompt receives only each sub-agent's ID and non-empty `agent.desc`.
 
 The install script places the bundled
 [`fae_prompt.txt`](../../docs/agents/fae_prompt.txt) at

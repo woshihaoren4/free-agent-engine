@@ -67,6 +67,7 @@ ${FAE_HOST:-~/.fae}/
 {
   "agent": {
     "name": "reviewer",
+    "desc": "Reviews releases for correctness and regressions.",
     "user_id": "alice",
     "session_id": "release-review",
     "metadata": {
@@ -103,6 +104,7 @@ ${FAE_HOST:-~/.fae}/
 | 字段 | 规则 |
 | --- | --- |
 | `agent.name` | 非空；按 ID 运行时必须与 Agent ID 相同 |
+| `agent.desc` | Agent 的简短职责说明；被挂载为子 Agent 时会注入父 Agent prompt |
 | `agent.user_id` | 非空；参与确定会话历史路径 |
 | `agent.session_id` | 非空；参与确定会话历史路径 |
 | `agent.metadata` | 可省略，默认为空对象；用于保存业务标签 |
@@ -136,6 +138,10 @@ ${FAE_HOST:-~/.fae}/
 | `mcp_servers` | Agent 可访问的 MCP server | `[]` |
 | `sub_agents` | 可通过 `call_sub_agent` 调用的 Agent ID | `[]` |
 | `prompt_sections` | 额外的 `{ "tag", "text" }` prompt 区段 | `[]` |
+
+`agent.desc` 省略时默认为空字符串，以兼容已有配置。Agent 独立运行时允许为空；一旦被列入
+另一个 Agent 的 `sub_agents`，`agent.desc` 必须非空。父 Agent 的 `<sub_agent>` 区段只包含
+子 Agent ID 和对应的描述，不会注入子 Agent 的 prompt、会话信息或 metadata。
 
 ## 4. System Prompt
 
