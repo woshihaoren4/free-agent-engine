@@ -3,6 +3,9 @@
 以下配方均以 `${FAE_HOST:-~/.fae}/workflows/` 为根目录。复制完整 JSON 后，修改 ID、节点和业务
 参数，不要改成 Rust Builder。
 
+示例命令默认以非交互模式运行，并将最终 JSON 写入 stdout。需要观察实时节点和 action 事件时，
+在 workflow ID 后添加 `--interactive`。
+
 ## 1. 串行 Tool Workflow
 
 保存为 `read-file.json`：
@@ -342,10 +345,11 @@ fae workflow process-order --input '{"order":{"id":"order-42"}}'
 ```
 
 ```bash
-fae workflow agent-review --input @review-input.json
+fae workflow agent-review --interactive --input @review-input.json
 ```
 
-Agent 的最终文本是 `review` 节点输出。其模型和工具事件会实时显示在 workflow TUI 中。
+Agent 的最终文本是 `review` 节点输出。此处启用交互模式，因此其模型和工具事件会实时显示在
+workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
 
 ## 7. 读取并更新 Session
 
@@ -483,3 +487,4 @@ fae --fae-home /tmp/fae-workflow-test workflow example --input @input.json
 - 每个活跃分支是否都能到达汇合节点。
 - 汇合节点是否列为每个分支的后继。
 - 汇合后的模板是否只读取确定会执行的分支。
+- 使用 `--interactive` 重跑，确认各分支最后到达的节点。

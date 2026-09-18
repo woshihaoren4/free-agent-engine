@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use async_openai::{
     Client,
@@ -9,6 +9,12 @@ use fae_agent::{
     Event, EventType, ModelResponse, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType,
 };
 use wd_tools::channel::{Channel, Receiver, Sender};
+
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
 
 #[derive(Debug)]
 pub struct ModelRuntime<C: Config + Debug = OpenAIConfig> {
@@ -52,7 +58,7 @@ where
         self.client.as_ref()
     }
 
-    async fn request(
+    async fn request_once(
         client: &Client<C>,
         req: CreateChatCompletionRequest,
     ) -> fae_agent::Result<ModelResponse> {
@@ -71,6 +77,29 @@ where
             .await
             .map_err(anyhow::Error::from)?;
         Ok(ModelResponse::Completed(response))
+    }
+
+    async fn request(
+        client: &Client<C>,
+        req: CreateChatCompletionRequest,
+    ) -> fae_agent::Result<ModelResponse> {
+        for (retry_index, delay) in RETRY_DELAYS.iter().enumerate() {
+            match Self::request_once(client, req.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    wd_log::log_error_ln!(
+                        "model request failed, retry {}/{} in {}s: {:?}",
+                        retry_index + 1,
+                        RETRY_DELAYS.len(),
+                        delay.as_secs(),
+                        error
+                    );
+                    tokio::time::sleep(*delay).await;
+                }
+            }
+        }
+
+        Self::request_once(client, req).await
     }
 
     async fn complete(

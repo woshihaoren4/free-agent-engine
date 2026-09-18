@@ -238,6 +238,20 @@ async fn run_workflow(
     let input = parse_workflow_input(&args.input).await?;
     let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
     let engine = build_engine(loader.clone(), agent_builder).await;
+    let (env, session) = WorkflowEnv::new(&args.id, input);
+
+    if !args.interactive {
+        let result = async {
+            let execution = engine.launch(env).await?;
+            let output = execution.result::<Value>().await?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            Ok(())
+        }
+        .await;
+        engine.exit().await?;
+        return result;
+    }
+
     let model = std::env::var("FAE_DEFAULT_MODEL").unwrap_or_else(|_| "workflow".to_string());
     let mut ui = TerminalUi::new(
         Mode::Workflow,
@@ -252,8 +266,6 @@ async fn run_workflow(
         args.id,
         loader.home_dir().join("workflows").display()
     ));
-    let (env, session) = WorkflowEnv::new(&args.id, input);
-
     let result = async {
         let execution = engine.launch(env).await?;
         if !ui.run_session(&session, Some(&execution), None).await? {

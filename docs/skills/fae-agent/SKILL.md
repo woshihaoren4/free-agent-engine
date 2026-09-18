@@ -91,7 +91,8 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
     }
   ],
   "mcp_servers": [],
-  "sub_agents": []
+  "sub_agents": [],
+  "workflows": []
 }
 ```
 
@@ -110,6 +111,8 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
   Agent 的 config 都包含非空 `agent.desc`。
+- 增减 Workflow：修改 `workflows`，使用 `<FAE_HOST>/workflows` 下的 Workflow ID。
+- `agent` 和 `workflow` 工具由对应配置自动挂载，不要写入 `tools`。
 - 重新生成完整 config：
 
 ```bash

@@ -81,6 +81,10 @@ pub struct WorkflowArgs {
     /// JSON value, or @path to read JSON from a file
     #[arg(short, long, default_value = "{}")]
     pub input: String,
+
+    /// Show workflow progress in the interactive terminal UI
+    #[arg(long)]
+    pub interactive: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -196,6 +200,20 @@ mod tests {
         };
         assert_eq!(args.id, "release");
         assert_eq!(args.input, r#"{"tag":"v1"}"#);
+        assert!(!args.interactive);
+    }
+
+    #[test]
+    fn parses_interactive_workflow_mode() {
+        let cli = Cli::try_parse_from(with_default_agent(
+            ["fae", "workflow", "release", "--interactive"].map(Into::into),
+        ))
+        .unwrap();
+
+        let Some(Command::Workflow(args)) = cli.command else {
+            panic!("expected workflow command");
+        };
+        assert!(args.interactive);
     }
 
     #[test]

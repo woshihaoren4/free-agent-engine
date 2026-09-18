@@ -23,12 +23,20 @@ fae --fae-home /path/to/home workflow <workflow-id> --input @input.json
 fae workflow <workflow-id> --input '{"key":"value"}'
 ```
 
+`fae workflow` 默认以非交互模式运行，成功后将最终结果格式化为 JSON 写入 stdout，适合脚本、
+管道和自动化调用。需要在 TUI 中观察节点、Tool、Agent 和嵌套 workflow 的实时事件时，使用：
+
+```bash
+fae workflow <workflow-id> --interactive --input '{"key":"value"}'
+```
+
 加载规则：
 
 - `<workflow-id>.json` 的文件名和文件内 `id` 必须与命令参数相同。
 - ID 必须是单个非空路径组件，不能包含目录。
 - `FAE_HOST` 支持 `~` 和 `~/...`。
 - `--input` 必须是合法 JSON 值；`@path` 表示从文件读取 JSON。
+- `--interactive` 默认关闭；开启后进入 TUI 并实时展示执行事件。
 - 配置在执行前反序列化并完成整图校验。
 
 ## 2. 顶层结构
@@ -422,7 +430,8 @@ jq empty "${FAE_HOST:-$HOME/.fae}/workflows/<workflow-id>.json"
 ```
 
 再通过 `fae workflow` 加载并运行。当前 CLI 没有独立的 validate 子命令，因此对有副作用的
-workflow，应先用无副作用的测试输入或隔离的 `--fae-home` 验证。
+workflow，应先用无副作用的测试输入或隔离的 `--fae-home` 验证。执行失败且需要定位具体节点
+时，加 `--interactive` 查看实时事件。
 
 ## 8. 何时需要代码
 

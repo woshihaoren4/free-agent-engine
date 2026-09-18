@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
@@ -68,6 +68,8 @@ pub struct SingleAgentConfig {
     pub mcp_servers: Vec<String>,
     #[serde(default)]
     pub sub_agents: Vec<String>,
+    #[serde(default)]
+    pub workflows: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,7 @@ Continue the task from the available context and return either a tool call or a 
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
 const AGENT_TOOL_NAME: &str = "agent";
+const WORKFLOW_TOOL_NAME: &str = "workflow";
 
 #[derive(Debug, Clone)]
 pub struct AgentToolInvocation {
@@ -669,7 +672,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         let configured_tools = config
             .tools
             .iter()
-            .filter(|tool_name| sub_agents.is_empty() || tool_name.as_str() != AGENT_TOOL_NAME)
+            .filter(|tool_name| !matches!(tool_name.as_str(), AGENT_TOOL_NAME | WORKFLOW_TOOL_NAME))
             .cloned()
             .collect::<Vec<_>>();
         let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &configured_tools).await?;
@@ -698,6 +701,20 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
                 "configured tool name `{AGENT_TOOL_NAME}` conflicts with the sub-agent tool"
             );
             tool_definitions.push(sub_agent_tool_definition(&sub_agents));
+        }
+        if !config.workflows.is_empty() {
+            anyhow::ensure!(
+                tool_routes
+                    .insert(
+                        WORKFLOW_TOOL_NAME.to_string(),
+                        CallableRoute::Workflow {
+                            workflow_ids: config.workflows.iter().cloned().collect(),
+                        },
+                    )
+                    .is_none(),
+                "configured tool name `{WORKFLOW_TOOL_NAME}` conflicts with the workflow tool"
+            );
+            tool_definitions.push(workflow_tool_definition(&config.workflows));
         }
         let prompt = build_prompt(
             &base_prompt,
@@ -800,6 +817,7 @@ fn validate_config(config: &SingleAgentConfig) -> anyhow::Result<()> {
     for section in &config.prompt_sections {
         validate_prompt_tag(&section.tag)?;
     }
+    validate_workflow_ids(&config.workflows)?;
     Ok(())
 }
 
@@ -811,6 +829,24 @@ fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {
             && components.next().is_none(),
         "agent id must be a single non-empty path component"
     );
+    Ok(())
+}
+
+fn validate_workflow_ids(workflow_ids: &[String]) -> anyhow::Result<()> {
+    let mut seen = HashSet::with_capacity(workflow_ids.len());
+    for workflow_id in workflow_ids {
+        let mut components = Path::new(workflow_id).components();
+        anyhow::ensure!(
+            !workflow_id.is_empty()
+                && matches!(components.next(), Some(Component::Normal(_)))
+                && components.next().is_none(),
+            "workflow id must be a single non-empty path component"
+        );
+        anyhow::ensure!(
+            seen.insert(workflow_id),
+            "workflow `{workflow_id}` is configured more than once"
+        );
+    }
     Ok(())
 }
 
@@ -1069,6 +1105,30 @@ fn sub_agent_tool_definition(agents: &[ResolvedSubAgent]) -> ChatCompletionTools
     })
 }
 
+fn workflow_tool_definition(workflow_ids: &[String]) -> ChatCompletionTools {
+    ChatCompletionTools::Function(async_openai::types::chat::ChatCompletionTool {
+        function: FunctionObject {
+            name: WORKFLOW_TOOL_NAME.to_string(),
+            description: Some("Run a configured workflow and return its final JSON output.".into()),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "enum": workflow_ids
+                    },
+                    "input": {
+                        "description": "JSON input passed to the workflow."
+                    }
+                },
+                "required": ["workflow_id"],
+                "additionalProperties": false
+            })),
+            strict: Some(true),
+        },
+    })
+}
+
 #[derive(Debug, Clone)]
 enum CallableRoute {
     Tool(String),
@@ -1078,6 +1138,9 @@ enum CallableRoute {
     },
     Agent {
         sources: HashMap<String, SingleAgentSource>,
+    },
+    Workflow {
+        workflow_ids: HashSet<String>,
     },
 }
 
@@ -1115,6 +1178,11 @@ struct PendingCall {
 struct SubAgentCall {
     agent_id: String,
     input: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowCall {
+    workflow_id: String,
 }
 
 #[derive(Debug)]
@@ -1560,6 +1628,23 @@ impl SingleAgentPlan {
                         PendingCallKind::Tool,
                     )
                 }
+                CallableRoute::Workflow { workflow_ids } => {
+                    let call: WorkflowCall = serde_json::from_str(&arguments).map_err(|error| {
+                        anyhow::anyhow!("invalid `{WORKFLOW_TOOL_NAME}` arguments: {error}")
+                    })?;
+                    anyhow::ensure!(
+                        workflow_ids.contains(&call.workflow_id),
+                        "workflow `{}` is not configured",
+                        call.workflow_id
+                    );
+                    (
+                        self.task(
+                            TaskType::Tool,
+                            ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments),
+                        ),
+                        PendingCallKind::Tool,
+                    )
+                }
             };
             self.pending_tools.insert(
                 task.meta.id.clone(),
@@ -1886,6 +1971,7 @@ mod tests {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             sub_agents: Vec::new(),
+            workflows: Vec::new(),
         }
     }
 
@@ -1921,10 +2007,12 @@ mod tests {
     fn config_defaults_description_for_legacy_files() {
         let mut value = serde_json::to_value(test_config()).unwrap();
         value["agent"].as_object_mut().unwrap().remove("desc");
+        value.as_object_mut().unwrap().remove("workflows");
 
         let config: SingleAgentConfig = serde_json::from_value(value).unwrap();
 
         assert!(config.agent.desc.is_empty());
+        assert!(config.workflows.is_empty());
     }
 
     #[tokio::test]
@@ -2102,6 +2190,14 @@ mod tests {
         assert!(validate_agent_id("../reviewer").is_err());
         assert!(validate_agent_id("team/reviewer").is_err());
         assert!(validate_agent_id("reviewer").is_ok());
+    }
+
+    #[test]
+    fn workflow_ids_reject_path_components_and_duplicates() {
+        assert!(validate_workflow_ids(&["../release".to_string()]).is_err());
+        assert!(validate_workflow_ids(&["team/release".to_string()]).is_err());
+        assert!(validate_workflow_ids(&["release".to_string(), "release".to_string()]).is_err());
+        assert!(validate_workflow_ids(&["release".to_string(), "deploy".to_string()]).is_ok());
     }
 
     #[test]
@@ -2393,6 +2489,20 @@ mod tests {
         assert_eq!(value["function"]["strict"], true);
     }
 
+    #[test]
+    fn workflow_tool_restricts_calls_to_configured_workflows() {
+        let definition =
+            workflow_tool_definition(&["release-review".to_string(), "deploy".to_string()]);
+        let value = serde_json::to_value(definition).unwrap();
+
+        assert_eq!(value["function"]["name"], WORKFLOW_TOOL_NAME);
+        assert_eq!(
+            value["function"]["parameters"]["properties"]["workflow_id"]["enum"],
+            serde_json::json!(["release-review", "deploy"])
+        );
+        assert_eq!(value["function"]["strict"], true);
+    }
+
     #[tokio::test]
     async fn sub_agent_calls_are_dispatched_through_the_agent_tool() -> anyhow::Result<()> {
         let session = CommonSession::new();
@@ -2449,6 +2559,86 @@ mod tests {
             request.req.take_invocation(),
             Some(ToolInvocation::Agent(invocation)) if invocation.agent_id == "researcher"
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workflow_calls_are_restricted_and_dispatched_through_the_workflow_tool()
+    -> anyhow::Result<()> {
+        let session = CommonSession::new();
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            WORKFLOW_TOOL_NAME.to_string(),
+            CallableRoute::Workflow {
+                workflow_ids: HashSet::from(["release-review".to_string()]),
+            },
+        );
+        let mut plan = SingleAgentPlan::new(ctx, template, "run workflow".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response = |workflow_id: &str| -> anyhow::Result<CreateChatCompletionResponse> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "id": "response-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "content": null,
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "workflow",
+                                "arguments": serde_json::json!({
+                                    "workflow_id": workflow_id,
+                                    "input": {"version": "1.0.0"}
+                                }).to_string()
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "created": 0,
+                "model": "test-model",
+                "object": "chat.completion",
+                "usage": null
+            }))?)
+        };
+
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response("release-review")?))
+            .await?
+        else {
+            panic!("expected workflow tool task");
+        };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Tool);
+        let request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert_eq!(request.req.get_tool_name(), WORKFLOW_TOOL_NAME);
+
+        let session = CommonSession::new();
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            WORKFLOW_TOOL_NAME.to_string(),
+            CallableRoute::Workflow {
+                workflow_ids: HashSet::from(["release-review".to_string()]),
+            },
+        );
+        let mut plan = SingleAgentPlan::new(ctx, template, "run workflow".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+        let error = plan
+            .handle_model_response(ModelResponse::Completed(response("deploy")?))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("workflow `deploy` is not configured")
+        );
         Ok(())
     }
 

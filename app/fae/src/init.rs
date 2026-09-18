@@ -64,11 +64,13 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
         prompt_sections: Vec::new(),
         tools: DEFAULT_TOOL_NAMES
             .iter()
+            .filter(|name| !matches!(**name, "agent" | "workflow"))
             .map(|name| (*name).to_string())
             .collect(),
         skills: skills.iter().cloned().map(SkillQuery::Name).collect(),
         mcp_servers: Vec::new(),
         sub_agents: Vec::new(),
+        workflows: Vec::new(),
     };
     let mut config_bytes = serde_json::to_vec_pretty(&config)?;
     config_bytes.push(b'\n');
@@ -134,7 +136,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn initializes_agent_with_all_tools_and_installed_skills() {
+    async fn initializes_agent_with_standard_tools_and_installed_skills() {
         let home = std::env::temp_dir().join(format!(
             "fae-cli-init-{}-{}",
             std::process::id(),
@@ -170,9 +172,12 @@ mod tests {
             config.tools,
             DEFAULT_TOOL_NAMES
                 .iter()
+                .filter(|name| !matches!(**name, "agent" | "workflow"))
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>()
         );
+        assert!(config.sub_agents.is_empty());
+        assert!(config.workflows.is_empty());
         assert_eq!(
             config.skills,
             vec![

@@ -48,9 +48,7 @@ The generated configuration has this shape:
     "list_directory",
     "apply_patch",
     "send_http_request",
-    "execute_python",
-    "workflow",
-    "agent"
+    "execute_python"
   ],
   "skills": [
     {
@@ -67,7 +65,8 @@ The generated configuration has this shape:
     }
   ],
   "mcp_servers": [],
-  "sub_agents": []
+  "sub_agents": [],
+  "workflows": []
 }
 ```
 
@@ -83,12 +82,15 @@ English-tagged sections through `prompt_sections`:
       "text": "Repository-specific constraints."
     }
   ],
-  "sub_agents": ["reviewer", "researcher"]
+  "sub_agents": ["reviewer", "researcher"],
+  "workflows": ["release-review", "deploy"]
 }
 ```
 
 Configured sub-agents are exposed through the `agent` model tool. The
 parent prompt receives only each sub-agent's ID and non-empty `agent.desc`.
+Configured workflows are exposed through the `workflow` model tool. Both
+special tools are mounted automatically and should not be listed in `tools`.
 
 The install script places the bundled
 [`fae_prompt.txt`](../../docs/agents/fae_prompt.txt) at
@@ -163,6 +165,14 @@ Workflow metadata is loaded from
 
 ```bash
 cargo run -p fae -- workflow release-review \
+  --input '{"path":"Cargo.toml"}'
+```
+
+Workflows run non-interactively by default and print their final JSON result to
+standard output. Use `--interactive` to show live progress in the TUI:
+
+```bash
+cargo run -p fae -- workflow release-review --interactive \
   --input '{"path":"Cargo.toml"}'
 ```
 

@@ -28,69 +28,53 @@ fae init
 fae
 ```
 
-### 发布 CLI
-
-在 macOS 上安装 Rust、[Zig](https://ziglang.org/) 和
-[`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild)，然后执行：
-
-```bash
-./scripts/build-fae-ctl.sh
-```
-
-脚本使用 `Cargo.lock` 编译 release 版本，并更新以下 GitHub Pages 文件：
-
-```text
-docs/bin/mac/fae
-docs/bin/mac/fae.sha256
-docs/bin/linux/fae
-docs/bin/linux/fae.sha256
-```
-
-提交这些产物以及 `docs/bin/install.sh` 并推送到 GitHub。仓库的 GitHub
-Pages Source 需要设置为当前发布分支的 `/docs` 目录；Pages 部署完成后，
-上面的安装命令即可使用。
-
 ## 快速开始
 
-最小用法：
+完成上面的 `fae init` 后，新建 Rust 项目并添加依赖：
 
-先创建一个prompt放在`prompt.txt`文件中，例如：
+```bash
+cargo new fae-demo
+cd fae-demo
+cargo add fae-agent fae-engine \
+  --git https://github.com/woshihaoren4/free-agent-engine
+cargo add anyhow
+cargo add tokio --features macros,rt-multi-thread
 ```
-你是一个专业的代码助手，你的任务是根据用户的问题，生成符合要求的代码。
-```
-然后在`main.rs`中使用它：
+
+将 `src/main.rs` 替换为：
 
 ```rust
-use fae_agent::{AgentConfigData, MemoryEntry, Record, SingleSessionMD};
-use fae_engine::AgentsEngine;
-use tokio_stream::StreamExt;
+use fae_agent::{Session, SessionEventData, SingleAgentEnv};
+use fae_engine::Engine;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut engine = AgentsEngine::default().await;
-    let ws = engine.build_workspace("main", |_| {}).await;
+    let engine = Engine::default().await;
+    let (agent, session) = SingleAgentEnv::from_agent_id("fae", "用一句话介绍 FAE");
+    let task = engine.launch(agent).await?;
 
-    if ws.get_agent("main").await.is_err() {
-        let config = AgentConfigData::default().set_prompt_path("prompt.txt");
-        ws.create_single_agent("main", config.into_agent_config()).await?;
+    while let Some(event) = session.answer().await? {
+        match event.event_data()? {
+            SessionEventData::Completed { content } => {
+                println!("{content}");
+                break;
+            }
+            SessionEventData::Failed { error } => anyhow::bail!("{error}"),
+            _ => {}
+        }
     }
 
-    let mut session = ws
-        .session_call_stream::<_, Record, Record>("main", SingleSessionMD::default())
-        .await?;
-
-    let stream = session
-        .call_stream(Record::from_user_input("用一句话介绍 FAE"))
-        .await?;
-
-    tokio::pin!(stream);
-    while let Some(record) = stream.next().await {
-        print!("{}", record.content());
-    }
-
-    ws.exit().await;
+    task.result::<()>().await?;
+    engine.exit().await?;
     Ok(())
 }
+```
+
+运行：
+
+```bash
+export OPENAI_API_KEY="sk-..."
+cargo run
 ```
 
 ## TODO
@@ -100,4 +84,4 @@ async fn main() -> anyhow::Result<()> {
 - [x] workflow
 - [ ] hook规范化
 - [x] 多session通信改造
-- [ ] 消息规范化
+- [x] 消息规范化

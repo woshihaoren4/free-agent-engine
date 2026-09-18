@@ -1,6 +1,6 @@
 ---
-name: "fae-workflow"
-description: "Creates and runs FAE workflows from JSON configuration. Invoke when defining workflow nodes, actions, conditions, templates, nesting, loading, or troubleshooting."
+name: fae-workflow
+description: Creates and runs FAE workflows from JSON configuration. Invoke when defining workflow nodes, actions, conditions, templates, nesting, loading, or troubleshooting.
 ---
 
 # FAE Workflow
@@ -24,11 +24,17 @@ description: "Creates and runs FAE workflows from JSON configuration. Invoke whe
 3. 创建 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
 4. 使用 `{$input...}` 和 `{$node_id...}` 在节点间传值，并显式配置 end `output`。
 5. 先用 `jq empty <file>` 检查 JSON 语法，再运行 workflow 触发完整图校验。
-6. 用内联 JSON 或 `@input.json` 执行：
+6. 用内联 JSON 或 `@input.json` 执行。默认使用非交互模式并将最终 JSON 写入 stdout：
 
 ```bash
 fae workflow <workflow-id> --input '{"key":"value"}'
 fae workflow <workflow-id> --input @input.json
+```
+
+需要观察节点、Tool 和 Agent 的实时事件，或在终端中排查执行过程时，显式启用 TUI：
+
+```bash
+fae workflow <workflow-id> --interactive --input @input.json
 ```
 
 仓库内开发时可使用：
@@ -118,5 +124,6 @@ fae workflow echo-input --input '{"message":"hello"}'
 4. 检查模板引用的节点是否一定先完成，字段是否真实存在。
 5. 检查 action 依赖：工具名、Agent 配置、子 workflow、Python 解释器或自定义 runtime。
 6. 检查并行汇合的每个活跃分支是否都能到达汇合节点。
+7. 需要查看实时节点和 action 事件时，加 `--interactive` 重跑；默认模式只输出最终 JSON。
 
 不要通过改 Rust 绕过配置校验。若现有 action 无法表达需求，再明确新增 runtime 的必要性。
