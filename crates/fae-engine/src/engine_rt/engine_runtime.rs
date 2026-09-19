@@ -1,6 +1,6 @@
 use fae_agent::{
     Event, EventType, RT, Runtime, RuntimeSelectExec, RuntimeSelectExecWrapped, TaskRequest,
-    TaskResponse, TaskType,
+    TaskResponse, TaskType, hook::runtime::RuntimeHookBuilder,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -8,12 +8,24 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use wd_tools::channel::{Channel, Receiver, Sender};
 
-#[derive(Debug)]
 pub struct EngineRuntime {
-    rts: HashMap<String, Box<dyn Runtime>>,
+    rts: HashMap<String, Arc<dyn Runtime>>,
+    hooks: HashMap<TaskType, Vec<Box<dyn RuntimeHookBuilder>>>,
     rt_by_ty: HashMap<TaskType, Vec<String>>,
     event_sender: Sender<Event>,
     event_receiver: Receiver<Event>,
+}
+
+impl Debug for EngineRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineRuntime")
+            .field("rts", &self.rts)
+            .field("hook_task_types", &self.hooks.keys().collect::<Vec<_>>())
+            .field("rt_by_ty", &self.rt_by_ty)
+            .field("event_sender", &self.event_sender)
+            .field("event_receiver", &self.event_receiver)
+            .finish()
+    }
 }
 
 impl Default for EngineRuntime {
@@ -21,6 +33,7 @@ impl Default for EngineRuntime {
         let (event_sender, event_receiver) = Channel::new(1024);
         Self {
             rts: HashMap::new(),
+            hooks: HashMap::new(),
             rt_by_ty: HashMap::new(),
             event_sender,
             event_receiver,
@@ -56,29 +69,29 @@ impl EngineRuntime {
         self.event_sender.clone()
     }
 
-    pub fn add_raw_runtime(&mut self, rt: Box<dyn Runtime>) -> Option<Box<dyn Runtime>> {
+    pub fn add_raw_runtime(&mut self, rt: Box<dyn Runtime>) -> Option<Arc<dyn Runtime>> {
         let id = rt.id().to_string();
         self.remove_runtime_tys(&id);
-        self.rts.insert(id, rt)
+        self.rts.insert(id, Arc::from(rt))
     }
 
     pub fn add_raw_runtime_with_tys(
         &mut self,
         rt: Box<dyn Runtime>,
         tys: impl IntoIterator<Item = TaskType>,
-    ) -> Option<Box<dyn Runtime>> {
+    ) -> Option<Arc<dyn Runtime>> {
         let id = rt.id().to_string();
         self.remove_runtime_tys(&id);
         for ty in tys {
             self.bind_task_type(ty, id.clone());
         }
-        self.rts.insert(id, rt)
+        self.rts.insert(id, Arc::from(rt))
     }
 
     pub fn add_runtime<Req, Resp, Cond, Info>(
         &mut self,
         rt: Arc<dyn RuntimeSelectExec<Req, Resp, Cond, Info>>,
-    ) -> Option<Box<dyn Runtime>>
+    ) -> Option<Arc<dyn Runtime>>
     where
         Req: Debug + Send + 'static,
         Resp: Debug + Send + 'static,
@@ -89,9 +102,20 @@ impl EngineRuntime {
         self.add_raw_runtime_with_tys(Box::new(RuntimeSelectExecWrapped::new(rt)), tys)
     }
 
-    pub fn remove_runtime(&mut self, id: &str) -> Option<Box<dyn Runtime>> {
+    pub fn remove_runtime(&mut self, id: &str) -> Option<Arc<dyn Runtime>> {
         self.remove_runtime_tys(id);
         self.rts.remove(id)
+    }
+
+    pub fn add_runtime_hook(&mut self, ty: TaskType, hook: Box<dyn RuntimeHookBuilder>) {
+        self.hooks.entry(ty).or_default().push(hook);
+    }
+
+    pub fn remove_runtime_hooks(
+        &mut self,
+        ty: &TaskType,
+    ) -> Option<Vec<Box<dyn RuntimeHookBuilder>>> {
+        self.hooks.remove(ty)
     }
 
     pub fn bind_task_type(&mut self, ty: TaskType, rt_id: impl Into<String>) {
@@ -114,15 +138,32 @@ impl EngineRuntime {
         self.rts.contains_key(id)
     }
 
-    fn runtime_by_task_type(&self, ty: &TaskType) -> Option<&dyn Runtime> {
-        self.rt_by_ty
-            .get(ty)
-            .and_then(|ids| ids.iter().find_map(|id| self.rts.get(id)))
-            .map(|rt| rt.as_ref())
-    }
-
     fn runtime_ids_by_task_type(&self, ty: &TaskType) -> Option<&[String]> {
         self.rt_by_ty.get(ty).map(Vec::as_slice)
+    }
+
+    async fn runtimes_for_task(
+        &self,
+        ty: &TaskType,
+        runtime_id: Option<&str>,
+    ) -> Vec<Arc<dyn Runtime>> {
+        let mut runtimes = match runtime_id {
+            Some(id) => self.rts.get(id).cloned().into_iter().collect(),
+            None => self
+                .runtime_ids_by_task_type(ty)
+                .into_iter()
+                .flatten()
+                .filter_map(|id| self.rts.get(id).cloned())
+                .collect(),
+        };
+
+        if let Some(hooks) = self.hooks.get(ty) {
+            for hook in hooks {
+                runtimes = vec![hook.build(runtimes).await];
+            }
+        }
+
+        runtimes
     }
 
     fn remove_runtime_tys(&mut self, id: &str) {
@@ -188,7 +229,8 @@ impl EngineRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fae_agent::{ContextNull, TaskMeta, TaskResp};
+    use fae_agent::{ContextNull, TaskMeta, TaskReq, TaskResp};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     #[derive(Debug)]
@@ -236,6 +278,65 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CountingRuntime {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runtime for CountingRuntime {
+        fn id(&self) -> &str {
+            "counting"
+        }
+
+        async fn spawn(&self, _task: &mut TaskRequest) -> fae_agent::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingHookBuilder {
+        builds: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeHookBuilder for CountingHookBuilder {
+        async fn build(&self, runtimes: Vec<Arc<dyn Runtime>>) -> Arc<dyn Runtime> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            Arc::new(CountingHookRuntime {
+                runtimes,
+                calls: self.calls.clone(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingHookRuntime {
+        runtimes: Vec<Arc<dyn Runtime>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runtime for CountingHookRuntime {
+        fn id(&self) -> &str {
+            "counting_hook"
+        }
+
+        async fn spawn(&self, task: &mut TaskRequest) -> fae_agent::Result<()> {
+            if task.meta.executor != self.id() {
+                return Err(fae_agent::Error::RuntimeNoSupport);
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.runtimes
+                .first()
+                .ok_or(fae_agent::Error::RuntimeNoSupport)?
+                .spawn(task)
+                .await
+        }
+    }
+
     fn callback_event(id: &str) -> Event {
         Event {
             from_rt_id: "event_source".to_string(),
@@ -279,6 +380,46 @@ mod tests {
             .expect("fast callback was blocked by slow callback");
         release_slow.notify_one();
     }
+
+    #[tokio::test]
+    async fn builds_hook_runtime_for_every_task_call() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let runtime_calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = EngineRuntime::new();
+        runtime.add_raw_runtime_with_tys(
+            Box::new(CountingRuntime {
+                calls: runtime_calls.clone(),
+            }),
+            [TaskType::Tool],
+        );
+        runtime.add_runtime_hook(
+            TaskType::Tool,
+            Box::new(CountingHookBuilder {
+                builds: builds.clone(),
+                calls: hook_calls.clone(),
+            }),
+        );
+
+        for (id, executor) in [("first", ""), ("second", "counting")] {
+            let mut task = TaskReq {
+                ctx: fae_agent::Ctx::new(Arc::new(ContextNull)),
+                meta: TaskMeta {
+                    id: id.to_string(),
+                    ty: TaskType::Tool,
+                    executor: executor.to_string(),
+                    ..Default::default()
+                },
+                req: (),
+            }
+            .into_request();
+            runtime.spawn(&mut task).await.unwrap();
+        }
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime_calls.load(Ordering::SeqCst), 2);
+    }
 }
 
 #[async_trait::async_trait]
@@ -297,7 +438,10 @@ impl Runtime for EngineRuntime {
         cond: &mut Box<dyn Any + Send>,
     ) -> fae_agent::Result<Box<dyn Any + Send>> {
         let rt = self
-            .runtime_by_task_type(&ty)
+            .runtimes_for_task(&ty, None)
+            .await
+            .into_iter()
+            .next()
             .ok_or(fae_agent::Error::RuntimeNoSupport)?;
         rt.select(ty, cond).await
     }
@@ -307,32 +451,21 @@ impl Runtime for EngineRuntime {
             return Err(fae_agent::Error::ContextAborted);
         }
 
-        if task.meta.executor.is_empty() {
-            let Some(rt_ids) = self.runtime_ids_by_task_type(&task.meta.ty) else {
-                return Err(fae_agent::Error::RuntimeNoSupport);
-            };
+        let ty = task.meta.ty.clone();
+        let original_executor = task.meta.executor.clone();
+        let runtime_id = (!original_executor.is_empty()).then_some(original_executor.as_str());
+        let runtimes = self.runtimes_for_task(&ty, runtime_id).await;
 
-            let original_executor = task.meta.executor.clone();
-            for rt_id in rt_ids {
-                let Some(rt) = self.rts.get(rt_id) else {
-                    continue;
-                };
-
-                task.meta.executor = rt_id.clone();
-                match rt.spawn(task).await {
-                    Err(fae_agent::Error::RuntimeNoSupport) => continue,
-                    result => return result,
-                }
+        for rt in runtimes {
+            task.meta.executor = rt.id().to_string();
+            match rt.spawn(task).await {
+                Err(fae_agent::Error::RuntimeNoSupport) => continue,
+                result => return result,
             }
-            task.meta.executor = original_executor;
-            return Err(fae_agent::Error::RuntimeNoSupport);
         }
 
-        let rt = self
-            .rts
-            .get(&task.meta.executor)
-            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
-        rt.spawn(task).await
+        task.meta.executor = original_executor;
+        Err(fae_agent::Error::RuntimeNoSupport)
     }
 
     async fn trigger(&self, event: &mut Event) -> fae_agent::Result<()> {
@@ -359,41 +492,31 @@ impl Runtime for EngineRuntime {
             return Err(fae_agent::Error::ContextAborted);
         }
 
-        if task.meta.executor.is_empty() {
-            let Some(rt_ids) = self.runtime_ids_by_task_type(&task.meta.ty) else {
-                return Err(fae_agent::Error::RuntimeNoSupport);
-            };
+        let ty = task.meta.ty.clone();
+        let original_executor = task.meta.executor.clone();
+        let runtime_id = (!original_executor.is_empty()).then_some(original_executor.as_str());
+        let runtimes = self.runtimes_for_task(&ty, runtime_id).await;
 
-            let original_executor = task.meta.executor.clone();
-            for rt_id in rt_ids {
-                let Some(rt) = self.rts.get(rt_id) else {
-                    continue;
-                };
-
-                task.meta.executor = rt_id.clone();
-                match rt.exec(task).await {
-                    Err(fae_agent::Error::RuntimeNoSupport) => continue,
-                    result => return result,
-                }
+        for rt in runtimes {
+            task.meta.executor = rt.id().to_string();
+            match rt.exec(task).await {
+                Err(fae_agent::Error::RuntimeNoSupport) => continue,
+                result => return result,
             }
-            task.meta.executor = original_executor;
-            return Err(fae_agent::Error::RuntimeNoSupport);
         }
 
-        let rt = self
-            .rts
-            .get(&task.meta.executor)
-            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
-        rt.exec(task).await
+        task.meta.executor = original_executor;
+        Err(fae_agent::Error::RuntimeNoSupport)
     }
 
     async fn kill(&self, ty: TaskType, rtid: &str, task_id: &str) -> fae_agent::Result<()> {
-        let rt = if rtid.is_empty() {
-            self.runtime_by_task_type(&ty)
-        } else {
-            self.rts.get(rtid).map(|rt| rt.as_ref())
-        }
-        .ok_or(fae_agent::Error::RuntimeNoSupport)?;
+        let runtime_id = (!rtid.is_empty()).then_some(rtid);
+        let rt = self
+            .runtimes_for_task(&ty, runtime_id)
+            .await
+            .into_iter()
+            .next()
+            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
 
         rt.kill(ty, rt.id(), task_id).await
     }
