@@ -4,6 +4,7 @@ mod error;
 mod event;
 pub mod hook;
 mod mcp;
+mod memory;
 mod model;
 mod plan;
 mod runtime;
@@ -17,7 +18,9 @@ pub use common::*;
 pub use context::*;
 pub use error::*;
 pub use event::*;
+pub use hook::*;
 pub use mcp::*;
+pub use memory::*;
 pub use model::*;
 pub use plan::*;
 pub use runtime::*;
@@ -26,7 +29,6 @@ pub use skill::*;
 pub use task::*;
 pub use tool::*;
 pub use workflow::*;
-pub use hook::*;
 
 #[cfg(test)]
 mod tests {

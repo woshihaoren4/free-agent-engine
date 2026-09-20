@@ -13,6 +13,7 @@ pub enum TaskType {
     Workflow,
     Model,
     Session,
+    Memory,
     Any(String),
 }
 //

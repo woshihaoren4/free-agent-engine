@@ -82,9 +82,9 @@ impl Tools for AgentTool {
             Some(ToolInvocation::Agent(invocation)) => {
                 invocation.into_env(&args.agent_id, args.input)?
             }
-            Some(ToolInvocation::Workflow { .. }) | None => {
-                SingleAgentEnv::from_agent_id(args.agent_id, args.input)
-            }
+            Some(ToolInvocation::Workflow { .. })
+            | Some(ToolInvocation::UserMemory { .. })
+            | None => SingleAgentEnv::from_agent_id(args.agent_id, args.input),
         };
         if let Some(session_id) = args.session_id {
             env = env.with_session_id(session_id);

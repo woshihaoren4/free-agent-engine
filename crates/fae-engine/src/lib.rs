@@ -20,6 +20,7 @@ impl Engine {
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(CompressionRuntime::default());
         builder.add_runtime(SessionRuntime::new());
+        builder.add_runtime(UserMemoryRuntime::new());
         builder.add_runtime(SkillRuntime::new());
         builder.add_runtime(McpRuntime::new());
 
@@ -39,8 +40,8 @@ mod tests {
     use super::*;
     use fae_agent::{
         Ctx, EventType, FAEWorkflowMetadataLoader, Session, SessionEventData, TaskMeta, TaskReq,
-        TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction, WorkflowEnv,
-        WorkflowMetadataBuilder,
+        TaskResp, TaskType, ToolInvocation, ToolRequest, ToolRespItem, ToolResponse,
+        UserMemoryQuery, UserMemoryResponse, WorkflowAction, WorkflowEnv, WorkflowMetadataBuilder,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
@@ -52,6 +53,7 @@ mod tests {
         builder.add_runtime(ModelRuntime::new());
         builder.add_runtime(CompressionRuntime::default());
         builder.add_runtime(SessionRuntime::new());
+        builder.add_runtime(UserMemoryRuntime::new());
         builder.add_runtime(SkillRuntime::new());
         builder.add_runtime(McpRuntime::new());
 
@@ -201,16 +203,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_tools_expose_agent_and_workflow_bits_ut() -> anyhow::Result<()> {
+    async fn test_default_tools_expose_specialized_tools_bits_ut() -> anyhow::Result<()> {
         let engine = Engine::default().await;
 
-        for tool_name in [AGENT, WORKFLOW] {
+        for tool_name in [AGENT, WORKFLOW, MEMORY_UPDATE] {
             let description = engine
                 .rt()
                 .select::<String, Value>(TaskType::Tool, tool_name.to_string())
                 .await?;
             assert_eq!(description["name"], tool_name);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_memory_update_tool_writes_current_user_memory_bits_ut() -> anyhow::Result<()> {
+        let host = std::env::temp_dir().join(format!(
+            "fae-memory-tool-{}-{}",
+            std::process::id(),
+            wd_tools::uuid::v4()
+        ));
+        let mut builder = EngineBuilder::new();
+        builder.add_runtime(UserMemoryRuntime::with_host_dir(&host));
+        let mut tools = ToolsRuntime::new();
+        tools.add_tool(Box::new(DefaultTools::default()));
+        builder.add_runtime(tools);
+        let engine = builder.build().await;
+
+        let response = engine
+            .rt()
+            .exec::<ToolRequest, ToolResponse>(TaskReq {
+                ctx: engine.ctx(),
+                meta: TaskMeta {
+                    ty: TaskType::Tool,
+                    ..Default::default()
+                },
+                req: ToolRequest::new(
+                    MEMORY_UPDATE.to_string(),
+                    json!({
+                        "category": "preference",
+                        "content": "Prefers concise answers",
+                        "confidence": "user_stated"
+                    })
+                    .to_string(),
+                )
+                .with_invocation(ToolInvocation::UserMemory {
+                    user_id: "alice".to_string(),
+                }),
+            })
+            .await?;
+        let output = completed_json(response.resp).await?;
+        assert_eq!(output["Updated"]["memory"]["id"], 1);
+
+        let memories = engine
+            .rt()
+            .select::<_, UserMemoryResponse>(TaskType::Memory, UserMemoryQuery::new("alice"))
+            .await?;
+        let UserMemoryResponse::Memories { memories, .. } = memories else {
+            anyhow::bail!("expected memories response");
+        };
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "Prefers concise answers");
+
+        engine.exit().await?;
+        let _ = tokio::fs::remove_dir_all(host).await;
         Ok(())
     }
 

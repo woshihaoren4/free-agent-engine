@@ -68,7 +68,7 @@ enum MessageKind {
 
 impl MessageKind {
     fn folds_by_default(self) -> bool {
-        !matches!(self, Self::User | Self::Assistant)
+        !matches!(self, Self::User | Self::Assistant | Self::Error)
     }
 }
 
@@ -409,6 +409,22 @@ impl TerminalUi {
         self.push_message(MessageKind::Notice, content);
     }
 
+    pub fn push_error(&mut self, error: impl Into<String>) {
+        self.finish_stream();
+        let error = error.into();
+        if self
+            .messages
+            .last()
+            .is_some_and(|message| message.kind == MessageKind::Error && message.content == error)
+        {
+            return;
+        }
+        self.messages
+            .push(Message::new(MessageKind::Error, "ERROR", error, None));
+        self.state = RunState::Failed;
+        self.scroll_from_bottom = 0;
+    }
+
     fn push_message(&mut self, kind: MessageKind, content: impl Into<String>) {
         self.finish_stream();
         let content = content.into();
@@ -692,16 +708,7 @@ impl TerminalUi {
             }
             SessionEventData::Failed { error } => {
                 self.flush_child_streams(&run_id, None);
-                self.finish_stream();
-                self.messages.push(Message::new(
-                    MessageKind::Error,
-                    title("Error"),
-                    error,
-                    None,
-                ));
-                if terminal {
-                    self.state = RunState::Failed;
-                }
+                self.push_error(error);
             }
             SessionEventData::Custom {
                 event_type,
@@ -2107,6 +2114,23 @@ mod tests {
         assert_eq!(
             plain_transcript(&messages),
             "> You\n Question\n\n* Assistant\n First line\n Second line"
+        );
+    }
+
+    #[test]
+    fn error_is_expanded_and_preserved_in_plain_transcript() {
+        let message = Message::new(
+            MessageKind::Error,
+            "ERROR",
+            "request failed\nconnection reset",
+            None,
+        );
+
+        assert!(message.expanded);
+        assert!(message.shows_content());
+        assert_eq!(
+            plain_transcript(&[message]),
+            "! ERROR\n request failed\n connection reset"
         );
     }
 

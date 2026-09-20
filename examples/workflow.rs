@@ -143,6 +143,7 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
     ));
     builder.add_runtime(fae_engine::ModelRuntime::new());
     builder.add_runtime(fae_engine::SessionRuntime::new());
+    builder.add_runtime(fae_engine::UserMemoryRuntime::new());
     builder.add_runtime(PythonActionRuntime::default());
 
     let mut tools = fae_engine::ToolsRuntime::new();

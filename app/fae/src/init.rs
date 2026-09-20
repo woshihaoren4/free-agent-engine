@@ -45,6 +45,9 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
     tokio::fs::create_dir_all(home.join("mcp"))
         .await
         .with_context(|| format!("create `{}`", home.join("mcp").display()))?;
+    tokio::fs::create_dir_all(home.join("memory"))
+        .await
+        .with_context(|| format!("create `{}`", home.join("memory").display()))?;
 
     let skills = discover_installed_skills(&skills_dir).await?;
     let config = SingleAgentConfig {
@@ -190,6 +193,7 @@ mod tests {
         );
         assert_eq!(result.skill_count, 2);
         assert!(!home.join("agents/fae_prompt.txt").exists());
+        assert!(home.join("memory").is_dir());
 
         tokio::fs::remove_dir_all(home).await.unwrap();
     }

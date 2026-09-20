@@ -11,7 +11,8 @@ use fae_agent::{
 };
 use fae_engine::{
     CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
-    SessionRuntime, SkillRuntime, ToolsRuntime, WorkflowRuntime, default_fae_host,
+    SessionRuntime, SkillRuntime, ToolsRuntime, UserMemoryRuntime, WorkflowRuntime,
+    default_fae_host,
 };
 use serde_json::Value;
 use wd_tools::channel::{Channel, Receiver, Sender};
@@ -153,21 +154,35 @@ async fn run_agent(
 
             let (env, session) =
                 SingleAgentEnv::new_with_user_id(source.clone(), input, user_id.clone());
-            let execution = engine
-                .launch(env.with_session_id(session_id.clone()))
-                .await?;
+            let execution = match engine.launch(env.with_session_id(session_id.clone())).await {
+                Ok(execution) => execution,
+                Err(error) => {
+                    ui.push_error(format!("{error:#}"));
+                    continue;
+                }
+            };
 
-            if !ui
+            let completed = match ui
                 .run_session(
                     &session,
                     Some(&execution),
                     Some(|content| fae_agent::SessionInput::Supplement(content.into())),
                 )
-                .await?
+                .await
             {
+                Ok(completed) => completed,
+                Err(error) => {
+                    ui.push_error(format!("{error:#}"));
+                    continue;
+                }
+            };
+            if !completed {
                 return Ok(());
             }
-            execution.result::<()>().await?;
+            if let Err(error) = execution.result::<()>().await {
+                ui.push_error(format!("{error:#}"));
+                continue;
+            }
 
             loop {
                 let input = match next_agent_input(
@@ -184,17 +199,28 @@ async fn run_agent(
                     AgentPromptAction::RestartSession => continue 'sessions,
                     AgentPromptAction::Exit => return Ok(()),
                 };
-                session
+                if let Err(error) = session
                     .call(fae_agent::SessionInput::NewChat(input.into()))
-                    .await?;
-                if !ui
+                    .await
+                {
+                    ui.push_error(format!("{error:#}"));
+                    continue;
+                }
+                let completed = match ui
                     .run_session(
                         &session,
                         None,
                         Some(|content| fae_agent::SessionInput::Supplement(content.into())),
                     )
-                    .await?
+                    .await
                 {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        ui.push_error(format!("{error:#}"));
+                        continue 'sessions;
+                    }
+                };
+                if !completed {
                     return Ok(());
                 }
             }
@@ -435,6 +461,7 @@ async fn build_engine(
     builder.add_runtime(ModelRuntime::new());
     builder.add_runtime(CompressionRuntime::default());
     builder.add_runtime(SessionRuntime::with_host_dir(&home_dir));
+    builder.add_runtime(UserMemoryRuntime::with_host_dir(&home_dir));
     builder.add_runtime(SkillRuntime::with_host_dir(&home_dir));
     builder.add_runtime(McpRuntime::with_mcp_dir(home_dir.join("mcp")));
     builder.add_runtime(PythonActionRuntime::default());

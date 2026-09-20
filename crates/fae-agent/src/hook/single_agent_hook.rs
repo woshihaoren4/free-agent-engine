@@ -21,6 +21,10 @@ pub struct SingleAgentHookContext<'a> {
 
 #[async_trait::async_trait]
 pub trait SingleAgentHook: Debug + Send + Sync + 'static {
+    async fn on_memory(&self, _context: SingleAgentHookContext<'_>) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn on_history(&self, _context: SingleAgentHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }

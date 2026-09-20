@@ -11,6 +11,7 @@ description: "Creates, configures, modifies, runs, and troubleshoots FAE agents.
 
 - 默认使用 `fae init` 创建 Agent，不编写代码。
 - 使用 `<agent-id>_config.json` 管理模型、会话、工具、Skill 和 MCP。
+- 用户长期记忆保存在 `<FAE_HOST>/memory/<user-id>.jsonl`，由 `memory_update` 工具维护。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
 - 运行和验证统一使用 `fae agent`。
 - 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
@@ -83,7 +84,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
     "max_tool_iterations": 128
   },
   "prompt_sections": [],
-  "tools": ["read_file"],
+  "tools": ["read_file", "memory_update"],
   "skills": [
     {
       "type": "name",
@@ -97,8 +98,9 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
 ```
 
 Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。运行时会将其包装为
-`<setting>`，并在加载 History 前追加 `<skills>`、`<mcp>` 和 `<sub_agent>`。需要自定义区段时，
-在 `prompt_sections` 中配置英文 `tag` 与 `text`。
+`<setting>`，并追加 `<skills>`、`<mcp>` 和 `<sub_agent>`。如果当前用户存在长期记忆，运行时会
+在加载 History 前以 `<UserMemory>` 标签加入 prompt。需要自定义区段时，在 `prompt_sections`
+中配置英文 `tag` 与 `text`。
 
 ## 修改策略
 
@@ -107,6 +109,7 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 改身份或输出风格：编辑 prompt，避免把行为规则散落到 config。
 - 改会话隔离：修改 `agent.user_id` 或 `agent.session_id`。
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
+- 允许 Agent 维护当前用户长期记忆：在 `tools` 中保留 `memory_update`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子

@@ -83,7 +83,7 @@ ${FAE_HOST:-~/.fae}/
     "max_tool_iterations": 128
   },
   "prompt_sections": [],
-  "tools": ["read_file", "execute_command"],
+  "tools": ["read_file", "execute_command", "memory_update"],
   "skills": [
     {
       "type": "name",
@@ -151,8 +151,9 @@ ${FAE_HOST:-~/.fae}/
 ## 4. System Prompt
 
 `reviewer_prompt.txt` 只保存 Agent 的长期行为约束。运行时会将内容包装在英文
-`<setting>` 标签中，并在读取 History 前按顺序追加自定义区段、`<skills>`、`<mcp>` 和
-`<sub_agent>`。例如：
+`<setting>` 标签中，并按顺序追加自定义区段、`<skills>`、`<mcp>` 和 `<sub_agent>`。如果
+`${FAE_HOST}/memory/<user_id>.jsonl` 中存在记录，Single Agent 会先读取这些记录，以
+`<UserMemory>` 标签追加到 system prompt，再读取 History。例如：
 
 ```text
 You are a code reviewer.
@@ -208,7 +209,8 @@ Keep the final summary concise.
   "list_directory",
   "apply_patch",
   "send_http_request",
-  "execute_python"
+  "execute_python",
+  "memory_update"
 ]
 ```
 
@@ -221,6 +223,12 @@ Keep the final summary concise.
 ```
 
 工具名必须与 `fae` 注册名称完全一致。模型是否调用工具还取决于模型能力、prompt 和具体任务。
+
+`memory_update` 只操作当前 Single Agent 的 `user_id`，模型不能指定其他用户。省略 `id` 时新增
+一条记忆并使用当前最大 ID 加一；传入已有 `id` 时更新该条记录。`category` 可为
+`user_attribute`、`preference` 或 `other`，`confidence` 可为 `user_stated`、
+`user_confirmed` 或 `system_inferred`。用户明确表达、用户确认和系统推断必须使用对应值，
+不能混用。
 
 ## 6. Skill
 
@@ -357,12 +365,24 @@ fae --color never agent --agent-id reviewer
 
 `/clear` 只清空界面，不删除磁盘会话历史。
 
-## 9. 会话历史
+## 9. 用户记忆
+
+每个用户的长期记忆保存在：
+
+```text
+${FAE_HOST:-~/.fae}/memory/<user_id>.jsonl
+```
+
+每行是一个 JSON 对象，包含自增 `id`、明确的 `category`、具体 `content`、信息来源
+`confidence` 和 UTC `updated_at`。运行时只保留每个 ID 的当前值；更新已有记录会重写该用户
+文件并刷新时间。不要直接把指令或临时任务进度写入长期记忆。
+
+## 10. 会话历史
 
 历史默认保存在：
 
 ```text
-${FAE_HOST:-~/.fae}/session/<agent_id>/<session_id>.jsonl
+${FAE_HOST:-~/.fae}/session/<agent_id>/<user_id>/<session_id>.jsonl
 ```
 
 `history_turns` 控制新一轮读取的历史轮数。排查上下文问题时检查：
@@ -374,7 +394,7 @@ ${FAE_HOST:-~/.fae}/session/<agent_id>/<session_id>.jsonl
 
 不同用途的 Agent 应使用不同 `session_id`，避免不相关上下文互相污染。
 
-## 10. 验证配置
+## 11. 验证配置
 
 当前 `fae` 没有独立的 Agent config validate 子命令。使用最小请求完成加载和连接验证：
 

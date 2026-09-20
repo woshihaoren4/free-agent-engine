@@ -70,7 +70,9 @@ impl Tools for WorkflowTool {
             Some(ToolInvocation::Workflow { user_id }) => {
                 WorkflowEnv::new_with_user_id(args.workflow_id, args.input, user_id)
             }
-            Some(ToolInvocation::Agent(_)) | None => WorkflowEnv::new(args.workflow_id, args.input),
+            Some(ToolInvocation::Agent(_)) | Some(ToolInvocation::UserMemory { .. }) | None => {
+                WorkflowEnv::new(args.workflow_id, args.input)
+            }
         };
         let response = ctx
             .get_engine()

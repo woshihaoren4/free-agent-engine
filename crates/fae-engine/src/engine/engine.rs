@@ -158,7 +158,7 @@ impl fae_agent::Engine for Engine {
 mod tests {
     use super::*;
     use crate::EngineBuilder;
-    use fae_agent::{PlanBuilderWithEnv, PlanNext, TaskResponse, hook::plan::PlanHookBuilder};
+    use fae_agent::{PlanBuilderWithEnv, PlanNext, TaskResponse, hook::plan_hook::PlanHookBuilder};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
