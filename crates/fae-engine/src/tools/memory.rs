@@ -14,7 +14,35 @@ use super::{
 pub struct MemoryUpdateTool;
 
 #[derive(Debug, Deserialize)]
-struct MemoryUpdateArgs {
+#[serde(untagged)]
+enum MemoryUpdateArgs {
+    Operation(MemoryOperationArgs),
+    Legacy(LegacyMemoryUpdateArgs),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum MemoryOperationArgs {
+    Create {
+        category: UserMemoryCategory,
+        content: String,
+        confidence: UserMemoryConfidence,
+    },
+    Update {
+        id: u64,
+        category: UserMemoryCategory,
+        content: String,
+        confidence: UserMemoryConfidence,
+    },
+    Delete {
+        id: u64,
+    },
+    Query,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyMemoryUpdateArgs {
     #[serde(default)]
     id: Option<u64>,
     category: UserMemoryCategory,
@@ -35,31 +63,25 @@ impl Tools for MemoryUpdateTool {
 
         Ok(json!({
             "name": MEMORY_UPDATE,
-            "description": "Create or update one durable memory for the current user. Omit id to create a memory; provide an existing id to replace it.",
+            "description": "Create, update, delete, or query durable memories for the current user.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Existing memory ID to update. Omit when creating."
-                    },
-                    "category": {
+                    "operation": {
                         "type": "string",
-                        "enum": ["user_attribute", "preference", "other"],
-                        "description": "The explicit category of this memory."
+                        "enum": ["create", "update", "delete", "query"],
+                        "description": "Operation to perform. create requires category, content, and confidence; update also requires id; delete requires id; query requires no other fields."
                     },
+                    "id": memory_id_schema(),
+                    "category": memory_category_schema(),
                     "content": {
                         "type": "string",
-                        "description": "The concrete fact or preference to remember."
+                        "minLength": 1,
+                        "description": "The concrete fact or preference to create or update."
                     },
-                    "confidence": {
-                        "type": "string",
-                        "enum": ["user_stated", "user_confirmed", "system_inferred"],
-                        "description": "How the information was established."
-                    }
+                    "confidence": memory_confidence_schema()
                 },
-                "required": ["category", "content", "confidence"],
+                "required": ["operation"],
                 "additionalProperties": false
             }
         }))
@@ -73,12 +95,6 @@ impl Tools for MemoryUpdateTool {
             Ok(args) => args,
             Err(response) => return Ok(response),
         };
-        if args.content.trim().is_empty() {
-            return Ok(ToolResponse::with_error(
-                400,
-                "content cannot be empty".to_string(),
-            ));
-        }
         let Some(ToolInvocation::UserMemory { user_id }) = req.take_invocation() else {
             return Ok(ToolResponse::with_error(
                 400,
@@ -95,15 +111,97 @@ impl Tools for MemoryUpdateTool {
                     ty: TaskType::Memory,
                     ..Default::default()
                 },
-                req: UserMemoryRequest::Update {
-                    user_id,
-                    id: args.id,
-                    category: args.category,
-                    content: args.content,
-                    confidence: args.confidence,
+                req: match memory_request(user_id, args) {
+                    Ok(request) => request,
+                    Err(response) => return Ok(response),
                 },
             })
             .await?;
         ok_json(response.resp)
     }
+}
+
+fn memory_request(
+    user_id: String,
+    args: MemoryUpdateArgs,
+) -> Result<UserMemoryRequest, ToolResponse> {
+    match args {
+        MemoryUpdateArgs::Operation(MemoryOperationArgs::Create {
+            category,
+            content,
+            confidence,
+        }) => update_request(user_id, None, category, content, confidence),
+        MemoryUpdateArgs::Operation(MemoryOperationArgs::Update {
+            id,
+            category,
+            content,
+            confidence,
+        }) => update_request(user_id, Some(id), category, content, confidence),
+        MemoryUpdateArgs::Operation(MemoryOperationArgs::Delete { id }) => {
+            if id == 0 {
+                return Err(invalid_arguments("id must be positive"));
+            }
+            Ok(UserMemoryRequest::Delete { user_id, id })
+        }
+        MemoryUpdateArgs::Operation(MemoryOperationArgs::Query) => {
+            Ok(UserMemoryRequest::Query { user_id })
+        }
+        MemoryUpdateArgs::Legacy(args) => update_request(
+            user_id,
+            args.id,
+            args.category,
+            args.content,
+            args.confidence,
+        ),
+    }
+}
+
+fn update_request(
+    user_id: String,
+    id: Option<u64>,
+    category: UserMemoryCategory,
+    content: String,
+    confidence: UserMemoryConfidence,
+) -> Result<UserMemoryRequest, ToolResponse> {
+    if id == Some(0) {
+        return Err(invalid_arguments("id must be positive"));
+    }
+    if content.trim().is_empty() {
+        return Err(invalid_arguments("content cannot be empty"));
+    }
+    Ok(UserMemoryRequest::Update {
+        user_id,
+        id,
+        category,
+        content,
+        confidence,
+    })
+}
+
+fn invalid_arguments(message: &str) -> ToolResponse {
+    ToolResponse::with_error(400, message.to_string())
+}
+
+fn memory_id_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "description": "Existing memory ID."
+    })
+}
+
+fn memory_category_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["user_attribute", "preference", "other"],
+        "description": "The explicit category of this memory."
+    })
+}
+
+fn memory_confidence_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["user_stated", "user_confirmed", "system_inferred"],
+        "description": "How the information was established."
+    })
 }

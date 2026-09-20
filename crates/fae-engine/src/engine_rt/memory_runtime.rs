@@ -121,6 +121,23 @@ impl UserMemoryRuntime {
         })
     }
 
+    pub async fn delete(&self, user_id: &str, id: u64) -> fae_agent::Result<UserMemoryResponse> {
+        let _guard = self.mutation_lock.lock().await;
+        let path = self.memory_path(user_id)?;
+        if id == 0 {
+            return Err(anyhow::anyhow!("memory id must be positive").into());
+        }
+
+        let mut memories = read_memories(&path).await?;
+        let index = memories
+            .iter()
+            .position(|memory| memory.id == id)
+            .ok_or_else(|| anyhow::anyhow!("memory id `{id}` does not exist"))?;
+        let memory = memories.remove(index);
+        write_memories(&path, &memories).await?;
+        Ok(UserMemoryResponse::Deleted { path, memory })
+    }
+
     async fn execute(
         &self,
         task: TaskReq<UserMemoryRequest>,
@@ -138,6 +155,7 @@ impl UserMemoryRuntime {
                 self.update(&user_id, id, category, content, confidence)
                     .await?
             }
+            UserMemoryRequest::Delete { user_id, id } => self.delete(&user_id, id).await?,
         };
         if meta.publisher.is_empty() {
             meta.publisher = Self::ID.to_string();
@@ -280,7 +298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creates_queries_and_updates_user_memory() -> anyhow::Result<()> {
+    async fn creates_queries_updates_and_deletes_user_memory() -> anyhow::Result<()> {
         let host = temp_host("crud");
         let runtime = UserMemoryRuntime::with_host_dir(&host);
 
@@ -335,6 +353,17 @@ mod tests {
         assert_eq!(memories[0].confidence, UserMemoryConfidence::UserConfirmed);
         assert_eq!(memories[0].content, "Prefers concise technical answers");
 
+        let UserMemoryResponse::Deleted { memory, .. } = runtime.delete("alice", 1).await? else {
+            anyhow::bail!("expected deleted response");
+        };
+        assert_eq!(memory.id, 1);
+
+        let UserMemoryResponse::Memories { memories, .. } = runtime.query("alice").await? else {
+            anyhow::bail!("expected memories response");
+        };
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, 2);
+
         let _ = tokio::fs::remove_dir_all(host).await;
         Ok(())
     }
@@ -347,6 +376,14 @@ mod tests {
         };
         assert!(memories.is_empty());
         assert!(runtime.query("../alice").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_invalid_or_missing_memory_id() -> anyhow::Result<()> {
+        let runtime = UserMemoryRuntime::with_host_dir(temp_host("delete-invalid"));
+        assert!(runtime.delete("alice", 0).await.is_err());
+        assert!(runtime.delete("alice", 1).await.is_err());
         Ok(())
     }
 

@@ -53,6 +53,10 @@ pub enum UserMemoryRequest {
         content: String,
         confidence: UserMemoryConfidence,
     },
+    Delete {
+        user_id: String,
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,5 +69,9 @@ pub enum UserMemoryResponse {
         path: PathBuf,
         memory: UserMemory,
         created: bool,
+    },
+    Deleted {
+        path: PathBuf,
+        memory: UserMemory,
     },
 }

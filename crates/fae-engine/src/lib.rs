@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memory_update_tool_writes_current_user_memory_bits_ut() -> anyhow::Result<()> {
+    async fn test_memory_update_tool_supports_crud_bits_ut() -> anyhow::Result<()> {
         let host = std::env::temp_dir().join(format!(
             "fae-memory-tool-{}-{}",
             std::process::id(),
@@ -255,6 +255,45 @@ mod tests {
         let output = completed_json(response.resp).await?;
         assert_eq!(output["Updated"]["memory"]["id"], 1);
 
+        let update = tool_task(
+            engine.ctx(),
+            MEMORY_UPDATE,
+            json!({
+                "operation": "update",
+                "id": 1,
+                "category": "preference",
+                "content": "Prefers concise technical answers",
+                "confidence": "user_confirmed"
+            }),
+        );
+        let response = engine
+            .rt()
+            .exec::<ToolRequest, ToolResponse>(TaskReq {
+                req: update.req.with_invocation(ToolInvocation::UserMemory {
+                    user_id: "alice".to_string(),
+                }),
+                ..update
+            })
+            .await?;
+        let output = completed_json(response.resp).await?;
+        assert_eq!(output["Updated"]["created"], false);
+
+        let query = tool_task(engine.ctx(), MEMORY_UPDATE, json!({"operation": "query"}));
+        let response = engine
+            .rt()
+            .exec::<ToolRequest, ToolResponse>(TaskReq {
+                req: query.req.with_invocation(ToolInvocation::UserMemory {
+                    user_id: "alice".to_string(),
+                }),
+                ..query
+            })
+            .await?;
+        let output = completed_json(response.resp).await?;
+        assert_eq!(
+            output["Memories"]["memories"][0]["content"],
+            "Prefers concise technical answers"
+        );
+
         let memories = engine
             .rt()
             .select::<_, UserMemoryResponse>(TaskType::Memory, UserMemoryQuery::new("alice"))
@@ -263,7 +302,33 @@ mod tests {
             anyhow::bail!("expected memories response");
         };
         assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].content, "Prefers concise answers");
+        assert_eq!(memories[0].content, "Prefers concise technical answers");
+
+        let delete = tool_task(
+            engine.ctx(),
+            MEMORY_UPDATE,
+            json!({"operation": "delete", "id": 1}),
+        );
+        let response = engine
+            .rt()
+            .exec::<ToolRequest, ToolResponse>(TaskReq {
+                req: delete.req.with_invocation(ToolInvocation::UserMemory {
+                    user_id: "alice".to_string(),
+                }),
+                ..delete
+            })
+            .await?;
+        let output = completed_json(response.resp).await?;
+        assert_eq!(output["Deleted"]["memory"]["id"], 1);
+
+        let memories = engine
+            .rt()
+            .select::<_, UserMemoryResponse>(TaskType::Memory, UserMemoryQuery::new("alice"))
+            .await?;
+        let UserMemoryResponse::Memories { memories, .. } = memories else {
+            anyhow::bail!("expected memories response");
+        };
+        assert!(memories.is_empty());
 
         engine.exit().await?;
         let _ = tokio::fs::remove_dir_all(host).await;

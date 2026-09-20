@@ -224,8 +224,10 @@ Keep the final summary concise.
 
 工具名必须与 `fae` 注册名称完全一致。模型是否调用工具还取决于模型能力、prompt 和具体任务。
 
-`memory_update` 只操作当前 Single Agent 的 `user_id`，模型不能指定其他用户。省略 `id` 时新增
-一条记忆并使用当前最大 ID 加一；传入已有 `id` 时更新该条记录。`category` 可为
+`memory_update` 只操作当前 Single Agent 的 `user_id`，模型不能指定其他用户。通过
+`operation` 执行 `create`、`update`、`delete` 或 `query`。新增需要 `category`、`content`
+和 `confidence`；更新还需要已有 `id`；删除需要已有 `id`；查询不需要其他参数。旧格式仍兼容：
+省略 `operation` 和 `id` 时新增，省略 `operation` 但提供 `id` 时更新。`category` 可为
 `user_attribute`、`preference` 或 `other`，`confidence` 可为 `user_stated`、
 `user_confirmed` 或 `system_inferred`。用户明确表达、用户确认和系统推断必须使用对应值，
 不能混用。

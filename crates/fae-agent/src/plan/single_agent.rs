@@ -21,11 +21,12 @@ use tokio::sync::{Notify, RwLock};
 use tokio_stream::StreamExt;
 
 use crate::{
-    Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse, Plan, PlanBuilderWithEnv,
-    PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput, SessionInputData,
-    SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel, SessionRequest,
-    SessionResponse, SkillInfo, SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse,
-    TaskType, ToolInvocation, ToolRequest, ToolRespItem, ToolResponse, UserMemory,
+    CompositeSingleAgentHook, Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
+    Plan, PlanBuilderWithEnv, PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput,
+    SessionInputData, SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel,
+    SessionRequest, SessionResponse, SingleAgentHook, SingleAgentHookBuilder,
+    SingleAgentHookContext, SkillInfo, SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp,
+    TaskResponse, TaskType, ToolInvocation, ToolRequest, ToolRespItem, ToolResponse, UserMemory,
     UserMemoryRequest, UserMemoryResponse, WorkflowActionRequest, WorkflowActionResponse,
 };
 
@@ -636,9 +637,19 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SingleAgentPlanBuilder {
     home_dir: PathBuf,
+    hooks: Vec<Arc<dyn SingleAgentHookBuilder>>,
+}
+
+impl std::fmt::Debug for SingleAgentPlanBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleAgentPlanBuilder")
+            .field("home_dir", &self.home_dir)
+            .field("hook_count", &self.hooks.len())
+            .finish()
+    }
 }
 
 impl Default for SingleAgentPlanBuilder {
@@ -655,11 +666,31 @@ impl SingleAgentPlanBuilder {
     pub fn with_home_dir(home_dir: impl Into<PathBuf>) -> Self {
         Self {
             home_dir: home_dir.into(),
+            hooks: Vec::new(),
         }
     }
 
     pub fn home_dir(&self) -> &Path {
         &self.home_dir
+    }
+
+    pub fn hooks(&self) -> &[Arc<dyn SingleAgentHookBuilder>] {
+        &self.hooks
+    }
+
+    pub fn add_hook<H>(&mut self, builder: H)
+    where
+        H: SingleAgentHookBuilder,
+    {
+        self.hooks.push(Arc::new(builder));
+    }
+
+    pub fn add_hook_arc(&mut self, builder: Arc<dyn SingleAgentHookBuilder>) {
+        self.hooks.push(builder);
+    }
+
+    pub fn remove_hooks(&mut self) -> Vec<Arc<dyn SingleAgentHookBuilder>> {
+        std::mem::take(&mut self.hooks)
     }
 
     pub async fn load_config(
@@ -716,6 +747,14 @@ impl SingleAgentPlanBuilder {
             }
             SingleAgentSource::Paths { config, prompt } => (config.clone(), prompt.clone(), None),
         })
+    }
+
+    async fn build_hook(&self) -> Arc<dyn SingleAgentHook> {
+        let mut hooks = Vec::with_capacity(self.hooks.len());
+        for builder in &self.hooks {
+            hooks.push(builder.build().await);
+        }
+        Arc::new(CompositeSingleAgentHook::new(hooks))
     }
 }
 
@@ -803,6 +842,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
                 &prompt_path,
             )),
         )?;
+        let hook = self.build_hook().await;
         let template = SingleAgentTemplate {
             agent: config.agent,
             prompt,
@@ -810,6 +850,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             tool_definitions,
             tool_routes,
             ancestor_agents,
+            hook,
         };
         let binding = SingleAgentBinding {
             rt: rt.clone(),
@@ -1360,6 +1401,7 @@ struct SingleAgentTemplate {
     tool_definitions: Vec<ChatCompletionTools>,
     tool_routes: HashMap<String, CallableRoute>,
     ancestor_agents: Vec<String>,
+    hook: Arc<dyn SingleAgentHook>,
 }
 
 #[derive(Debug, Clone)]
@@ -1447,6 +1489,16 @@ impl SingleAgentPlan {
         }
     }
 
+    fn hook_context<'a>(&'a self, task_id: Option<&'a str>) -> SingleAgentHookContext<'a> {
+        SingleAgentHookContext {
+            ctx: &self.ctx,
+            plan_id: &self.id,
+            turn_id: self.turn_id,
+            agent: &self.template.agent,
+            task_id,
+        }
+    }
+
     async fn emit(&self, source: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
         self.session
             .emit_agent(self.turn_id, self.template.agent.name.clone(), source, data)
@@ -1464,6 +1516,15 @@ impl SingleAgentPlan {
             req,
         }
         .into_request()
+    }
+
+    async fn tool_task(&mut self, request: ToolRequest) -> anyhow::Result<TaskRequest> {
+        let request = self
+            .template
+            .hook
+            .on_tools_req(&self.hook_context(None), request)
+            .await?;
+        Ok(self.task(TaskType::Tool, request))
     }
 
     fn history_task(&mut self) -> TaskRequest {
@@ -1509,6 +1570,11 @@ impl SingleAgentPlan {
         let request = self.model_request();
         let estimated_tokens = estimated_tokens(&request);
         if estimated_tokens > self.template.model.trigger_compression_size {
+            let request = self
+                .template
+                .hook
+                .on_compression(&self.hook_context(None), request)
+                .await?;
             self.emit(
                 COMPRESSION_TASK_TYPE,
                 SessionEventData::CompressionStarted {
@@ -1537,6 +1603,11 @@ impl SingleAgentPlan {
             ));
         }
 
+        let request = self
+            .template
+            .hook
+            .on_model_req(&self.hook_context(None), request)
+            .await?;
         self.stage = SingleAgentStage::Model;
         Ok(self.task(TaskType::Model, request))
     }
@@ -1568,16 +1639,21 @@ impl SingleAgentPlan {
         self.next_model_task().await
     }
 
-    fn save_task(&mut self) -> TaskRequest {
-        self.task(
+    async fn save_task(&mut self) -> anyhow::Result<TaskRequest> {
+        let messages = self
+            .template
+            .hook
+            .on_save(&self.hook_context(None), self.unsaved_messages.clone())
+            .await?;
+        Ok(self.task(
             TaskType::Session,
             SessionRequest::Add {
                 agent_id: self.template.agent.name.clone(),
                 user_id: self.session.user_id(),
                 session_id: self.template.agent.session_id.clone(),
-                messages: self.unsaved_messages.clone(),
+                messages,
             },
-        )
+        ))
     }
 
     async fn append_user_inputs(&mut self, inputs: Vec<SessionInputData>) -> anyhow::Result<()> {
@@ -1601,9 +1677,18 @@ impl SingleAgentPlan {
         Ok(())
     }
 
-    fn prepare_messages(&mut self, history: &[SessionMessage]) -> anyhow::Result<()> {
+    async fn prepare_messages(
+        &mut self,
+        history: Vec<SessionMessage>,
+        task_id: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.messages.clear();
         let prompt = prompt_with_user_memory(&self.template.prompt, &self.user_memory)?;
+        let prompt = self
+            .template
+            .hook
+            .on_prompt(&self.hook_context(task_id), prompt)
+            .await?;
         if !prompt.is_empty() {
             self.messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
@@ -1764,7 +1849,7 @@ impl SingleAgentPlan {
             }
 
             self.stage = SingleAgentStage::Save;
-            return Ok(PlanNext::Tasks(vec![self.save_task()]));
+            return Ok(PlanNext::Tasks(vec![self.save_task().await?]));
         }
 
         self.empty_model_retries = 0;
@@ -1807,21 +1892,18 @@ impl SingleAgentPlan {
             )
             .await?;
             let (task, kind) = match route {
-                CallableRoute::Tool(runtime_tool_name) => (
-                    self.task(
-                        TaskType::Tool,
-                        if runtime_tool_name == MEMORY_UPDATE_TOOL_NAME {
-                            ToolRequest::new(runtime_tool_name, arguments).with_invocation(
-                                ToolInvocation::UserMemory {
-                                    user_id: self.session.user_id(),
-                                },
-                            )
-                        } else {
-                            ToolRequest::new(runtime_tool_name, arguments)
-                        },
-                    ),
-                    PendingCallKind::Tool,
-                ),
+                CallableRoute::Tool(runtime_tool_name) => {
+                    let request = if runtime_tool_name == MEMORY_UPDATE_TOOL_NAME {
+                        ToolRequest::new(runtime_tool_name, arguments).with_invocation(
+                            ToolInvocation::UserMemory {
+                                user_id: self.session.user_id(),
+                            },
+                        )
+                    } else {
+                        ToolRequest::new(runtime_tool_name, arguments)
+                    };
+                    (self.tool_task(request).await?, PendingCallKind::Tool)
+                }
                 CallableRoute::Mcp { server, tool_name } => (
                     self.task(TaskType::Mcp, McpRequest::new(server, tool_name, arguments)),
                     PendingCallKind::Mcp,
@@ -1845,11 +1927,11 @@ impl SingleAgentPlan {
                         self.template.ancestor_agents.clone(),
                     );
                     (
-                        self.task(
-                            TaskType::Tool,
+                        self.tool_task(
                             ToolRequest::new(AGENT_TOOL_NAME.to_string(), arguments)
                                 .with_invocation(ToolInvocation::Agent(invocation)),
-                        ),
+                        )
+                        .await?,
                         PendingCallKind::Tool,
                     )
                 }
@@ -1863,13 +1945,13 @@ impl SingleAgentPlan {
                         call.workflow_id
                     );
                     (
-                        self.task(
-                            TaskType::Tool,
+                        self.tool_task(
                             ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments)
                                 .with_invocation(ToolInvocation::Workflow {
                                     user_id: self.session.user_id(),
                                 }),
-                        ),
+                        )
+                        .await?,
                         PendingCallKind::Tool,
                     )
                 }
@@ -1893,8 +1975,13 @@ impl SingleAgentPlan {
     async fn handle_tool_response(
         &mut self,
         task_id: String,
-        mut response: ToolResponse,
+        response: ToolResponse,
     ) -> anyhow::Result<PlanNext> {
+        let mut response = self
+            .template
+            .hook
+            .on_tools_resp(&self.hook_context(Some(&task_id)), response)
+            .await?;
         let pending = self
             .pending_tools
             .remove(&task_id)
@@ -2004,6 +2091,7 @@ impl Plan for SingleAgentPlan {
         }
         match self.stage {
             SingleAgentStage::Memory => {
+                let task_id = task_result.meta.id.clone();
                 let response = TaskResp::<UserMemoryResponse>::try_from_response(&mut task_result)
                     .ok_or_else(|| {
                         anyhow::anyhow!("expected UserMemoryResponse for memory query")
@@ -2011,17 +2099,27 @@ impl Plan for SingleAgentPlan {
                 let UserMemoryResponse::Memories { memories, .. } = response.resp else {
                     anyhow::bail!("expected memory query response");
                 };
-                self.user_memory = memories;
+                self.user_memory = self
+                    .template
+                    .hook
+                    .on_memory(&self.hook_context(Some(&task_id)), memories)
+                    .await?;
                 self.stage = SingleAgentStage::History;
                 Ok(PlanNext::Tasks(vec![self.history_task()]))
             }
             SingleAgentStage::History => {
+                let task_id = task_result.meta.id.clone();
                 let response = TaskResp::<SessionResponse>::try_from_response(&mut task_result)
                     .ok_or_else(|| anyhow::anyhow!("expected SessionResponse for history query"))?;
                 let SessionResponse::History { messages, .. } = response.resp else {
                     anyhow::bail!("expected history query response");
                 };
-                self.prepare_messages(&messages)?;
+                let messages = self
+                    .template
+                    .hook
+                    .on_history(&self.hook_context(Some(&task_id)), messages)
+                    .await?;
+                self.prepare_messages(messages, Some(&task_id)).await?;
                 Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
             }
             SingleAgentStage::Compression => {
@@ -2038,9 +2136,15 @@ impl Plan for SingleAgentPlan {
                 ]))
             }
             SingleAgentStage::Model => {
+                let task_id = task_result.meta.id.clone();
                 let response = TaskResp::<ModelResponse>::try_from_response(&mut task_result)
                     .ok_or_else(|| anyhow::anyhow!("expected ModelResponse"))?;
-                self.handle_model_response(response.resp).await
+                let response = self
+                    .template
+                    .hook
+                    .on_model_resp(&self.hook_context(Some(&task_id)), response.resp)
+                    .await?;
+                self.handle_model_response(response).await
             }
             SingleAgentStage::Tools { .. } => {
                 let task_id = task_result.meta.id.clone();
@@ -2189,6 +2293,40 @@ mod tests {
         CreateChatCompletionResponse, FunctionCallStream, FunctionType,
     };
 
+    #[derive(Debug)]
+    struct PromptSuffixHookBuilder {
+        suffix: &'static str,
+        builds: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SingleAgentHookBuilder for PromptSuffixHookBuilder {
+        async fn build(&self) -> Arc<dyn SingleAgentHook> {
+            self.builds.lock().unwrap().push(self.suffix);
+            Arc::new(PromptSuffixHook {
+                suffix: self.suffix,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PromptSuffixHook {
+        suffix: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl SingleAgentHook for PromptSuffixHook {
+        async fn on_prompt(
+            &self,
+            ctx: &SingleAgentHookContext<'_>,
+            mut prompt: String,
+        ) -> anyhow::Result<String> {
+            assert_eq!(ctx.plan_id, "plan");
+            prompt.push_str(self.suffix);
+            Ok(prompt)
+        }
+    }
+
     fn test_config() -> SingleAgentConfig {
         SingleAgentConfig {
             agent: SingleAgentInfo {
@@ -2213,6 +2351,40 @@ mod tests {
             sub_agents: Vec::new(),
             workflows: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn builder_composes_single_agent_hooks_in_registration_order() {
+        let builds = Arc::new(StdMutex::new(Vec::new()));
+        let mut builder = SingleAgentPlanBuilder::with_home_dir("/unused");
+        builder.add_hook(PromptSuffixHookBuilder {
+            suffix: "-first",
+            builds: builds.clone(),
+        });
+        builder.add_hook(PromptSuffixHookBuilder {
+            suffix: "-second",
+            builds: builds.clone(),
+        });
+
+        let hook = builder.build_hook().await;
+        let ctx = Ctx::null();
+        let agent = test_config().agent;
+        let hook_ctx = SingleAgentHookContext {
+            ctx: &ctx,
+            plan_id: "plan",
+            turn_id: 1,
+            agent: &agent,
+            task_id: None,
+        };
+
+        assert_eq!(
+            hook.on_prompt(&hook_ctx, "prompt".to_string())
+                .await
+                .unwrap(),
+            "prompt-first-second"
+        );
+        assert_eq!(*builds.lock().unwrap(), vec!["-first", "-second"]);
+        assert_eq!(builder.hooks().len(), 2);
     }
 
     fn empty_memory_response(ctx: Ctx) -> TaskResponse {
@@ -2532,7 +2704,7 @@ mod tests {
             1,
             session.clone(),
         );
-        plan.prepare_messages(&[]).unwrap();
+        plan.prepare_messages(Vec::new(), None).await.unwrap();
 
         let mut task = plan.next_model_task().await.unwrap();
 
@@ -2572,10 +2744,14 @@ mod tests {
             1,
             session.clone(),
         );
-        plan.prepare_messages(&[
-            SessionMessage::user("old question"),
-            SessionMessage::assistant("old answer"),
-        ])
+        plan.prepare_messages(
+            vec![
+                SessionMessage::user("old question"),
+                SessionMessage::assistant("old answer"),
+            ],
+            None,
+        )
+        .await
         .unwrap();
 
         let mut task = plan
@@ -2615,8 +2791,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn history_loading_stops_at_latest_summary() {
+    #[tokio::test]
+    async fn history_loading_stops_at_latest_summary() {
         let mut plan = SingleAgentPlan::new(
             Ctx::null(),
             test_template(),
@@ -2625,12 +2801,16 @@ mod tests {
             CommonSession::new(),
         );
 
-        plan.prepare_messages(&[
-            SessionMessage::user("discarded question"),
-            SessionMessage::assistant("discarded answer"),
-            SessionMessage::summary("compressed history"),
-            SessionMessage::assistant("answer after summary"),
-        ])
+        plan.prepare_messages(
+            vec![
+                SessionMessage::user("discarded question"),
+                SessionMessage::assistant("discarded answer"),
+                SessionMessage::summary("compressed history"),
+                SessionMessage::assistant("answer after summary"),
+            ],
+            None,
+        )
+        .await
         .unwrap();
 
         let serialized = serde_json::to_string(&plan.messages).unwrap();
@@ -3239,8 +3419,8 @@ user-defined rules, and other long-term facts."
         assert_ne!(first.id(), second.id());
     }
 
-    #[test]
-    fn persistence_tasks_use_current_user_and_agent_partitions() {
+    #[tokio::test]
+    async fn persistence_tasks_use_current_user_and_agent_partitions() {
         let mut plan = SingleAgentPlan::new(
             Ctx::null(),
             test_template(),
@@ -3270,7 +3450,7 @@ user-defined rules, and other long-term facts."
         ));
 
         plan.unsaved_messages.push(SessionMessage::user("hello"));
-        let mut save_task = plan.save_task();
+        let mut save_task = plan.save_task().await.unwrap();
         let save_request = TaskReq::<SessionRequest>::try_from_request(&mut save_task).unwrap();
         assert!(matches!(
             save_request.req,
@@ -3396,7 +3576,7 @@ user-defined rules, and other long-term facts."
             .unwrap();
         let mut plan =
             SingleAgentPlan::new(ctx, template, "first".to_string(), turn_id, session.clone());
-        plan.prepare_messages(&[]).unwrap();
+        plan.prepare_messages(Vec::new(), None).await.unwrap();
         session
             .call(SessionInput::Supplement("new constraint".into()))
             .await
@@ -3747,6 +3927,7 @@ user-defined rules, and other long-term facts."
             tool_definitions: Vec::new(),
             tool_routes: HashMap::new(),
             ancestor_agents: vec!["test-agent".to_string()],
+            hook: Arc::new(CompositeSingleAgentHook::default()),
         }
     }
 }
