@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::Context;
-use fae_agent::{SingleAgentConfig, SingleAgentInfo, SingleAgentModelConfig, SkillQuery};
+use fae_agent::{
+    DEFAULT_USER_ID, SingleAgentConfig, SingleAgentInfo, SingleAgentModelConfig, SkillQuery,
+};
 use fae_engine::DEFAULT_TOOL_NAMES;
 use tokio::io::AsyncWriteExt;
 
@@ -49,7 +51,7 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
         agent: SingleAgentInfo {
             name: args.agent_id.clone(),
             desc: format!("{} agent", args.agent_id),
-            user_id: "local".to_string(),
+            user_id: DEFAULT_USER_ID.to_string(),
             session_id: "default".to_string(),
             metadata: HashMap::new(),
         },
@@ -165,6 +167,7 @@ mod tests {
 
         assert_eq!(config.agent.name, "fae");
         assert_eq!(config.agent.desc, "fae agent");
+        assert_eq!(config.agent.user_id, DEFAULT_USER_ID);
         assert_eq!(config.model.model, "test-model");
         assert_eq!(config.model.max_completion_tokens, Some(65_536));
         assert_eq!(config.model.max_tool_iterations, 128);

@@ -1,6 +1,6 @@
 use fae_agent::{
     Event, EventType, RT, Runtime, RuntimeSelectExec, RuntimeSelectExecWrapped, TaskRequest,
-    TaskResponse, TaskType, hook::runtime::RuntimeHookBuilder,
+    TaskResponse, TaskType, hook::runtime_hook::RuntimeHookBuilder,
 };
 use std::any::Any;
 use std::collections::HashMap;

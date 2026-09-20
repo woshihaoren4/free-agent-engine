@@ -28,7 +28,7 @@ The generated configuration has this shape:
   "agent": {
     "name": "fae",
     "desc": "fae agent",
-    "user_id": "local",
+    "user_id": "master",
     "session_id": "default",
     "metadata": {}
   },

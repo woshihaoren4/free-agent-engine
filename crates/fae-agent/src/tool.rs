@@ -8,6 +8,7 @@ use crate::{AgentToolInvocation, Ctx};
 #[derive(Debug, Clone)]
 pub enum ToolInvocation {
     Agent(AgentToolInvocation),
+    Workflow { user_id: String },
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

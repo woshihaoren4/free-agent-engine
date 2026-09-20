@@ -362,12 +362,12 @@ fae --color never agent --agent-id reviewer
 历史默认保存在：
 
 ```text
-${FAE_HOST:-~/.fae}/memory/<user_id>/session/<session_id>.jsonl
+${FAE_HOST:-~/.fae}/session/<agent_id>/<session_id>.jsonl
 ```
 
 `history_turns` 控制新一轮读取的历史轮数。排查上下文问题时检查：
 
-- `user_id` 和 `session_id` 是否仍是预期值。
+- `agent_id` 和 `session_id` 是否仍是预期值。
 - 是否切换了 `FAE_HOST` 或 `--fae-home`。
 - `history_turns` 是否为 0 或过小。
 - 历史文件是否存在且属于当前 Agent。

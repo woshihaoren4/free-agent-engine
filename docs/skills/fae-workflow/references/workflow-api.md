@@ -312,7 +312,8 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
   "type": "session",
   "request": {
     "Query": {
-      "user": "alice",
+      "agent_id": "assistant",
+      "user_id": "alice",
       "session_id": "session-1",
       "limit": 20,
       "offset": null
@@ -328,7 +329,8 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
   "type": "session",
   "request": {
     "Add": {
-      "user": "alice",
+      "agent_id": "assistant",
+      "user_id": "alice",
       "session_id": "session-1",
       "messages": [
         {
@@ -345,7 +347,7 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
 }
 ```
 
-删除会话使用 `{"Delete":{"user":"alice","session_id":"session-1"}}`。`SessionRequest`
+删除会话使用 `{"Delete":{"agent_id":"assistant","user_id":"alice","session_id":"session-1"}}`。`SessionRequest`
 当前使用区分大小写的 `Query`、`Add`、`Delete` 外部标签。
 
 ### Custom

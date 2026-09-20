@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, RwLock as StdRwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -102,6 +102,7 @@ const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without ass
 Continue the task from the available context and return either a tool call or a final answer.";
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
+pub const DEFAULT_USER_ID: &str = "master";
 const AGENT_TOOL_NAME: &str = "agent";
 const WORKFLOW_TOOL_NAME: &str = "workflow";
 
@@ -154,6 +155,7 @@ impl AgentToolInvocation {
 pub struct SingleAgentEnv {
     pub source: SingleAgentSource,
     pub input: String,
+    pub user_id: String,
     session_id: Option<String>,
     ancestor_agents: Vec<String>,
     session: CommonSession,
@@ -165,6 +167,14 @@ impl SingleAgentEnv {
         input: impl Into<String>,
     ) -> (Self, CommonSession) {
         Self::new(SingleAgentSource::AgentId(agent_id.into()), input)
+    }
+
+    pub fn from_agent_id_with_user_id(
+        agent_id: impl Into<String>,
+        input: impl Into<String>,
+        user_id: impl Into<String>,
+    ) -> (Self, CommonSession) {
+        Self::new_with_user_id(SingleAgentSource::AgentId(agent_id.into()), input, user_id)
     }
 
     pub fn from_paths(
@@ -182,11 +192,22 @@ impl SingleAgentEnv {
     }
 
     pub fn new(source: SingleAgentSource, input: impl Into<String>) -> (Self, CommonSession) {
+        Self::new_with_user_id(source, input, DEFAULT_USER_ID)
+    }
+
+    pub fn new_with_user_id(
+        source: SingleAgentSource,
+        input: impl Into<String>,
+        user_id: impl Into<String>,
+    ) -> (Self, CommonSession) {
+        let user_id = user_id.into();
         let session = CommonSession::new();
+        session.set_user_id(user_id.clone());
         (
             Self {
                 source,
                 input: input.into(),
+                user_id,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -197,6 +218,13 @@ impl SingleAgentEnv {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+        self.user_id = user_id.clone();
+        self.session.set_user_id(user_id);
         self
     }
 
@@ -217,10 +245,12 @@ impl SingleAgentEnv {
         node_id: impl Into<String>,
     ) -> (Self, CommonSession) {
         let session = CommonSession::new_in_workflow(workflow_session, workflow_id, node_id);
+        let user_id = session.user_id();
         (
             Self {
                 source,
                 input: input.into(),
+                user_id,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -236,10 +266,12 @@ impl SingleAgentEnv {
         parent_agent_name: impl Into<String>,
     ) -> (Self, CommonSession) {
         let session = CommonSession::new_in_agent(parent_session, parent_agent_name);
+        let user_id = session.user_id();
         (
             Self {
                 source,
                 input: input.into(),
+                user_id,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -257,6 +289,7 @@ pub struct CommonSession {
 
 #[derive(Debug)]
 struct CommonSessionInner {
+    user_id: StdRwLock<String>,
     channel: SessionOutputChannel,
     parent: Option<CommonSessionTarget>,
     binding: RwLock<Option<SingleAgentBinding>>,
@@ -305,7 +338,27 @@ impl Default for CommonSessionCompletion {
 
 impl CommonSession {
     pub(crate) fn new() -> Self {
-        Self::new_with_parent(None)
+        Self::new_with_user_id(DEFAULT_USER_ID)
+    }
+
+    pub(crate) fn new_with_user_id(user_id: impl Into<String>) -> Self {
+        Self::new_with_parent(None, user_id.into())
+    }
+
+    pub fn user_id(&self) -> String {
+        self.inner
+            .user_id
+            .read()
+            .expect("session user ID lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn set_user_id(&self, user_id: String) {
+        *self
+            .inner
+            .user_id
+            .write()
+            .expect("session user ID lock poisoned") = user_id;
     }
 
     fn new_in_workflow(
@@ -313,23 +366,32 @@ impl CommonSession {
         workflow_id: impl Into<String>,
         node_id: impl Into<String>,
     ) -> Self {
-        Self::new_with_parent(Some(CommonSessionTarget::Workflow {
-            session,
-            workflow_id: workflow_id.into(),
-            node_id: node_id.into(),
-        }))
+        let user_id = session.user_id();
+        Self::new_with_parent(
+            Some(CommonSessionTarget::Workflow {
+                session,
+                workflow_id: workflow_id.into(),
+                node_id: node_id.into(),
+            }),
+            user_id,
+        )
     }
 
     fn new_in_agent(session: CommonSession, agent_name: impl Into<String>) -> Self {
-        Self::new_with_parent(Some(CommonSessionTarget::Agent {
-            session,
-            agent_name: agent_name.into(),
-        }))
+        let user_id = session.user_id();
+        Self::new_with_parent(
+            Some(CommonSessionTarget::Agent {
+                session,
+                agent_name: agent_name.into(),
+            }),
+            user_id,
+        )
     }
 
-    fn new_with_parent(parent: Option<CommonSessionTarget>) -> Self {
+    fn new_with_parent(parent: Option<CommonSessionTarget>, user_id: String) -> Self {
         Self {
             inner: Arc::new(CommonSessionInner {
+                user_id: StdRwLock::new(user_id),
                 channel: SessionOutputChannel::new(),
                 parent,
                 binding: RwLock::new(None),
@@ -653,7 +715,10 @@ impl SingleAgentPlanBuilder {
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
         anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
+        anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
+        env.session.set_user_id(env.user_id.clone());
         let (mut config, base_prompt) = self.load_config(&env.source).await?;
+        config.agent.user_id = env.user_id.clone();
         anyhow::ensure!(
             !env.ancestor_agents.contains(&config.agent.name),
             "recursive sub-agent call detected for `{}`",
@@ -1266,7 +1331,8 @@ impl SingleAgentPlan {
         self.task(
             TaskType::Session,
             SessionRequest::Query {
-                user: self.template.agent.user_id.clone(),
+                agent_id: self.template.agent.name.clone(),
+                user_id: self.session.user_id(),
                 session_id: self.template.agent.session_id.clone(),
                 limit: None,
                 offset: None,
@@ -1358,7 +1424,8 @@ impl SingleAgentPlan {
         self.task(
             TaskType::Session,
             SessionRequest::Add {
-                user: self.template.agent.user_id.clone(),
+                agent_id: self.template.agent.name.clone(),
+                user_id: self.session.user_id(),
                 session_id: self.template.agent.session_id.clone(),
                 messages: self.unsaved_messages.clone(),
             },
@@ -1640,7 +1707,10 @@ impl SingleAgentPlan {
                     (
                         self.task(
                             TaskType::Tool,
-                            ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments),
+                            ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments)
+                                .with_invocation(ToolInvocation::Workflow {
+                                    user_id: self.session.user_id(),
+                                }),
                         ),
                         PendingCallKind::Tool,
                     )
@@ -2615,8 +2685,12 @@ mod tests {
         };
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].meta.ty, TaskType::Tool);
-        let request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let mut request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
         assert_eq!(request.req.get_tool_name(), WORKFLOW_TOOL_NAME);
+        assert!(matches!(
+            request.req.take_invocation(),
+            Some(ToolInvocation::Workflow { user_id }) if user_id == DEFAULT_USER_ID
+        ));
 
         let session = CommonSession::new();
         session.activate_turn()?;
@@ -2872,6 +2946,73 @@ mod tests {
         assert!(first.id().starts_with("single_agent-"));
         assert!(second.id().starts_with("single_agent-"));
         assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn session_tasks_use_agent_id_as_storage_partition() {
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            test_template(),
+            "hello".to_string(),
+            1,
+            CommonSession::new(),
+        );
+
+        let mut history_task = plan.history_task();
+        let history_request =
+            TaskReq::<SessionRequest>::try_from_request(&mut history_task).unwrap();
+        assert!(matches!(
+            history_request.req,
+            SessionRequest::Query {
+                agent_id,
+                user_id,
+                ..
+            } if agent_id == "test-agent" && user_id == DEFAULT_USER_ID
+        ));
+
+        plan.unsaved_messages.push(SessionMessage::user("hello"));
+        let mut save_task = plan.save_task();
+        let save_request = TaskReq::<SessionRequest>::try_from_request(&mut save_task).unwrap();
+        assert!(matches!(
+            save_request.req,
+            SessionRequest::Add {
+                agent_id,
+                user_id,
+                ..
+            } if agent_id == "test-agent" && user_id == DEFAULT_USER_ID
+        ));
+    }
+
+    #[test]
+    fn single_agent_env_and_session_default_to_master_user() {
+        let (env, session) = SingleAgentEnv::from_agent_id("reviewer", "hello");
+
+        assert_eq!(env.user_id, DEFAULT_USER_ID);
+        assert_eq!(session.user_id(), DEFAULT_USER_ID);
+    }
+
+    #[test]
+    fn single_agent_env_and_session_accept_explicit_user() {
+        let (env, session) =
+            SingleAgentEnv::from_agent_id_with_user_id("reviewer", "hello", "alice");
+
+        assert_eq!(env.user_id, "alice");
+        assert_eq!(session.user_id(), "alice");
+    }
+
+    #[test]
+    fn nested_agent_inherits_parent_session_user() {
+        let (_, parent_session) =
+            SingleAgentEnv::from_agent_id_with_user_id("parent", "hello", "alice");
+        let (env, child_session) = SingleAgentEnv::new_with_parent_agent(
+            SingleAgentSource::AgentId("child".to_string()),
+            "delegate",
+            parent_session,
+            "parent",
+        );
+
+        assert_eq!(env.user_id, "alice");
+        assert_eq!(child_session.user_id(), "alice");
     }
 
     #[tokio::test]

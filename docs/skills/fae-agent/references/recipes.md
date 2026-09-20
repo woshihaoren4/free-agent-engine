@@ -205,7 +205,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
   "agent": {
     "name": "assistant",
     "desc": "Handles general daily tasks.",
-    "user_id": "local",
+    "user_id": "master",
     "session_id": "daily",
     "metadata": {}
   }
@@ -219,7 +219,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
   "agent": {
     "name": "release-reviewer",
     "desc": "Reviews releases for correctness and regressions.",
-    "user_id": "local",
+    "user_id": "master",
     "session_id": "release-review",
     "metadata": {}
   }

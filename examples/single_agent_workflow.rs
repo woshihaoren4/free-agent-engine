@@ -163,7 +163,8 @@ fn build_single_agent_workflow() -> anyhow::Result<WorkflowMetadata> {
         "load_history",
         WorkflowAction::Session {
             request: SessionRequest::Query {
-                user: "{$prepare_agent.config.agent.user_id}".to_string(),
+                agent_id: "{$prepare_agent.config.agent.name}".to_string(),
+                user_id: "{$prepare_agent.config.agent.user_id}".to_string(),
                 session_id: "{$prepare_agent.config.agent.session_id}".to_string(),
                 limit: None,
                 offset: None,
@@ -209,7 +210,8 @@ fn build_single_agent_workflow() -> anyhow::Result<WorkflowMetadata> {
         "save_history",
         WorkflowAction::Session {
             request: SessionRequest::Add {
-                user: "{$finalize.setup.config.agent.user_id}".to_string(),
+                agent_id: "{$finalize.setup.config.agent.name}".to_string(),
+                user_id: "{$finalize.setup.config.agent.user_id}".to_string(),
                 session_id: "{$finalize.setup.config.agent.session_id}".to_string(),
                 messages: vec![
                     SessionMessage::user("{$input.message}"),

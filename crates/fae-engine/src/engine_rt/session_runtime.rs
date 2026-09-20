@@ -43,25 +43,32 @@ impl SessionRuntime {
         &self.host_dir
     }
 
-    pub fn session_path(&self, user: &str, session_id: &str) -> fae_agent::Result<PathBuf> {
-        validate_path_segment("user", user)?;
+    pub fn session_path(
+        &self,
+        agent_id: &str,
+        user_id: &str,
+        session_id: &str,
+    ) -> fae_agent::Result<PathBuf> {
+        validate_path_segment("agent_id", agent_id)?;
+        validate_path_segment("user_id", user_id)?;
         validate_path_segment("session_id", session_id)?;
 
         Ok(self
             .host_dir
-            .join("memory")
-            .join(user)
             .join("session")
+            .join(agent_id)
+            .join(user_id)
             .join(format!("{session_id}.jsonl")))
     }
 
     pub async fn add(
         &self,
-        user: &str,
+        agent_id: &str,
+        user_id: &str,
         session_id: &str,
         messages: &[SessionMessage],
     ) -> fae_agent::Result<SessionResponse> {
-        let path = self.session_path(user, session_id)?;
+        let path = self.session_path(agent_id, user_id, session_id)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -89,8 +96,13 @@ impl SessionRuntime {
         })
     }
 
-    pub async fn delete(&self, user: &str, session_id: &str) -> fae_agent::Result<SessionResponse> {
-        let path = self.session_path(user, session_id)?;
+    pub async fn delete(
+        &self,
+        agent_id: &str,
+        user_id: &str,
+        session_id: &str,
+    ) -> fae_agent::Result<SessionResponse> {
+        let path = self.session_path(agent_id, user_id, session_id)?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(SessionResponse::Deleted {
                 path,
@@ -106,18 +118,25 @@ impl SessionRuntime {
         }
     }
 
-    pub async fn query(&self, user: &str, session_id: &str) -> fae_agent::Result<SessionResponse> {
-        self.query_page(user, session_id, None, None).await
+    pub async fn query(
+        &self,
+        agent_id: &str,
+        user_id: &str,
+        session_id: &str,
+    ) -> fae_agent::Result<SessionResponse> {
+        self.query_page(agent_id, user_id, session_id, None, None)
+            .await
     }
 
     pub async fn query_page(
         &self,
-        user: &str,
+        agent_id: &str,
+        user_id: &str,
         session_id: &str,
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> fae_agent::Result<SessionResponse> {
-        let path = self.session_path(user, session_id)?;
+        let path = self.session_path(agent_id, user_id, session_id)?;
         let file = match tokio::fs::File::open(&path).await {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -162,17 +181,29 @@ impl SessionRuntime {
         let TaskReq { ctx, mut meta, req } = task;
         let resp = match req {
             SessionRequest::Add {
-                user,
+                agent_id,
+                user_id,
                 session_id,
                 messages,
-            } => self.add(&user, &session_id, &messages).await?,
-            SessionRequest::Delete { user, session_id } => self.delete(&user, &session_id).await?,
+            } => {
+                self.add(&agent_id, &user_id, &session_id, &messages)
+                    .await?
+            }
+            SessionRequest::Delete {
+                agent_id,
+                user_id,
+                session_id,
+            } => self.delete(&agent_id, &user_id, &session_id).await?,
             SessionRequest::Query {
-                user,
+                agent_id,
+                user_id,
                 session_id,
                 limit,
                 offset,
-            } => self.query_page(&user, &session_id, limit, offset).await?,
+            } => {
+                self.query_page(&agent_id, &user_id, &session_id, limit, offset)
+                    .await?
+            }
         };
 
         meta.publisher = Self::ID.to_string();
@@ -201,8 +232,14 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
             return Err(fae_agent::Error::RuntimeNoSupport);
         }
 
-        self.query_page(&cond.user, &cond.session_id, cond.limit, cond.offset)
-            .await
+        self.query_page(
+            &cond.agent_id,
+            &cond.user_id,
+            &cond.session_id,
+            cond.limit,
+            cond.offset,
+        )
+        .await
     }
 
     async fn spawn(&self, task: TaskReq<SessionRequest>) -> fae_agent::Result<()> {
@@ -219,19 +256,31 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
             let runtime = SessionRuntime::with_host_dir(host_dir);
             let result = match req {
                 SessionRequest::Add {
-                    user,
+                    agent_id,
+                    user_id,
                     session_id,
                     messages,
-                } => runtime.add(&user, &session_id, &messages).await,
-                SessionRequest::Delete { user, session_id } => {
-                    runtime.delete(&user, &session_id).await
+                } => {
+                    runtime
+                        .add(&agent_id, &user_id, &session_id, &messages)
+                        .await
                 }
+                SessionRequest::Delete {
+                    agent_id,
+                    user_id,
+                    session_id,
+                } => runtime.delete(&agent_id, &user_id, &session_id).await,
                 SessionRequest::Query {
-                    user,
+                    agent_id,
+                    user_id,
                     session_id,
                     limit,
                     offset,
-                } => runtime.query_page(&user, &session_id, limit, offset).await,
+                } => {
+                    runtime
+                        .query_page(&agent_id, &user_id, &session_id, limit, offset)
+                        .await
+                }
             }
             .map(|resp| Event {
                 from_rt_id: Self::ID.to_string(),
@@ -361,7 +410,8 @@ mod tests {
 
         let response = runtime
             .exec(task(SessionRequest::Add {
-                user: "user-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
                 messages: vec![
                     SessionMessage::user("hello"),
@@ -374,9 +424,9 @@ mod tests {
             response.resp,
             SessionResponse::Added {
                 path: host
-                    .join("memory")
-                    .join("user-1")
                     .join("session")
+                    .join("agent-1")
+                    .join("user-1")
                     .join("session-1.jsonl"),
                 added: 2,
             }
@@ -384,7 +434,8 @@ mod tests {
 
         let response = runtime
             .exec(task(SessionRequest::Query {
-                user: "user-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
                 limit: None,
                 offset: None,
@@ -402,9 +453,9 @@ mod tests {
         );
 
         let content = tokio::fs::read_to_string(
-            host.join("memory")
+            host.join("session")
+                .join("agent-1")
                 .join("user-1")
-                .join("session")
                 .join("session-1.jsonl"),
         )
         .await?;
@@ -415,7 +466,8 @@ mod tests {
 
         let response = runtime
             .exec(task(SessionRequest::Delete {
-                user: "user-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
             }))
             .await?;
@@ -426,7 +478,8 @@ mod tests {
 
         let response = runtime
             .exec(task(SessionRequest::Query {
-                user: "user-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
                 limit: None,
                 offset: None,
@@ -450,6 +503,7 @@ mod tests {
 
         runtime
             .add(
+                "agent-1",
                 "user-1",
                 "session-1",
                 &[
@@ -460,7 +514,10 @@ mod tests {
             .await?;
 
         let response = runtime
-            .select(TaskType::Session, SessionQuery::new("user-1", "session-1"))
+            .select(
+                TaskType::Session,
+                SessionQuery::new("agent-1", "user-1", "session-1"),
+            )
             .await?;
 
         let SessionResponse::History { messages, .. } = response else {
@@ -487,6 +544,7 @@ mod tests {
 
         runtime
             .add(
+                "agent-1",
                 "user-1",
                 "session-1",
                 &[
@@ -501,7 +559,7 @@ mod tests {
         let response = runtime
             .select(
                 TaskType::Session,
-                SessionQuery::with_page("user-1", "session-1", Some(2), Some(1)),
+                SessionQuery::with_page("agent-1", "user-1", "session-1", Some(2), Some(1)),
             )
             .await?;
 
@@ -515,7 +573,8 @@ mod tests {
 
         let response = runtime
             .exec(task(SessionRequest::Query {
-                user: "user-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                user_id: "user-1".to_string(),
                 session_id: "session-1".to_string(),
                 limit: Some(1),
                 offset: Some(3),
@@ -534,8 +593,21 @@ mod tests {
     fn test_session_path_rejects_nested_segments_bits_ut() {
         let runtime = SessionRuntime::with_host_dir("/tmp/fae-session-runtime");
 
-        assert!(runtime.session_path("../user", "session-1").is_err());
-        assert!(runtime.session_path("user-1", "nested/session").is_err());
-        assert!(runtime.session_path("user-1", "").is_err());
+        assert!(
+            runtime
+                .session_path("../agent", "user-1", "session-1")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .session_path("agent-1", "../user", "session-1")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .session_path("agent-1", "user-1", "nested/session")
+                .is_err()
+        );
+        assert!(runtime.session_path("agent-1", "user-1", "").is_err());
     }
 }

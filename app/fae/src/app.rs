@@ -113,7 +113,7 @@ async fn run_agent(
 
     if !args.prompt.is_empty() {
         let input = args.prompt.join(" ");
-        let (env, session) = SingleAgentEnv::new(source, input);
+        let (env, session) = SingleAgentEnv::new_with_user_id(source, input, user_id);
         let execution = engine.launch(env.with_session_id(session_id)).await?;
         let result = stream_agent_output(&session).await;
         let execution_result = execution.result::<()>().await;
@@ -125,6 +125,7 @@ async fn run_agent(
     let mut ui = TerminalUi::new(
         Mode::Agent,
         &agent_name,
+        Some(user_id.clone()),
         &model,
         &session_id,
         color,
@@ -134,8 +135,15 @@ async fn run_agent(
     let result = async {
         'sessions: loop {
             let input = loop {
-                match next_agent_input(&mut ui, &model, &mut session_id, &user_id, &session_runtime)
-                    .await?
+                match next_agent_input(
+                    &mut ui,
+                    &model,
+                    &mut session_id,
+                    &agent_name,
+                    &user_id,
+                    &session_runtime,
+                )
+                .await?
                 {
                     AgentPromptAction::Submit(input) => break input,
                     AgentPromptAction::RestartSession => continue,
@@ -143,7 +151,8 @@ async fn run_agent(
                 }
             };
 
-            let (env, session) = SingleAgentEnv::new(source.clone(), input);
+            let (env, session) =
+                SingleAgentEnv::new_with_user_id(source.clone(), input, user_id.clone());
             let execution = engine
                 .launch(env.with_session_id(session_id.clone()))
                 .await?;
@@ -165,6 +174,7 @@ async fn run_agent(
                     &mut ui,
                     &model,
                     &mut session_id,
+                    &agent_name,
                     &user_id,
                     &session_runtime,
                 )
@@ -256,6 +266,7 @@ async fn run_workflow(
     let mut ui = TerminalUi::new(
         Mode::Workflow,
         &args.id,
+        None,
         model,
         &args.id,
         color,
@@ -287,6 +298,7 @@ async fn next_agent_input(
     ui: &mut TerminalUi,
     model: &str,
     session_id: &mut String,
+    agent_id: &str,
     user_id: &str,
     session_runtime: &SessionRuntime,
 ) -> anyhow::Result<AgentPromptAction> {
@@ -321,7 +333,7 @@ async fn next_agent_input(
                         return Ok(AgentPromptAction::RestartSession);
                     }
                     Ok(SessionCommand::Switch(id)) => {
-                        if let Err(error) = session_runtime.session_path(user_id, &id) {
+                        if let Err(error) = session_runtime.session_path(agent_id, user_id, &id) {
                             ui.push_system(format!("Invalid session ID\n{error}"));
                             continue;
                         }
@@ -330,7 +342,9 @@ async fn next_agent_input(
                         return Ok(AgentPromptAction::RestartSession);
                     }
                     Ok(SessionCommand::Clean) => {
-                        session_runtime.delete(user_id, session_id).await?;
+                        session_runtime
+                            .delete(agent_id, user_id, session_id)
+                            .await?;
                         reset_session_ui(ui, session_id, "Cleaned session history");
                         return Ok(AgentPromptAction::RestartSession);
                     }

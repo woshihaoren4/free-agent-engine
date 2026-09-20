@@ -1,5 +1,5 @@
 use crate::{EngineContext, PlanRuntime};
-use fae_agent::{Ctx, Plan, PlanBuilder, RT, hook::plan::PlanHookBuilder, to_plan_ty};
+use fae_agent::{Ctx, Plan, PlanBuilder, RT, hook::plan_hook::PlanHookBuilder, to_plan_ty};
 use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt::Debug;

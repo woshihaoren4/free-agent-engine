@@ -271,6 +271,7 @@ pub struct TerminalUi {
     color: bool,
     mode: Mode,
     agent_name: String,
+    user_id: Option<String>,
     model: String,
     subject: String,
     cwd: String,
@@ -289,6 +290,7 @@ impl TerminalUi {
     pub fn new(
         mode: Mode,
         agent_name: impl Into<String>,
+        user_id: Option<String>,
         model: impl Into<String>,
         subject: impl Into<String>,
         color_choice: ColorChoice,
@@ -361,6 +363,7 @@ impl TerminalUi {
             color,
             mode,
             agent_name: agent_name.into(),
+            user_id,
             model: model.into(),
             subject: subject.into(),
             cwd: display_cwd(),
@@ -1014,6 +1017,8 @@ impl TerminalUi {
     fn draw_current(&mut self) -> anyhow::Result<()> {
         let color = self.color;
         let mode = self.mode;
+        let agent_name = self.agent_name.clone();
+        let user_id = self.user_id.clone();
         let model = self.model.clone();
         let subject = self.subject.clone();
         let cwd = self.cwd.clone();
@@ -1030,6 +1035,8 @@ impl TerminalUi {
                 ViewModel {
                     color,
                     mode,
+                    agent_name: &agent_name,
+                    user_id: user_id.as_deref(),
                     model: &model,
                     subject: &subject,
                     cwd: &cwd,
@@ -1078,6 +1085,8 @@ impl Drop for TerminalUi {
 struct ViewModel<'a> {
     color: bool,
     mode: Mode,
+    agent_name: &'a str,
+    user_id: Option<&'a str>,
     model: &'a str,
     subject: &'a str,
     cwd: &'a str,
@@ -1112,17 +1121,30 @@ fn draw_frame(frame: &mut Frame<'_>, view: ViewModel<'_>) {
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
     let accent = color(view.color, Color::Cyan);
-    let title = Line::from(vec![
-        Span::styled(" FAE ", Style::default().fg(Color::Black).bg(accent).bold()),
-        Span::styled(
-            match view.mode {
-                Mode::Agent => " Agent",
-                Mode::Workflow => " Workflow",
-            },
-            Style::default().fg(accent).bold(),
-        ),
-        Span::raw(format!(" {}", view.subject)),
-    ]);
+    let mut title = vec![Span::styled(
+        " FAE ",
+        Style::default().fg(Color::Black).bg(accent).bold(),
+    )];
+    match view.mode {
+        Mode::Agent => {
+            let label_style = Style::default().fg(color(view.color, Color::DarkGray));
+            title.extend([
+                Span::styled(" AGENT:", label_style),
+                Span::raw(view.agent_name),
+                Span::styled(" USER:", label_style),
+                Span::raw(view.user_id.unwrap_or_default()),
+                Span::styled(" SESSION:", label_style),
+                Span::raw(view.subject),
+            ]);
+        }
+        Mode::Workflow => {
+            title.extend([
+                Span::styled(" Workflow", Style::default().fg(accent).bold()),
+                Span::raw(format!(" {}", view.subject)),
+            ]);
+        }
+    }
+    let title = Line::from(title);
     let details = Line::from(vec![
         Span::styled(
             " model ",
@@ -1724,6 +1746,8 @@ mod tests {
                     &ViewModel {
                         color: false,
                         mode: Mode::Agent,
+                        agent_name: "agent",
+                        user_id: Some("user"),
                         model: "model",
                         subject: "session",
                         cwd: "/workspace",
@@ -1752,6 +1776,8 @@ mod tests {
                     &ViewModel {
                         color: false,
                         mode: Mode::Agent,
+                        agent_name: "agent",
+                        user_id: Some("user"),
                         model: "model",
                         subject: "session",
                         cwd: "/workspace",
@@ -2004,6 +2030,8 @@ mod tests {
                     ViewModel {
                         color: false,
                         mode: Mode::Agent,
+                        agent_name: "test-agent",
+                        user_id: Some("test-user"),
                         model: "test-model",
                         subject: "test-session",
                         cwd: "/workspace",
@@ -2019,6 +2047,7 @@ mod tests {
             .unwrap();
 
         let content = terminal.backend().to_string();
+        assert!(content.contains("FAE  AGENT:test-agent USER:test-user SESSION:test-session"));
         assert!(content.contains("A response that remains visible"));
         assert!(content.contains("Message"));
         assert!(content.contains("Enter send"));
@@ -2044,6 +2073,8 @@ mod tests {
                     ViewModel {
                         color: false,
                         mode: Mode::Agent,
+                        agent_name: "agent",
+                        user_id: Some("user"),
                         model: "model",
                         subject: "session",
                         cwd: "/workspace",

@@ -70,7 +70,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
   "agent": {
     "name": "reviewer",
     "desc": "Reviews code changes for correctness and regressions.",
-    "user_id": "local",
+    "user_id": "master",
     "session_id": "review-session",
     "metadata": {}
   },

@@ -637,7 +637,8 @@ impl SessionOutputChannel {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionQuery {
-    pub user: String,
+    pub agent_id: String,
+    pub user_id: String,
     pub session_id: String,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -646,9 +647,14 @@ pub struct SessionQuery {
 }
 
 impl SessionQuery {
-    pub fn new(user: impl Into<String>, session_id: impl Into<String>) -> Self {
+    pub fn new(
+        agent_id: impl Into<String>,
+        user_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
         Self {
-            user: user.into(),
+            agent_id: agent_id.into(),
+            user_id: user_id.into(),
             session_id: session_id.into(),
             limit: None,
             offset: None,
@@ -656,13 +662,15 @@ impl SessionQuery {
     }
 
     pub fn with_page(
-        user: impl Into<String>,
+        agent_id: impl Into<String>,
+        user_id: impl Into<String>,
         session_id: impl Into<String>,
         limit: impl Into<Option<usize>>,
         offset: impl Into<Option<usize>>,
     ) -> Self {
         Self {
-            user: user.into(),
+            agent_id: agent_id.into(),
+            user_id: user_id.into(),
             session_id: session_id.into(),
             limit: limit.into(),
             offset: offset.into(),
@@ -673,16 +681,19 @@ impl SessionQuery {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SessionRequest {
     Add {
-        user: String,
+        agent_id: String,
+        user_id: String,
         session_id: String,
         messages: Vec<SessionMessage>,
     },
     Delete {
-        user: String,
+        agent_id: String,
+        user_id: String,
         session_id: String,
     },
     Query {
-        user: String,
+        agent_id: String,
+        user_id: String,
         session_id: String,
         #[serde(default)]
         limit: Option<usize>,

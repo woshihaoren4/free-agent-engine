@@ -1,9 +1,9 @@
 use super::Engine;
 use crate::engine_rt::{EngineRuntime, PlanRuntime};
-use fae_agent::hook::plan::PlanHookBuilder;
+use fae_agent::hook::plan_hook::PlanHookBuilder;
 use fae_agent::{
     PlanBuilder, PlanBuilderWithEnv, PlanBuilderWithEnvWrapper, Runtime, RuntimeSelectExec,
-    TaskType, hook::runtime::RuntimeHookBuilder,
+    TaskType, hook::runtime_hook::RuntimeHookBuilder,
 };
 use std::collections::HashMap;
 use std::fmt::Debug;

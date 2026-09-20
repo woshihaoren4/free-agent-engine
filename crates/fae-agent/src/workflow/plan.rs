@@ -174,12 +174,15 @@ fn build_workflow_plan(
     ctx: Ctx,
     env: WorkflowEnv,
 ) -> anyhow::Result<Box<dyn Plan>> {
+    anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
     let complete_context = env.completes_context();
     let WorkflowEnv {
         workflow_id: _,
         input,
+        user_id,
         session,
     } = env;
+    session.set_user_id(user_id);
     metadata.validate()?;
     let current = metadata
         .nodes
@@ -418,7 +421,8 @@ impl WorkflowPlan {
         let task = match action {
             WorkflowAction::Workflow { workflow_id, input } => {
                 let input = self.values().resolve(&input)?;
-                let (env, _) = WorkflowEnv::new(workflow_id, input);
+                let (env, _) =
+                    WorkflowEnv::new_with_user_id(workflow_id, input, self.session.user_id());
                 self.pending = Some(PendingAction::Workflow);
                 TaskReq {
                     ctx: self.ctx.clone(),
@@ -694,7 +698,8 @@ impl DagWorkflowPlan {
         let (task, pending) = match action {
             WorkflowAction::Workflow { workflow_id, input } => {
                 let input = self.values().resolve(&input)?;
-                let (env, _) = WorkflowEnv::new(workflow_id, input);
+                let (env, _) =
+                    WorkflowEnv::new_with_user_id(workflow_id, input, self.session.user_id());
                 (
                     TaskReq {
                         ctx: self.ctx.clone(),

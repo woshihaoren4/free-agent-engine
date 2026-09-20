@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use fae_agent::{
     ContextNull, Ctx, Event, EventType, RuntimeSelectExec, TaskError, TaskReq, TaskResp, TaskType,
-    ToolRequest, ToolResponse, Tools, hook::tools::ToolsHookBuilder,
+    ToolRequest, ToolResponse, Tools, hook::tools_hook::ToolsHookBuilder,
 };
 use serde_json::Value;
 use wd_tools::channel::{Channel, Receiver, Sender};
@@ -224,7 +224,7 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fae_agent::{TaskMeta, hook::tools::ToolsHookBuilder};
+    use fae_agent::{TaskMeta, hook::tools_hook::ToolsHookBuilder};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]

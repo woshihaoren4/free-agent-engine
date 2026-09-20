@@ -1,4 +1,6 @@
-use fae_agent::{Ctx, TaskMeta, TaskReq, TaskType, ToolRequest, ToolResponse, Tools, WorkflowEnv};
+use fae_agent::{
+    Ctx, TaskMeta, TaskReq, TaskType, ToolInvocation, ToolRequest, ToolResponse, Tools, WorkflowEnv,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -48,7 +50,7 @@ impl Tools for WorkflowTool {
         }))
     }
 
-    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, mut req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != WORKFLOW {
             return Err(unsupported_tool(req.get_tool_name()));
         }
@@ -64,7 +66,12 @@ impl Tools for WorkflowTool {
             ));
         }
 
-        let (env, _) = WorkflowEnv::new(args.workflow_id, args.input);
+        let (env, _) = match req.take_invocation() {
+            Some(ToolInvocation::Workflow { user_id }) => {
+                WorkflowEnv::new_with_user_id(args.workflow_id, args.input, user_id)
+            }
+            Some(ToolInvocation::Agent(_)) | None => WorkflowEnv::new(args.workflow_id, args.input),
+        };
         let response = ctx
             .get_engine()
             .rt()

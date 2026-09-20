@@ -2,13 +2,7 @@ mod common;
 mod context;
 mod error;
 mod event;
-pub mod hook {
-    pub mod plan;
-    pub mod runtime;
-    pub mod single_agent;
-    pub mod tools;
-    pub mod workflow;
-}
+pub mod hook;
 mod mcp;
 mod model;
 mod plan;
@@ -32,6 +26,7 @@ pub use skill::*;
 pub use task::*;
 pub use tool::*;
 pub use workflow::*;
+pub use hook::*;
 
 #[cfg(test)]
 mod tests {
