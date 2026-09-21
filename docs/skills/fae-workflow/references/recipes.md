@@ -14,6 +14,7 @@
 {
   "version": 1,
   "id": "read-file",
+  "desc": "Read a file and return its content",
   "nodes": {
     "start": {
       "type": "start",
@@ -59,6 +60,7 @@ fae workflow read-file --input '{"path":"Cargo.toml"}'
 {
   "version": 1,
   "id": "score-route",
+  "desc": "Route an input according to its score",
   "nodes": {
     "start": {
       "type": "start",
@@ -113,6 +115,7 @@ fae workflow score-route --input '{"score":86}'
 {
   "version": 1,
   "id": "parallel-inspect",
+  "desc": "Inspect source and manifest files in parallel",
   "nodes": {
     "start": {
       "type": "start",
@@ -178,6 +181,7 @@ fae workflow parallel-inspect --input \
 {
   "version": 1,
   "id": "bounded-countdown",
+  "desc": "Run a bounded countdown loop",
   "nodes": {
     "start": {
       "type": "start",
@@ -246,6 +250,7 @@ fae workflow bounded-countdown --input '{"rounds":3}'
 {
   "version": 1,
   "id": "validate-order",
+  "desc": "Validate an order before processing",
   "nodes": {
     "start": {
       "type": "start",
@@ -276,6 +281,7 @@ fae workflow bounded-countdown --input '{"rounds":3}'
 {
   "version": 1,
   "id": "process-order",
+  "desc": "Validate and process an order",
   "nodes": {
     "start": {
       "type": "start",
@@ -318,6 +324,7 @@ fae workflow process-order --input '{"order":{"id":"order-42"}}'
 {
   "version": 1,
   "id": "agent-review",
+  "desc": "Ask a configured agent to review input",
   "nodes": {
     "start": {
       "type": "start",
@@ -359,6 +366,7 @@ workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
 {
   "version": 1,
   "id": "session-reply",
+  "desc": "Load session history and save a reply",
   "nodes": {
     "start": {
       "type": "start",

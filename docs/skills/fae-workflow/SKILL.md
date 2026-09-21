@@ -12,6 +12,7 @@ description: Creates and runs FAE workflows from JSON configuration. Invoke when
 - 默认交付 Workflow JSON，不编写 Rust Builder 代码。
 - 配置文件放在 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
 - 文件名、配置中的 `id`、运行命令中的 workflow ID 必须一致。
+- `desc` 必须简洁说明 workflow 的用途；配置给 Agent 后会进入模型 prompt。
 - 优先复用 `fae` 已注册的 `tool`、`workflow`、`single_agent`、`session`、`python`
   action 和 `workflow.compression` custom action。
 - 仅当用户需要新的 `custom` action，或要把 Workflow 嵌入其他 Rust 应用时，才修改代码和
@@ -57,6 +58,7 @@ fae --fae-home /path/to/fae-home workflow <workflow-id> --input @input.json
 {
   "version": 1,
   "id": "echo-input",
+  "desc": "Return the workflow input unchanged",
   "nodes": {
     "start": {
       "type": "start",
@@ -81,6 +83,7 @@ fae workflow echo-input --input '{"message":"hello"}'
 ## 配置约束
 
 - 必须恰好有一个 `start` 和一个 `end`。
+- `id` 和 `desc` 必须是非空字符串。
 - 所有节点都必须能从 start 到达，并存在到 end 的路径。
 - `next`、`on_true`、`on_false` 中的节点必须存在，且不能指回 start。
 - 普通环非法；循环必须使用 `loop`，循环体必须返回该 loop。

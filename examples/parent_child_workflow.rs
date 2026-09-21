@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 
 /// Build a child workflow whose input is resolved from the parent workflow.
 fn build_child_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut child = WorkflowMetadataBuilder::new("order-validation");
+    let mut child =
+        WorkflowMetadataBuilder::new("order-validation", "Validate an order before processing");
     child.start("start", "end")?;
     child.end(
         "end",
@@ -22,7 +23,8 @@ fn build_child_workflow() -> anyhow::Result<WorkflowMetadata> {
 
 /// Build a parent workflow that invokes the child as one of its actions.
 fn build_parent_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut parent = WorkflowMetadataBuilder::new("order-processing");
+    let mut parent =
+        WorkflowMetadataBuilder::new("order-processing", "Validate and process an order");
     parent.start("start", "run_child")?;
     parent.execute(
         "run_child",

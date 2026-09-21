@@ -98,9 +98,9 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
 ```
 
 Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。运行时会将其包装为
-`<setting>`，并追加 `<skills>`、`<mcp>` 和 `<sub_agent>`。如果当前用户存在长期记忆，运行时会
-在加载 History 前以 `<UserMemory>` 标签加入 prompt。需要自定义区段时，在 `prompt_sections`
-中配置英文 `tag` 与 `text`。
+`<setting>`，并追加 `<skills>`、`<mcp>`、`<sub_agent>` 和 `<workflow>`。如果当前用户存在
+长期记忆，运行时会在加载 History 前以 `<UserMemory>` 标签加入 prompt。需要自定义区段时，在
+`prompt_sections` 中配置英文 `tag` 与 `text`。
 
 ## 修改策略
 
@@ -114,7 +114,8 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
   Agent 的 config 都包含非空 `agent.desc`。
-- 增减 Workflow：修改 `workflows`，使用 `<FAE_HOST>/workflows` 下的 Workflow ID。
+- 增减 Workflow：修改 `workflows`，使用 `<FAE_HOST>/workflows` 下的 Workflow ID；对应
+  workflow 必须提供非空 `desc`，其 ID 和说明会加入模型 prompt。
 - `agent` 和 `workflow` 工具由对应配置自动挂载，不要写入 `tools`。
 - 重新生成完整 config：
 

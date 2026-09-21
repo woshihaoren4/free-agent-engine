@@ -53,13 +53,15 @@ where
 #[derive(Debug)]
 pub struct WorkflowMetadataBuilder {
     id: String,
+    desc: String,
     nodes: BTreeMap<String, WorkflowNode>,
 }
 
 impl WorkflowMetadataBuilder {
-    pub fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>, desc: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            desc: desc.into(),
             nodes: BTreeMap::new(),
         }
     }
@@ -175,6 +177,7 @@ impl WorkflowMetadataBuilder {
         let metadata = WorkflowMetadata {
             version: WORKFLOW_VERSION,
             id: self.id,
+            desc: self.desc,
             nodes: self.nodes,
         };
         Self::validate_metadata(&metadata)?;
@@ -191,6 +194,10 @@ impl WorkflowMetadataBuilder {
         anyhow::ensure!(
             !metadata.id.trim().is_empty(),
             "workflow id cannot be empty"
+        );
+        anyhow::ensure!(
+            !metadata.desc.trim().is_empty(),
+            "workflow description cannot be empty"
         );
         anyhow::ensure!(!metadata.nodes.is_empty(), "workflow has no nodes");
 
@@ -428,8 +435,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn rejects_an_empty_description() {
+        let mut builder = WorkflowMetadataBuilder::new("empty-desc", "  ");
+        builder.start("start", "end").unwrap();
+        builder.end("end", None).unwrap();
+
+        assert!(
+            builder
+                .build()
+                .unwrap_err()
+                .to_string()
+                .contains("workflow description cannot be empty")
+        );
+    }
+
+    #[test]
     fn accepts_a_cycle_owned_by_a_loop_node() {
-        let mut builder = WorkflowMetadataBuilder::new("loop");
+        let mut builder = WorkflowMetadataBuilder::new("loop", "Test a bounded loop");
         builder.start("start", "loop").unwrap();
         builder
             .loop_node(
@@ -459,7 +481,7 @@ mod tests {
 
     #[test]
     fn rejects_a_cycle_without_a_loop_node() {
-        let mut builder = WorkflowMetadataBuilder::new("invalid");
+        let mut builder = WorkflowMetadataBuilder::new("invalid", "Test invalid cycle validation");
         builder.start("start", "a").unwrap();
         builder
             .execute(
@@ -492,7 +514,7 @@ mod tests {
 
     #[test]
     fn accepts_parallel_branches_that_merge_at_a_regular_node() {
-        let mut builder = WorkflowMetadataBuilder::new("parallel");
+        let mut builder = WorkflowMetadataBuilder::new("parallel", "Test parallel branches");
         builder.start("a", ["b", "c"]).unwrap();
         builder
             .execute(

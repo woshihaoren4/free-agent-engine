@@ -303,7 +303,8 @@ mod tests {
 
     #[tokio::test]
     async fn compression_action_runs_in_workflow() -> anyhow::Result<()> {
-        let mut metadata = WorkflowMetadataBuilder::new("compression-workflow");
+        let mut metadata =
+            WorkflowMetadataBuilder::new("compression-workflow", "Compress workflow input");
         metadata.start("start", "compress")?;
         metadata.execute(
             "compress",

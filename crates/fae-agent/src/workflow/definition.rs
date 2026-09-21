@@ -44,6 +44,7 @@ pub struct WorkflowMetadata {
     #[serde(default = "workflow_version")]
     pub version: u32,
     pub id: String,
+    pub desc: String,
     pub nodes: BTreeMap<String, WorkflowNode>,
 }
 
@@ -224,7 +225,8 @@ mod tests {
 
     #[tokio::test]
     async fn saves_and_loads_a_valid_workflow() {
-        let mut builder = WorkflowMetadataBuilder::new("persisted");
+        let mut builder =
+            WorkflowMetadataBuilder::new("persisted", "Persist and reload a workflow");
         builder.start("start", "end").unwrap();
         builder.end("end", Some(json!("{$input.result}"))).unwrap();
         let metadata = builder.build().unwrap();
@@ -242,7 +244,8 @@ mod tests {
 
     #[test]
     fn serializes_to_and_parses_from_string() {
-        let mut builder = WorkflowMetadataBuilder::new("string-round-trip");
+        let mut builder =
+            WorkflowMetadataBuilder::new("string-round-trip", "Test string serialization");
         builder.start("start", "child").unwrap();
         builder
             .execute(
@@ -274,6 +277,7 @@ mod tests {
             r#"{
                 "version": 1,
                 "id": "legacy",
+                "desc": "Parse legacy target fields",
                 "nodes": {
                     "start": {"type": "start", "next": "decision"},
                     "decision": {

@@ -71,8 +71,8 @@ The generated configuration has this shape:
 ```
 
 The prompt file is wrapped in `<setting>`. Resolved capabilities are appended
-before history as `<skills>`, `<mcp>`, and `<sub_agent>` sections. Add arbitrary
-English-tagged sections through `prompt_sections`:
+before history as `<skills>`, `<mcp>`, `<sub_agent>`, and `<workflow>` sections.
+Add arbitrary English-tagged sections through `prompt_sections`:
 
 ```json
 {
@@ -89,7 +89,8 @@ English-tagged sections through `prompt_sections`:
 
 Configured sub-agents are exposed through the `agent` model tool. The
 parent prompt receives only each sub-agent's ID and non-empty `agent.desc`.
-Configured workflows are exposed through the `workflow` model tool. Both
+Configured workflows are exposed through the `workflow` model tool, and
+each workflow's ID and non-empty `desc` are added to the parent prompt. Both
 special tools are mounted automatically and should not be listed in `tools`.
 
 The install script places the bundled

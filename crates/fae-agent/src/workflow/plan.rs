@@ -1119,7 +1119,8 @@ mod tests {
         let plan_builder = WorkflowPlanBuilder::new(loader.clone());
 
         for value in [1, 2] {
-            let mut metadata = WorkflowMetadataBuilder::new("dynamic");
+            let mut metadata =
+                WorkflowMetadataBuilder::new("dynamic", "Load dynamic workflow metadata");
             metadata.start("start", "end").unwrap();
             metadata.end("end", Some(json!(value))).unwrap();
             let replaced = loader.add(metadata.build().unwrap()).unwrap();
@@ -1154,7 +1155,7 @@ mod tests {
         let workflows_dir = home_dir.join("workflows");
         tokio::fs::create_dir_all(&workflows_dir).await.unwrap();
 
-        let mut builder = WorkflowMetadataBuilder::new("from-disk");
+        let mut builder = WorkflowMetadataBuilder::new("from-disk", "Load a workflow from disk");
         builder.start("start", "end").unwrap();
         builder.end("end", Some(json!("disk"))).unwrap();
         builder
@@ -1179,7 +1180,8 @@ mod tests {
         tokio::fs::create_dir_all(&workflows_dir).await.unwrap();
 
         for (output, save_to_disk) in [("disk", true), ("registered", false)] {
-            let mut builder = WorkflowMetadataBuilder::new("precedence");
+            let mut builder =
+                WorkflowMetadataBuilder::new("precedence", "Prefer registered workflow metadata");
             builder.start("start", "end").unwrap();
             builder.end("end", Some(json!(output))).unwrap();
             let metadata = builder.build().unwrap();
@@ -1204,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn executes_deserialized_metadata_and_resolves_earlier_output() {
-        let mut builder = WorkflowMetadataBuilder::new("example");
+        let mut builder = WorkflowMetadataBuilder::new("example", "Test workflow execution");
         builder.start("start", "A").unwrap();
         builder
             .execute(
@@ -1323,7 +1325,8 @@ mod tests {
 
     #[tokio::test]
     async fn emits_completion_for_control_flow_nodes() {
-        let mut builder = WorkflowMetadataBuilder::new("control-flow");
+        let mut builder =
+            WorkflowMetadataBuilder::new("control-flow", "Test workflow control flow");
         builder.start("start", "decision").unwrap();
         builder
             .decision(
@@ -1358,7 +1361,8 @@ mod tests {
 
     #[tokio::test]
     async fn executes_parallel_branches_and_joins_their_outputs() {
-        let mut builder = WorkflowMetadataBuilder::new("parallel");
+        let mut builder =
+            WorkflowMetadataBuilder::new("parallel", "Test parallel workflow execution");
         builder.start("a", ["b", "c"]).unwrap();
         builder
             .execute(
@@ -1520,7 +1524,8 @@ mod tests {
             task_type: "fixture".to_string(),
             request: Value::Null,
         };
-        let mut builder = WorkflowMetadataBuilder::new("execute-fan-out");
+        let mut builder =
+            WorkflowMetadataBuilder::new("execute-fan-out", "Test execute node fan-out");
         builder.start("start", "source").unwrap();
         builder
             .execute("source", action(), ["left", "right"])
@@ -1605,7 +1610,8 @@ mod tests {
             task_type: "fixture".to_string(),
             request: Value::Null,
         };
-        let mut builder = WorkflowMetadataBuilder::new("decision-fan-out");
+        let mut builder =
+            WorkflowMetadataBuilder::new("decision-fan-out", "Test decision node fan-out");
         builder.start("start", "decision").unwrap();
         builder
             .decision(
@@ -1716,7 +1722,8 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_single_agent_streaming_events() {
-        let mut builder = WorkflowMetadataBuilder::new("single-agent-events");
+        let mut builder =
+            WorkflowMetadataBuilder::new("single-agent-events", "Test single-agent node events");
         builder.start("start", "end").unwrap();
         builder.end("end", None).unwrap();
         let (_, session) = WorkflowEnv::new("single-agent-events", Value::Null);

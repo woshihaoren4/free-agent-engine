@@ -152,7 +152,10 @@ impl Tools for AgentWorkflowTools {
 }
 
 fn build_single_agent_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut builder = WorkflowMetadataBuilder::new(WORKFLOW_ID);
+    let mut builder = WorkflowMetadataBuilder::new(
+        WORKFLOW_ID,
+        "Run a complete single-agent turn as workflow nodes",
+    );
     builder.start("start", "prepare_agent")?;
     builder.execute(
         "prepare_agent",
@@ -226,7 +229,10 @@ fn build_single_agent_workflow() -> anyhow::Result<WorkflowMetadata> {
 }
 
 fn build_tool_iteration_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut builder = WorkflowMetadataBuilder::new(TOOL_ITERATION_WORKFLOW_ID);
+    let mut builder = WorkflowMetadataBuilder::new(
+        TOOL_ITERATION_WORKFLOW_ID,
+        "Execute pending tools and continue a single-agent turn",
+    );
     builder.start("start", "execute_tools")?;
     builder.execute(
         "execute_tools",

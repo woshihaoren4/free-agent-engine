@@ -45,6 +45,7 @@ fae workflow <workflow-id> --interactive --input '{"key":"value"}'
 {
   "version": 1,
   "id": "workflow-id",
+  "desc": "Describe what this workflow does",
   "nodes": {
     "start": {
       "type": "start",
@@ -71,6 +72,7 @@ fae workflow <workflow-id> --interactive --input '{"key":"value"}'
 | --- | --- |
 | `version` | 当前为 `1`；省略时也按 `1` 解析 |
 | `id` | workflow ID，必须与文件名和运行参数一致 |
+| `desc` | workflow 的非空用途说明；配置给 Agent 后会加入模型 prompt |
 | `nodes` | 以节点 ID 为 key 的对象 |
 
 目标字段统一写成字符串数组。读取旧配置时，`start.next`、`execute.next`、`decision.on_true` 和

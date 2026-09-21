@@ -74,7 +74,10 @@ pub const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
 ///                                  +---------+
 /// ```
 pub fn build_release_review_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut builder = WorkflowMetadataBuilder::new("release-readiness-review");
+    let mut builder = WorkflowMetadataBuilder::new(
+        "release-readiness-review",
+        "Review source and manifest readiness before a release",
+    );
 
     builder.start("start", "select_policy")?;
     builder.decision(
@@ -248,7 +251,10 @@ pub fn build_release_review_workflow() -> anyhow::Result<WorkflowMetadata> {
 ///                                                                    +------------+
 /// ```
 pub fn build_remediation_workflow() -> anyhow::Result<WorkflowMetadata> {
-    let mut builder = WorkflowMetadataBuilder::new("bounded-remediation-loop");
+    let mut builder = WorkflowMetadataBuilder::new(
+        "bounded-remediation-loop",
+        "Run a bounded sequence of release remediation rounds",
+    );
     builder.start("start", "seed_counter")?;
     // 进入循环前，将请求执行的轮数记录到文件中。
     builder.execute(

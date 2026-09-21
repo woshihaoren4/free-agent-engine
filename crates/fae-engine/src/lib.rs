@@ -115,7 +115,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_runtime_queries_metadata_by_name_bits_ut() -> anyhow::Result<()> {
-        let mut metadata_builder = WorkflowMetadataBuilder::new("query-workflow");
+        let mut metadata_builder =
+            WorkflowMetadataBuilder::new("query-workflow", "Query workflow metadata");
         metadata_builder.start("start", "end")?;
         metadata_builder.end("end", Some(json!("done")))?;
         let expected = metadata_builder.build()?;
@@ -138,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_configured_engine_executes_workflow_bits_ut() -> anyhow::Result<()> {
-        let mut builder = WorkflowMetadataBuilder::new("read-file-workflow");
+        let mut builder = WorkflowMetadataBuilder::new("read-file-workflow", "Read part of a file");
         builder.start("start", "read")?;
         builder.execute(
             "read",
@@ -179,7 +180,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_is_callable_as_a_tool_bits_ut() -> anyhow::Result<()> {
-        let mut workflow = WorkflowMetadataBuilder::new("tool-workflow");
+        let mut workflow =
+            WorkflowMetadataBuilder::new("tool-workflow", "Run a workflow through the tool");
         workflow.start("start", "end")?;
         workflow.end("end", Some(json!({"value": "{$input.value}"})))?;
 
@@ -337,11 +339,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_configured_engine_executes_nested_workflow_bits_ut() -> anyhow::Result<()> {
-        let mut child = WorkflowMetadataBuilder::new("child");
+        let mut child = WorkflowMetadataBuilder::new("child", "Return a child workflow result");
         child.start("start", "end")?;
         child.end("end", Some(json!("{$input.value}")))?;
 
-        let mut parent = WorkflowMetadataBuilder::new("parent");
+        let mut parent = WorkflowMetadataBuilder::new("parent", "Invoke a child workflow");
         parent.start("start", "nested")?;
         parent.execute(
             "nested",

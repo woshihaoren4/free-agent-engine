@@ -146,12 +146,14 @@ ${FAE_HOST:-~/.fae}/
 子 Agent ID 和对应的描述，不会注入子 Agent 的 prompt、会话信息或 metadata。
 
 `sub_agents` 非空时自动挂载 `agent` 工具，`workflows` 非空时自动挂载 `workflow` 工具。
+每个已配置 workflow 的 ID 和非空 `desc` 会组装到模型 prompt 的 `<workflow>` 段。
 这两个专用工具不应出现在 `tools` 中；即使旧配置仍保留对应名称，也只按资源列表决定是否挂载。
 
 ## 4. System Prompt
 
 `reviewer_prompt.txt` 只保存 Agent 的长期行为约束。运行时会将内容包装在英文
-`<setting>` 标签中，并按顺序追加自定义区段、`<skills>`、`<mcp>` 和 `<sub_agent>`。如果
+`<setting>` 标签中，并按顺序追加自定义区段、`<skills>`、`<mcp>`、`<sub_agent>` 和
+`<workflow>`。如果
 `${FAE_HOST}/memory/<user_id>.jsonl` 中存在记录，Single Agent 会先读取这些记录，以
 `<UserMemory>` 标签追加到 system prompt，再读取 History。例如：
 

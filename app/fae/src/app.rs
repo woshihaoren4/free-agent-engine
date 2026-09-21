@@ -722,7 +722,10 @@ mod tests {
 
     #[tokio::test]
     async fn app_engine_runs_registered_workflow() {
-        let mut workflow = fae_agent::WorkflowMetadataBuilder::new("terminal-smoke-test");
+        let mut workflow = fae_agent::WorkflowMetadataBuilder::new(
+            "terminal-smoke-test",
+            "Test workflow execution in the terminal app",
+        );
         workflow.start("start", "end").unwrap();
         workflow
             .end("end", Some(json!({"value": "{$input.value}"})))
