@@ -21,9 +21,17 @@ use crate::{
     args::{AgentArgs, Cli, Command, WorkflowArgs},
     init::initialize,
     tui::{Mode, PromptAction, TerminalUi},
+    workspace::{WorkspaceHookBuilder, resolve_workspace},
 };
 
 const PYTHON_ACTION_TASK_TYPE: &str = "workflow.python";
+const SESSION_HELP: &str = "\
+Usage: /session <command>
+
+Commands:
+  new      start a new session
+  id=<id>  switch sessions
+  clean    clear current session history";
 
 #[derive(Debug, PartialEq, Eq)]
 enum AgentPromptAction {
@@ -34,6 +42,7 @@ enum AgentPromptAction {
 
 #[derive(Debug, PartialEq, Eq)]
 enum SessionCommand {
+    Help,
     New,
     Switch(String),
     Clean,
@@ -69,10 +78,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Agent(args)) => {
-            run_agent(args, cli.fae_home, cli.color, cli.no_alt_screen).await
+            run_agent(
+                args,
+                cli.fae_home,
+                cli.workspace,
+                cli.color,
+                cli.no_alt_screen,
+            )
+            .await
         }
         Some(Command::Workflow(args)) => {
-            run_workflow(args, cli.fae_home, cli.color, cli.no_alt_screen).await
+            run_workflow(
+                args,
+                cli.fae_home,
+                cli.workspace,
+                cli.color,
+                cli.no_alt_screen,
+            )
+            .await
         }
         None => unreachable!("default agent command is inserted before parsing"),
     }
@@ -87,6 +110,7 @@ async fn uninstall(executable: &std::path::Path) -> anyhow::Result<()> {
 async fn run_agent(
     args: AgentArgs,
     fae_home: Option<PathBuf>,
+    workspace: PathBuf,
     color: crate::args::ColorChoice,
     no_alt_screen: bool,
 ) -> anyhow::Result<()> {
@@ -102,7 +126,9 @@ async fn run_agent(
         (None, None) => SingleAgentSource::AgentId(args.agent_id.clone()),
         _ => unreachable!("clap requires agent config and prompt paths together"),
     };
-    let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    let workspace = resolve_workspace(expand_home(workspace))?;
+    let mut agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    agent_builder.add_hook(WorkspaceHookBuilder::new(workspace));
     let (config, _) = agent_builder.load_config(&source).await?;
     let mut session_id = args.session_id.unwrap_or(config.agent.session_id);
     anyhow::ensure!(!session_id.trim().is_empty(), "session_id cannot be empty");
@@ -264,6 +290,7 @@ async fn stream_agent_output(
 async fn run_workflow(
     args: WorkflowArgs,
     fae_home: Option<PathBuf>,
+    workspace: PathBuf,
     color: crate::args::ColorChoice,
     no_alt_screen: bool,
 ) -> anyhow::Result<()> {
@@ -272,7 +299,9 @@ async fn run_workflow(
         None => FAEWorkflowMetadataLoader::new(),
     };
     let input = parse_workflow_input(&args.input).await?;
-    let agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    let workspace = resolve_workspace(expand_home(workspace))?;
+    let mut agent_builder = SingleAgentPlanBuilder::with_home_dir(loader.home_dir());
+    agent_builder.add_hook(WorkspaceHookBuilder::new(workspace));
     let engine = build_engine(loader.clone(), agent_builder).await;
     let (env, session) = WorkflowEnv::new(&args.id, input);
 
@@ -353,6 +382,7 @@ async fn next_agent_input(
                     return Ok(AgentPromptAction::Submit(input));
                 };
                 match command {
+                    Ok(SessionCommand::Help) => ui.push_system(SESSION_HELP),
                     Ok(SessionCommand::New) => {
                         *session_id = wd_tools::uuid::v4();
                         reset_session_ui(ui, session_id, "New session");
@@ -392,6 +422,7 @@ fn parse_session_command(input: &str) -> Option<Result<SessionCommand, String>> 
 
     let arguments = arguments.trim();
     let command = match arguments {
+        "-h" | "--help" => SessionCommand::Help,
         "new" => SessionCommand::New,
         "clean" => SessionCommand::Clean,
         value
@@ -615,6 +646,14 @@ mod tests {
         assert_eq!(
             parse_session_command("/clean"),
             Some(Ok(SessionCommand::Clean))
+        );
+        assert_eq!(
+            parse_session_command("/session -h"),
+            Some(Ok(SessionCommand::Help))
+        );
+        assert_eq!(
+            parse_session_command("/session --help"),
+            Some(Ok(SessionCommand::Help))
         );
     }
 

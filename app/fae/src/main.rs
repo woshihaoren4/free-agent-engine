@@ -2,6 +2,7 @@ mod app;
 mod args;
 mod init;
 mod tui;
+mod workspace;
 
 #[tokio::main]
 async fn main() {

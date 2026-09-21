@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "FAE_HOST")]
     pub fae_home: Option<PathBuf>,
 
+    /// Workspace whose .fae context files are added to agent prompts
+    #[arg(long, global = true, default_value = ".")]
+    pub workspace: PathBuf,
+
     #[arg(long, global = true, default_value = "auto")]
     pub color: ColorChoice,
 
@@ -107,13 +111,17 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
         let value = args[index].to_string_lossy();
         match value.as_ref() {
             "init" | "uninstall" | "agent" | "workflow" => return args,
-            "--fae-home" | "--color" => index += 2,
+            "--fae-home" | "--workspace" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
                 has_root_help = true;
                 break;
             }
-            value if value.starts_with("--fae-home=") || value.starts_with("--color=") => {
+            value
+                if value.starts_with("--fae-home=")
+                    || value.starts_with("--workspace=")
+                    || value.starts_with("--color=") =>
+            {
                 index += 1;
             }
             _ => break,
@@ -142,6 +150,21 @@ mod tests {
         };
         assert_eq!(agent.prompt, ["review", "this"]);
         assert_eq!(agent.agent_id, "fae");
+        assert_eq!(cli.workspace, PathBuf::from("."));
+    }
+
+    #[test]
+    fn parses_workspace_before_default_agent_prompt() {
+        let cli = Cli::try_parse_from(with_default_agent(
+            ["fae", "--workspace", "~/project", "review"].map(Into::into),
+        ))
+        .unwrap();
+
+        let Some(Command::Agent(agent)) = cli.command else {
+            panic!("expected agent command");
+        };
+        assert_eq!(cli.workspace, PathBuf::from("~/project"));
+        assert_eq!(agent.prompt, ["review"]);
     }
 
     #[test]

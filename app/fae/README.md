@@ -109,6 +109,15 @@ conversation finishes:
 cargo run -p fae -- agent --agent-id fae-coding "你好"
 ```
 
+Use `--workspace` to select the project workspace; it defaults to the current
+directory. Before each single-agent model request, `fae` loads any existing
+`.fae/workspace.md`, `.fae/rules.md`, `.fae/agents.md`, and `.fae/project.md`
+files from that workspace and appends them to the system prompt:
+
+```bash
+cargo run -p fae -- --workspace ~/projects/example "review this project"
+```
+
 Use `--session-id` to select the conversation history for either interactive
 or direct mode:
 
