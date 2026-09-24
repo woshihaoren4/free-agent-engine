@@ -11,9 +11,9 @@ use fae_agent::{
 use wd_tools::channel::{Channel, Receiver, Sender};
 
 const RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_secs(5),
-    Duration::from_secs(15),
+    Duration::from_secs(10),
     Duration::from_secs(30),
+    Duration::from_secs(50),
 ];
 
 #[derive(Debug)]

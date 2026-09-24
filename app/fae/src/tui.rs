@@ -13,6 +13,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::windows::io::AsHandle;
 
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -468,7 +469,12 @@ impl TerminalUi {
                     )
                 )?;
             }
-            execute!(terminal_output, EnableBracketedPaste, EnableMouseCapture)?;
+            execute!(
+                terminal_output,
+                EnableBracketedPaste,
+                EnableMouseCapture,
+                SetCursorStyle::BlinkingBar
+            )?;
             if alternate_screen {
                 execute!(terminal_output, EnterAlternateScreen)?;
             }
@@ -493,7 +499,12 @@ impl TerminalUi {
             Err(error) => {
                 let _ = disable_raw_mode();
                 if let Ok(mut terminal_output) = open_terminal_output() {
-                    let _ = execute!(terminal_output, DisableMouseCapture, DisableBracketedPaste);
+                    let _ = execute!(
+                        terminal_output,
+                        DisableMouseCapture,
+                        DisableBracketedPaste,
+                        SetCursorStyle::DefaultUserShape
+                    );
                     if keyboard_enhancement {
                         let _ = execute!(terminal_output, PopKeyboardEnhancementFlags);
                     }
@@ -511,7 +522,8 @@ impl TerminalUi {
                 let _ = execute!(
                     terminal.backend_mut(),
                     DisableMouseCapture,
-                    DisableBracketedPaste
+                    DisableBracketedPaste,
+                    SetCursorStyle::DefaultUserShape
                 );
                 if keyboard_enhancement {
                     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
@@ -1258,7 +1270,8 @@ impl Drop for TerminalUi {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            SetCursorStyle::DefaultUserShape
         );
         if self.keyboard_enhancement {
             let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
