@@ -1,9 +1,16 @@
 use std::{
     collections::HashMap,
-    io::{self, IsTerminal, Stdout, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, IsTerminal, Write},
     path::Path,
+    sync::mpsc::{self, Receiver},
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+#[cfg(windows)]
+use std::os::windows::io::AsHandle;
 
 use crossterm::{
     event::{
@@ -39,6 +46,153 @@ const OUTPUT_STATUS: &str = "Outputting...";
 const OUTPUT_ANIMATION_STEPS: usize = OUTPUT_STATUS.len() + 3;
 const PAGE_SCROLL_LINES: u16 = 8;
 const MOUSE_SCROLL_LINES: u16 = 3;
+const LOG_PREVIEW_CHARS: usize = 10;
+
+struct LogCapture {
+    receiver: Receiver<String>,
+    #[cfg(unix)]
+    writer: OwnedFd,
+    #[cfg(unix)]
+    original_stdout: Option<OwnedFd>,
+    #[cfg(unix)]
+    original_stderr: Option<OwnedFd>,
+}
+
+impl LogCapture {
+    #[cfg(unix)]
+    fn new() -> io::Result<Self> {
+        io::stdout().flush()?;
+        io::stderr().flush()?;
+
+        let mut pipe_fds = [-1; 2];
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let reader = unsafe { File::from_raw_fd(pipe_fds[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+        let original_stdout = duplicate_fd(libc::STDOUT_FILENO)?;
+        let original_stderr = duplicate_fd(libc::STDERR_FILENO)?;
+
+        if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDOUT_FILENO) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::dup2(original_stdout.as_raw_fd(), libc::STDOUT_FILENO);
+            }
+            return Err(error);
+        }
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let content = String::from_utf8_lossy(&line);
+                        let content = strip_ansi(&content)
+                            .trim_end_matches(['\r', '\n'])
+                            .to_string();
+                        if !content.is_empty() && sender.send(content).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            receiver,
+            writer,
+            original_stdout: Some(original_stdout),
+            original_stderr: Some(original_stderr),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> io::Result<Self> {
+        let (_sender, receiver) = mpsc::channel();
+        Ok(Self { receiver })
+    }
+
+    #[cfg(unix)]
+    fn pause_stdout(&self) -> io::Result<()> {
+        let original_stdout = self
+            .original_stdout
+            .as_ref()
+            .expect("stdout is available while log capture is active");
+        replace_fd(original_stdout.as_raw_fd(), libc::STDOUT_FILENO)
+    }
+
+    #[cfg(unix)]
+    fn resume_stdout(&self) -> io::Result<()> {
+        replace_fd(self.writer.as_raw_fd(), libc::STDOUT_FILENO)
+    }
+
+    #[cfg(not(unix))]
+    fn pause_stdout(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn resume_stdout(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LogCapture {
+    fn drop(&mut self) {
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        if let Some(original_stdout) = self.original_stdout.take() {
+            unsafe {
+                libc::dup2(original_stdout.as_raw_fd(), libc::STDOUT_FILENO);
+            }
+        }
+        if let Some(original_stderr) = self.original_stderr.take() {
+            unsafe {
+                libc::dup2(original_stderr.as_raw_fd(), libc::STDERR_FILENO);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn duplicate_fd(fd: libc::c_int) -> io::Result<OwnedFd> {
+    let duplicated = unsafe { libc::dup(fd) };
+    if duplicated == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+    }
+}
+
+#[cfg(unix)]
+fn replace_fd(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
+    if unsafe { libc::dup2(source, target) } == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn open_terminal_output() -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        return io::stdout().as_fd().try_clone_to_owned().map(File::from);
+    }
+    #[cfg(windows)]
+    {
+        return io::stdout()
+            .as_handle()
+            .try_clone_to_owned()
+            .map(File::from);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -263,8 +417,9 @@ enum RunningAction {
 }
 
 pub struct TerminalUi {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<CrosstermBackend<File>>,
     events: EventStream,
+    log_capture: LogCapture,
     alternate_screen: bool,
     keyboard_enhancement: bool,
     copy_mode: bool,
@@ -296,29 +451,29 @@ impl TerminalUi {
         color_choice: ColorChoice,
         no_alt_screen: bool,
     ) -> anyhow::Result<Self> {
+        let mut terminal_output = open_terminal_output()?;
         anyhow::ensure!(
-            io::stdin().is_terminal() && io::stdout().is_terminal(),
+            io::stdin().is_terminal() && terminal_output.is_terminal(),
             "interactive mode requires a terminal"
         );
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
         let alternate_screen = !no_alt_screen;
         let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
         let terminal = (|| -> anyhow::Result<_> {
             if keyboard_enhancement {
                 execute!(
-                    stdout,
+                    terminal_output,
                     PushKeyboardEnhancementFlags(
                         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     )
                 )?;
             }
-            execute!(stdout, EnableBracketedPaste, EnableMouseCapture)?;
+            execute!(terminal_output, EnableBracketedPaste, EnableMouseCapture)?;
             if alternate_screen {
-                execute!(stdout, EnterAlternateScreen)?;
+                execute!(terminal_output, EnterAlternateScreen)?;
             }
 
-            let backend = CrosstermBackend::new(stdout);
+            let backend = CrosstermBackend::new(terminal_output);
             let mut terminal = if alternate_screen {
                 Terminal::new(backend)?
             } else {
@@ -333,19 +488,39 @@ impl TerminalUi {
             terminal.clear()?;
             Ok(terminal)
         })();
-        let terminal = match terminal {
+        let mut terminal = match terminal {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = disable_raw_mode();
-                let mut stdout = io::stdout();
-                let _ = execute!(stdout, DisableMouseCapture, DisableBracketedPaste);
-                if keyboard_enhancement {
-                    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-                }
-                if alternate_screen {
-                    let _ = execute!(stdout, LeaveAlternateScreen);
+                if let Ok(mut terminal_output) = open_terminal_output() {
+                    let _ = execute!(terminal_output, DisableMouseCapture, DisableBracketedPaste);
+                    if keyboard_enhancement {
+                        let _ = execute!(terminal_output, PopKeyboardEnhancementFlags);
+                    }
+                    if alternate_screen {
+                        let _ = execute!(terminal_output, LeaveAlternateScreen);
+                    }
                 }
                 return Err(error);
+            }
+        };
+        let log_capture = match LogCapture::new() {
+            Ok(capture) => capture,
+            Err(error) => {
+                let _ = terminal.show_cursor();
+                let _ = execute!(
+                    terminal.backend_mut(),
+                    DisableMouseCapture,
+                    DisableBracketedPaste
+                );
+                if keyboard_enhancement {
+                    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+                }
+                if alternate_screen {
+                    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+                }
+                let _ = disable_raw_mode();
+                return Err(error.into());
             }
         };
 
@@ -357,6 +532,7 @@ impl TerminalUi {
         Ok(Self {
             terminal,
             events: EventStream::new(),
+            log_capture,
             alternate_screen,
             keyboard_enhancement,
             copy_mode: false,
@@ -1015,10 +1191,18 @@ impl TerminalUi {
     }
 
     fn draw(&mut self) -> anyhow::Result<()> {
+        self.drain_logs();
         if self.copy_mode {
             return Ok(());
         }
         self.draw_current()
+    }
+
+    fn drain_logs(&mut self) {
+        while let Ok(content) = self.log_capture.receiver.try_recv() {
+            push_log_message(&mut self.messages, content);
+            self.scroll_from_bottom = 0;
+        }
     }
 
     fn draw_current(&mut self) -> anyhow::Result<()> {
@@ -1036,7 +1220,8 @@ impl TerminalUi {
         let scroll_from_bottom = self.scroll_from_bottom;
         let copy_mode = self.copy_mode;
 
-        self.terminal.draw(|frame| {
+        self.log_capture.pause_stdout()?;
+        let draw_result = self.terminal.draw(|frame| {
             draw_frame(
                 frame,
                 ViewModel {
@@ -1055,13 +1240,17 @@ impl TerminalUi {
                     copy_mode,
                 },
             );
-        })?;
+        });
+        let resume_result = self.log_capture.resume_stdout();
+        draw_result?;
+        resume_result?;
         Ok(())
     }
 }
 
 impl Drop for TerminalUi {
     fn drop(&mut self) {
+        self.drain_logs();
         let transcript = self
             .alternate_screen
             .then(|| plain_transcript(&self.messages));
@@ -1082,9 +1271,8 @@ impl Drop for TerminalUi {
         if let Some(transcript) = transcript
             && !transcript.is_empty()
         {
-            let mut stdout = io::stdout();
-            let _ = writeln!(stdout, "{transcript}");
-            let _ = stdout.flush();
+            let _ = writeln!(self.terminal.backend_mut(), "{transcript}");
+            let _ = self.terminal.backend_mut().flush();
         }
     }
 }
@@ -1593,6 +1781,35 @@ fn color(enabled: bool, value: Color) -> Color {
     if enabled { value } else { Color::Reset }
 }
 
+fn push_log_message(messages: &mut Vec<Message>, content: String) {
+    let preview = content.chars().take(LOG_PREVIEW_CHARS).collect::<String>();
+    messages.push(Message::new(
+        MessageKind::System,
+        format!("LOG: {preview}"),
+        content,
+        None,
+    ));
+}
+
+fn strip_ansi(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let mut characters = content.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            stripped.push(character);
+            continue;
+        }
+        if characters.next() == Some('[') {
+            for character in characters.by_ref() {
+                if ('@'..='~').contains(&character) {
+                    break;
+                }
+            }
+        }
+    }
+    stripped
+}
+
 fn append_stream_message(
     messages: &mut Vec<Message>,
     kind: MessageKind,
@@ -1836,6 +2053,24 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "hello");
+    }
+
+    #[test]
+    fn log_message_uses_ten_character_preview_and_full_content() {
+        let mut messages = Vec::new();
+        push_log_message(&mut messages, "一二三四五六七八九十十一条日志".to_string());
+
+        assert_eq!(messages[0].title, "LOG: 一二三四五六七八九十");
+        assert_eq!(messages[0].content, "一二三四五六七八九十十一条日志");
+        assert!(messages[0].is_collapsible());
+    }
+
+    #[test]
+    fn ansi_sequences_are_removed_from_captured_logs() {
+        assert_eq!(
+            strip_ansi("\u{1b}[7;31m[ERROR] failed\u{1b}[0m"),
+            "[ERROR] failed"
+        );
     }
 
     #[test]

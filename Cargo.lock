@@ -785,6 +785,7 @@ dependencies = [
  "crossterm",
  "fae-agent",
  "fae-engine",
+ "libc",
  "ratatui",
  "serde_json",
  "tokio",

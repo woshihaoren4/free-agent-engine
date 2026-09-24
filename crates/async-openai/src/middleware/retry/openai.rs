@@ -51,7 +51,7 @@ impl OpenAIRetryLayer {
 
 impl Default for OpenAIRetryLayer {
     fn default() -> Self {
-        Self::new(3)
+        Self::new(0)
     }
 }
 
