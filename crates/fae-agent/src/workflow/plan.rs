@@ -9,9 +9,12 @@ use crate::{
     CommonSession, Ctx, Plan, PlanBuilderWithEnv, PlanNext, Session, SessionEvent,
     SessionEventData, SessionResponse, SingleAgentEnv, TaskMeta, TaskReq, TaskRequest, TaskResp,
     TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction,
-    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv, WorkflowMetadata, WorkflowNode,
-    WorkflowValues, to_plan_ty,
+    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv, WorkflowHook, WorkflowHookBuilder,
+    WorkflowHookContext, WorkflowHookPhase, WorkflowMetadata, WorkflowNode, WorkflowValues,
+    to_plan_ty,
 };
+
+use crate::hook::workflow_hook::CompositeWorkflowHook;
 
 use super::builder::requires_dag_execution;
 
@@ -143,16 +146,54 @@ impl WorkflowMetadataLoader for WorkflowMetadata {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct WorkflowPlanBuilder {
     metadata_loader: Arc<dyn WorkflowMetadataLoader>,
+    hooks: Vec<Arc<dyn WorkflowHookBuilder>>,
+}
+
+impl std::fmt::Debug for WorkflowPlanBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowPlanBuilder")
+            .field("metadata_loader", &self.metadata_loader)
+            .field("hook_count", &self.hooks.len())
+            .finish()
+    }
 }
 
 impl WorkflowPlanBuilder {
     pub fn new(loader: impl WorkflowMetadataLoader) -> Self {
         Self {
             metadata_loader: Arc::new(loader),
+            hooks: Vec::new(),
         }
+    }
+
+    pub fn hooks(&self) -> &[Arc<dyn WorkflowHookBuilder>] {
+        &self.hooks
+    }
+
+    pub fn add_hook<H>(&mut self, builder: H)
+    where
+        H: WorkflowHookBuilder,
+    {
+        self.hooks.push(Arc::new(builder));
+    }
+
+    pub fn add_hook_arc(&mut self, builder: Arc<dyn WorkflowHookBuilder>) {
+        self.hooks.push(builder);
+    }
+
+    pub fn remove_hooks(&mut self) -> Vec<Arc<dyn WorkflowHookBuilder>> {
+        std::mem::take(&mut self.hooks)
+    }
+
+    async fn build_hook(&self) -> Arc<dyn WorkflowHook> {
+        let mut hooks = Vec::with_capacity(self.hooks.len());
+        for builder in &self.hooks {
+            hooks.push(builder.build().await);
+        }
+        Arc::new(CompositeWorkflowHook::new(hooks))
     }
 }
 
@@ -165,7 +206,8 @@ impl PlanBuilderWithEnv<WorkflowEnv> for WorkflowPlanBuilder {
         env: WorkflowEnv,
     ) -> anyhow::Result<Box<dyn Plan>> {
         let metadata = self.metadata_loader.load(&env.workflow_id).await?;
-        build_workflow_plan(metadata, ctx, env)
+        let hook = self.build_hook().await;
+        build_workflow_plan(metadata, ctx, env, hook)
     }
 }
 
@@ -173,6 +215,7 @@ fn build_workflow_plan(
     metadata: WorkflowMetadata,
     ctx: Ctx,
     env: WorkflowEnv,
+    hook: Arc<dyn WorkflowHook>,
 ) -> anyhow::Result<Box<dyn Plan>> {
     anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
     let complete_context = env.completes_context();
@@ -204,6 +247,7 @@ fn build_workflow_plan(
             ctx,
             current,
             complete_context,
+            hook,
         )));
     }
 
@@ -221,6 +265,7 @@ fn build_workflow_plan(
         task_sequence: 0,
         finished: false,
         complete_context,
+        hook,
     }))
 }
 
@@ -248,6 +293,7 @@ struct WorkflowPlan {
     task_sequence: usize,
     finished: bool,
     complete_context: bool,
+    hook: Arc<dyn WorkflowHook>,
 }
 
 #[derive(Debug)]
@@ -275,9 +321,46 @@ struct DagWorkflowPlan {
     task_sequence: usize,
     finished: bool,
     complete_context: bool,
+    hook: Arc<dyn WorkflowHook>,
+    active_node: Option<String>,
+}
+
+async fn invoke_workflow_hook(
+    hook: &dyn WorkflowHook,
+    context: &WorkflowHookContext<'_>,
+) -> anyhow::Result<()> {
+    match context.node {
+        WorkflowNode::Start { .. } => hook.on_start(context).await,
+        WorkflowNode::ParallelStart { .. } => hook.on_parallel_start(context).await,
+        WorkflowNode::Execute { .. } => hook.on_execute(context).await,
+        WorkflowNode::Decision { .. } => hook.on_decision(context).await,
+        WorkflowNode::Loop { .. } => hook.on_loop(context).await,
+        WorkflowNode::End { .. } => hook.on_end(context).await,
+        WorkflowNode::JoinEnd { .. } => hook.on_join_end(context).await,
+    }
 }
 
 impl WorkflowPlan {
+    async fn invoke_hook(
+        &self,
+        node_id: &str,
+        node: &WorkflowNode,
+        phase: WorkflowHookPhase<'_>,
+    ) -> anyhow::Result<()> {
+        invoke_workflow_hook(
+            self.hook.as_ref(),
+            &WorkflowHookContext {
+                ctx: &self.ctx,
+                plan_id: &self.id,
+                workflow_id: &self.metadata.id,
+                node_id,
+                node,
+                phase,
+            },
+        )
+        .await
+    }
+
     fn emit(&self, node_id: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
         self.session.emit(SessionEvent::workflow(
             self.metadata.id.clone(),
@@ -309,21 +392,32 @@ impl WorkflowPlan {
 
     async fn advance(&mut self) -> anyhow::Result<PlanNext> {
         loop {
-            let node = self
-                .metadata
-                .nodes
-                .get(&self.current)
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("workflow node `{}` does not exist", self.current)
-                })?;
+            let node_id = self.current.clone();
+            let node = self.metadata.nodes.get(&node_id).cloned().ok_or_else(|| {
+                anyhow::anyhow!("workflow node `{}` does not exist", self.current)
+            })?;
+            if matches!(
+                node,
+                WorkflowNode::ParallelStart { .. } | WorkflowNode::JoinEnd { .. }
+            ) {
+                anyhow::bail!("parallel workflow node reached by the sequential executor");
+            }
+            self.invoke_hook(&node_id, &node, WorkflowHookPhase::Before)
+                .await?;
+            let hook_node = node.clone();
 
             match node {
-                WorkflowNode::ParallelStart { .. } | WorkflowNode::JoinEnd { .. } => {
-                    anyhow::bail!("parallel workflow node reached by the sequential executor")
-                }
+                WorkflowNode::ParallelStart { .. } | WorkflowNode::JoinEnd { .. } => unreachable!(),
                 WorkflowNode::Start { next } => {
                     self.emit_node_completed(self.current.clone(), self.input.clone(), false)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&self.input),
+                        },
+                    )
+                    .await?;
                     self.current = only_target(&self.current, "next", &next)?;
                 }
                 WorkflowNode::End { output } => {
@@ -335,6 +429,14 @@ impl WorkflowPlan {
                             .unwrap_or_else(|| self.input.clone()),
                     };
                     self.emit_node_completed(self.current.clone(), output.clone(), true)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&output),
+                        },
+                    )
+                    .await?;
                     if self.complete_context {
                         self.ctx.over(Box::new(output));
                     }
@@ -347,7 +449,16 @@ impl WorkflowPlan {
                     on_false,
                 } => {
                     let result = self.values().evaluate(&condition)?;
-                    self.emit_node_completed(self.current.clone(), Value::Bool(result), false)?;
+                    let output = Value::Bool(result);
+                    self.emit_node_completed(self.current.clone(), output.clone(), false)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&output),
+                        },
+                    )
+                    .await?;
                     let selected = if result { &on_true } else { &on_false };
                     self.current = only_target(
                         &self.current,
@@ -362,7 +473,7 @@ impl WorkflowPlan {
                     max_iterations,
                 } => {
                     let continues = self.values().evaluate(&condition)?;
-                    if continues {
+                    let output = if continues {
                         let iteration = self.loops.entry(self.current.clone()).or_default();
                         anyhow::ensure!(
                             *iteration < max_iterations,
@@ -371,30 +482,33 @@ impl WorkflowPlan {
                         );
                         *iteration += 1;
                         let iteration = *iteration;
-                        self.emit_node_completed(
-                            self.current.clone(),
-                            json!({
-                                "continues": true,
-                                "iteration": iteration,
-                            }),
-                            false,
-                        )?;
+                        let output = json!({
+                            "continues": true,
+                            "iteration": iteration,
+                        });
                         self.current = body;
+                        output
                     } else {
-                        self.emit_node_completed(
-                            self.current.clone(),
-                            json!({
-                                "continues": false,
-                                "iteration": self
-                                    .loops
-                                    .get(&self.current)
-                                    .copied()
-                                    .unwrap_or_default(),
-                            }),
-                            false,
-                        )?;
+                        let output = json!({
+                            "continues": false,
+                            "iteration": self
+                                .loops
+                                .get(&self.current)
+                                .copied()
+                                .unwrap_or_default(),
+                        });
                         self.current = next;
-                    }
+                        output
+                    };
+                    self.emit_node_completed(node_id.clone(), output.clone(), false)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&output),
+                        },
+                    )
+                    .await?;
                 }
                 WorkflowNode::Execute { action, .. } => {
                     let task = self.action_task(action).await?;
@@ -597,12 +711,26 @@ impl Plan for WorkflowPlan {
     async fn next(&mut self, response: TaskResponse) -> anyhow::Result<PlanNext> {
         anyhow::ensure!(!self.finished, "workflow has already finished");
         let node_id = self.current.clone();
-        let next = match self.metadata.nodes.get(&node_id) {
-            Some(WorkflowNode::Execute { next, .. }) => only_target(&node_id, "next", next)?,
+        let node = self
+            .metadata
+            .nodes
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("workflow node `{node_id}` does not exist"))?;
+        let next = match &node {
+            WorkflowNode::Execute { next, .. } => only_target(&node_id, "next", next)?,
             _ => anyhow::bail!("workflow is not waiting at an execute node"),
         };
         let output = self.action_output(response).await?;
         self.emit_node_completed(node_id.clone(), output.clone(), false)?;
+        self.invoke_hook(
+            &node_id,
+            &node,
+            WorkflowHookPhase::After {
+                output: Some(&output),
+            },
+        )
+        .await?;
         self.outputs.insert(node_id, output.clone());
         self.last_output = Some(output);
         self.current = next;
@@ -611,6 +739,15 @@ impl Plan for WorkflowPlan {
 
     async fn abort(&mut self, _code: i32, error: String) {
         self.pending = None;
+        if let Some(node) = self.metadata.nodes.get(&self.current) {
+            let _ = self
+                .invoke_hook(
+                    &self.current,
+                    node,
+                    WorkflowHookPhase::Failed { error: &error },
+                )
+                .await;
+        }
         let _ = self.emit(self.current.clone(), SessionEventData::Failed { error });
     }
 }
@@ -623,6 +760,7 @@ impl DagWorkflowPlan {
         ctx: Ctx,
         start: String,
         complete_context: bool,
+        hook: Arc<dyn WorkflowHook>,
     ) -> Self {
         let mut predecessors = HashMap::<String, HashSet<String>>::new();
         for (source, node) in &metadata.nodes {
@@ -652,7 +790,29 @@ impl DagWorkflowPlan {
             task_sequence: 0,
             finished: false,
             complete_context,
+            hook,
+            active_node: None,
         }
+    }
+
+    async fn invoke_hook(
+        &self,
+        node_id: &str,
+        node: &WorkflowNode,
+        phase: WorkflowHookPhase<'_>,
+    ) -> anyhow::Result<()> {
+        invoke_workflow_hook(
+            self.hook.as_ref(),
+            &WorkflowHookContext {
+                ctx: &self.ctx,
+                plan_id: &self.id,
+                workflow_id: &self.metadata.id,
+                node_id,
+                node,
+                phase,
+            },
+        )
+        .await
     }
 
     fn emit(&self, node_id: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
@@ -927,10 +1087,22 @@ impl DagWorkflowPlan {
                 .get(&node_id)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("workflow node `{node_id}` does not exist"))?;
+            self.active_node = Some(node_id.clone());
+            self.invoke_hook(&node_id, &node, WorkflowHookPhase::Before)
+                .await?;
+            let hook_node = node.clone();
 
             match node {
                 WorkflowNode::Start { next } | WorkflowNode::ParallelStart { next } => {
                     self.emit_node_completed(node_id.clone(), self.input.clone(), false)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&self.input),
+                        },
+                    )
+                    .await?;
                     self.resolve_outgoing(&node_id, &next)?;
                 }
                 WorkflowNode::Execute { action, .. } => {
@@ -942,7 +1114,16 @@ impl DagWorkflowPlan {
                     on_false,
                 } => {
                     let result = self.values().evaluate(&condition)?;
-                    self.emit_node_completed(node_id.clone(), Value::Bool(result), false)?;
+                    let output = Value::Bool(result);
+                    self.emit_node_completed(node_id.clone(), output.clone(), false)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&output),
+                        },
+                    )
+                    .await?;
                     self.resolve_outgoing(&node_id, if result { &on_true } else { &on_false })?;
                 }
                 WorkflowNode::End { output } | WorkflowNode::JoinEnd { output } => {
@@ -951,10 +1132,19 @@ impl DagWorkflowPlan {
                         "workflow end became ready while actions were still pending"
                     );
                     let output = self.end_output(&node_id, output)?;
-                    self.emit_node_completed(node_id, output.clone(), true)?;
+                    self.emit_node_completed(node_id.clone(), output.clone(), true)?;
+                    self.invoke_hook(
+                        &node_id,
+                        &hook_node,
+                        WorkflowHookPhase::After {
+                            output: Some(&output),
+                        },
+                    )
+                    .await?;
                     if self.complete_context {
                         self.ctx.over(Box::new(output));
                     }
+                    self.active_node = None;
                     self.finished = true;
                     return Ok(PlanNext::End);
                 }
@@ -962,6 +1152,7 @@ impl DagWorkflowPlan {
                     anyhow::bail!("loop node reached by the DAG workflow executor")
                 }
             }
+            self.active_node = None;
         }
 
         if !tasks.is_empty() {
@@ -988,6 +1179,7 @@ impl Plan for DagWorkflowPlan {
             .pending
             .remove(&task_id)
             .ok_or_else(|| anyhow::anyhow!("workflow received unexpected task `{task_id}`"))?;
+        self.active_node = Some(pending.node_id.clone());
         let output = match pending.action {
             PendingAction::Workflow => {
                 let response =
@@ -1038,16 +1230,31 @@ impl Plan for DagWorkflowPlan {
             }
         };
 
-        let next = match self.metadata.nodes.get(&pending.node_id) {
-            Some(WorkflowNode::Execute { next, .. }) => next.clone(),
+        let node = self
+            .metadata
+            .nodes
+            .get(&pending.node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("workflow node `{}` does not exist", pending.node_id))?;
+        let next = match &node {
+            WorkflowNode::Execute { next, .. } => next.clone(),
             _ => anyhow::bail!(
                 "workflow is not waiting at execute node `{}`",
                 pending.node_id
             ),
         };
         self.emit_node_completed(pending.node_id.clone(), output.clone(), false)?;
+        self.invoke_hook(
+            &pending.node_id,
+            &node,
+            WorkflowHookPhase::After {
+                output: Some(&output),
+            },
+        )
+        .await?;
         self.outputs.insert(pending.node_id.clone(), output);
         self.resolve_outgoing(&pending.node_id, &next)?;
+        self.active_node = None;
 
         if self.pending.is_empty() {
             self.advance().await
@@ -1057,6 +1264,26 @@ impl Plan for DagWorkflowPlan {
     }
 
     async fn abort(&mut self, _code: i32, error: String) {
+        let mut node_ids = match self.active_node.take() {
+            Some(node_id) => vec![node_id],
+            None => self
+                .pending
+                .values()
+                .map(|pending| pending.node_id.clone())
+                .collect(),
+        };
+        node_ids.sort();
+        node_ids.dedup();
+        if node_ids.is_empty() {
+            node_ids.push(self.start.clone());
+        }
+        for node_id in node_ids {
+            if let Some(node) = self.metadata.nodes.get(&node_id) {
+                let _ = self
+                    .invoke_hook(&node_id, node, WorkflowHookPhase::Failed { error: &error })
+                    .await;
+            }
+        }
         self.pending.clear();
         let _ = self.emit(self.start.clone(), SessionEventData::Failed { error });
     }
@@ -1111,7 +1338,315 @@ mod tests {
     use super::*;
     use crate::{ContextNull, WorkflowCondition, WorkflowMetadataBuilder};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug)]
+    struct RecordingWorkflowHookBuilder {
+        name: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowHookBuilder for RecordingWorkflowHookBuilder {
+        async fn build(&self) -> Arc<dyn WorkflowHook> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("build:{}", self.name));
+            Arc::new(RecordingWorkflowHook {
+                name: self.name,
+                events: self.events.clone(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingWorkflowHook {
+        name: &'static str,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingWorkflowHook {
+        fn phase(ctx: &WorkflowHookContext<'_>) -> String {
+            match ctx.phase {
+                WorkflowHookPhase::Before => "before".to_string(),
+                WorkflowHookPhase::After { output } => format!(
+                    "after:{}",
+                    output
+                        .map(Value::to_string)
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+                WorkflowHookPhase::Failed { error } => format!("failed:{error}"),
+            }
+        }
+
+        fn record(&self, ctx: &WorkflowHookContext<'_>) {
+            self.events.lock().unwrap().push(format!(
+                "{}:{}:{}",
+                self.name,
+                ctx.node_id,
+                Self::phase(ctx)
+            ));
+        }
+
+        fn record_callback(&self, callback: &str, ctx: &WorkflowHookContext<'_>) {
+            self.events.lock().unwrap().push(format!(
+                "{}:{callback}:{}:{}",
+                self.name,
+                ctx.node_id,
+                Self::phase(ctx)
+            ));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowHook for RecordingWorkflowHook {
+        async fn on_start(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record(ctx);
+            Ok(())
+        }
+
+        async fn on_parallel_start(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record_callback("parallel_start", ctx);
+            Ok(())
+        }
+
+        async fn on_execute(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record(ctx);
+            Ok(())
+        }
+
+        async fn on_decision(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record(ctx);
+            Ok(())
+        }
+
+        async fn on_loop(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record(ctx);
+            Ok(())
+        }
+
+        async fn on_end(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record(ctx);
+            Ok(())
+        }
+
+        async fn on_join_end(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+            self.record_callback("join_end", ctx);
+            Ok(())
+        }
+    }
+
+    fn recording_builder(
+        metadata: WorkflowMetadata,
+        events: Arc<Mutex<Vec<String>>>,
+    ) -> WorkflowPlanBuilder {
+        let mut builder = WorkflowPlanBuilder::new(metadata);
+        builder.add_hook(RecordingWorkflowHookBuilder {
+            name: "first",
+            events: events.clone(),
+        });
+        builder.add_hook(RecordingWorkflowHookBuilder {
+            name: "second",
+            events,
+        });
+        builder
+    }
+
+    #[tokio::test]
+    async fn workflow_builder_composes_hooks_in_registration_order() {
+        let mut metadata = WorkflowMetadataBuilder::new("hooked", "Test workflow hooks");
+        metadata.start("start", "execute").unwrap();
+        metadata
+            .execute(
+                "execute",
+                WorkflowAction::Custom {
+                    task_type: "fixture".to_string(),
+                    request: Value::Null,
+                },
+                "end",
+            )
+            .unwrap();
+        metadata.end("end", Some(json!("done"))).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let builder = recording_builder(metadata.build().unwrap(), events.clone());
+        let (env, _) = WorkflowEnv::new("hooked", json!({"input": true}));
+        let ctx = Ctx::new(Arc::new(ContextNull));
+        let mut plan = builder
+            .build(crate::RT::null(), ctx.clone(), env)
+            .await
+            .unwrap();
+
+        let PlanNext::Tasks(mut tasks) = plan.init().await.unwrap() else {
+            panic!("expected execute task");
+        };
+        let task = TaskReq::<WorkflowActionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert!(matches!(
+            plan.next(
+                TaskResp {
+                    ctx,
+                    meta: task.meta,
+                    resp: WorkflowActionResponse {
+                        output: json!({"value": 1}),
+                    },
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap(),
+            PlanNext::End
+        ));
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "build:first",
+                "build:second",
+                "first:start:before",
+                "second:start:before",
+                "first:start:after:{\"input\":true}",
+                "second:start:after:{\"input\":true}",
+                "first:execute:before",
+                "second:execute:before",
+                "first:execute:after:{\"value\":1}",
+                "second:execute:after:{\"value\":1}",
+                "first:end:before",
+                "second:end:before",
+                "first:end:after:\"done\"",
+                "second:end:after:\"done\"",
+            ]
+        );
+        assert_eq!(builder.hooks().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn workflow_hook_reports_failed_execute_node() {
+        let mut metadata = WorkflowMetadataBuilder::new("hook-failure", "Test failed hook phase");
+        metadata.start("start", "execute").unwrap();
+        metadata
+            .execute(
+                "execute",
+                WorkflowAction::Custom {
+                    task_type: "fixture".to_string(),
+                    request: Value::Null,
+                },
+                "end",
+            )
+            .unwrap();
+        metadata.end("end", None).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let builder = recording_builder(metadata.build().unwrap(), events.clone());
+        let (env, _) = WorkflowEnv::new("hook-failure", Value::Null);
+        let mut plan = builder
+            .build(crate::RT::null(), Ctx::new(Arc::new(ContextNull)), env)
+            .await
+            .unwrap();
+
+        assert!(matches!(plan.init().await.unwrap(), PlanNext::Tasks(_)));
+        plan.abort(-1, "task failed".to_string()).await;
+
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "first:execute:failed:task failed")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "second:execute:failed:task failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn dag_workflow_routes_parallel_and_join_hooks() {
+        let mut metadata = WorkflowMetadataBuilder::new("hooked-dag", "Test DAG workflow hooks");
+        metadata
+            .add_node(
+                "start",
+                WorkflowNode::ParallelStart {
+                    next: vec!["left".to_string(), "right".to_string()],
+                },
+            )
+            .unwrap();
+        for node_id in ["left", "right"] {
+            metadata
+                .execute(
+                    node_id,
+                    WorkflowAction::Custom {
+                        task_type: "fixture".to_string(),
+                        request: json!({"node": node_id}),
+                    },
+                    "end",
+                )
+                .unwrap();
+        }
+        metadata
+            .add_node("end", WorkflowNode::JoinEnd { output: None })
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let builder = recording_builder(metadata.build().unwrap(), events.clone());
+        let (env, _) = WorkflowEnv::new("hooked-dag", Value::Null);
+        let ctx = Ctx::new(Arc::new(ContextNull));
+        let mut plan = builder
+            .build(crate::RT::null(), ctx.clone(), env)
+            .await
+            .unwrap();
+
+        let PlanNext::Tasks(mut tasks) = plan.init().await.unwrap() else {
+            panic!("expected parallel execute tasks");
+        };
+        assert_eq!(tasks.len(), 2);
+        let left = TaskReq::<WorkflowActionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let right = TaskReq::<WorkflowActionRequest>::try_from_request(&mut tasks[1]).unwrap();
+
+        assert!(matches!(
+            plan.next(
+                TaskResp {
+                    ctx: ctx.clone(),
+                    meta: left.meta,
+                    resp: WorkflowActionResponse {
+                        output: json!("left"),
+                    },
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap(),
+            PlanNext::Tasks(tasks) if tasks.is_empty()
+        ));
+        assert!(matches!(
+            plan.next(
+                TaskResp {
+                    ctx,
+                    meta: right.meta,
+                    resp: WorkflowActionResponse {
+                        output: json!("right"),
+                    },
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap(),
+            PlanNext::End
+        ));
+
+        let events = events.lock().unwrap();
+        for expected in [
+            "first:parallel_start:start:before",
+            "second:parallel_start:start:after:null",
+            "first:join_end:end:before",
+            "second:join_end:end:after:{\"left\":\"left\",\"right\":\"right\"}",
+        ] {
+            assert!(
+                events.iter().any(|event| event == expected),
+                "missing hook event `{expected}` in {events:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn fae_loader_supports_runtime_add_replace_and_remove() {

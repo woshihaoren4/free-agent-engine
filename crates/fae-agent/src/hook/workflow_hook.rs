@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use serde_json::Value;
 
@@ -22,32 +22,100 @@ pub struct WorkflowHookContext<'a> {
 }
 
 #[async_trait::async_trait]
+pub trait WorkflowHookBuilder: Send + Sync + 'static {
+    async fn build(&self) -> Arc<dyn WorkflowHook>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CompositeWorkflowHook {
+    hooks: Vec<Arc<dyn WorkflowHook>>,
+}
+
+impl CompositeWorkflowHook {
+    pub(crate) fn new(hooks: Vec<Arc<dyn WorkflowHook>>) -> Self {
+        Self { hooks }
+    }
+}
+
+#[async_trait::async_trait]
 pub trait WorkflowHook: Debug + Send + Sync + 'static {
-    async fn on_start(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_start(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_parallel_start(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_parallel_start(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_execute(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_execute(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_decision(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_decision(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_loop(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_loop(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_end(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_end(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn on_join_end(&self, _context: WorkflowHookContext<'_>) -> anyhow::Result<()> {
+    async fn on_join_end(&self, _ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowHook for CompositeWorkflowHook {
+    async fn on_start(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_start(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_parallel_start(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_parallel_start(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_execute(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_execute(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_decision(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_decision(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_loop(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_loop(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_end(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_end(ctx).await?;
+        }
+        Ok(())
+    }
+
+    async fn on_join_end(&self, ctx: &WorkflowHookContext<'_>) -> anyhow::Result<()> {
+        for hook in &self.hooks {
+            hook.on_join_end(ctx).await?;
+        }
         Ok(())
     }
 }
