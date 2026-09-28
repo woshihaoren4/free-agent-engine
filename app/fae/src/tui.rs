@@ -49,10 +49,30 @@ const PAGE_SCROLL_LINES: u16 = 8;
 const MOUSE_SCROLL_LINES: u16 = 3;
 const LOG_PREVIEW_CHARS: usize = 10;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogKind {
+    Output,
+    Error,
+}
+
+#[derive(Debug)]
+struct CapturedLog {
+    kind: LogKind,
+    content: String,
+}
+
 struct LogCapture {
-    receiver: Receiver<String>,
+    receiver: Receiver<CapturedLog>,
     #[cfg(unix)]
-    writer: OwnedFd,
+    stdout_writer: OwnedFd,
+    #[cfg(unix)]
+    _stderr_writer: OwnedFd,
     #[cfg(unix)]
     original_stdout: Option<OwnedFd>,
     #[cfg(unix)]
@@ -65,19 +85,15 @@ impl LogCapture {
         io::stdout().flush()?;
         io::stderr().flush()?;
 
-        let mut pipe_fds = [-1; 2];
-        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        let reader = unsafe { File::from_raw_fd(pipe_fds[0]) };
-        let writer = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
         let original_stdout = duplicate_fd(libc::STDOUT_FILENO)?;
         let original_stderr = duplicate_fd(libc::STDERR_FILENO)?;
+        let (stdout_reader, stdout_writer) = create_pipe()?;
+        let (stderr_reader, stderr_writer) = create_pipe()?;
 
-        if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDOUT_FILENO) } == -1 {
+        if unsafe { libc::dup2(stdout_writer.as_raw_fd(), libc::STDOUT_FILENO) } == -1 {
             return Err(io::Error::last_os_error());
         }
-        if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+        if unsafe { libc::dup2(stderr_writer.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
             let error = io::Error::last_os_error();
             unsafe {
                 libc::dup2(original_stdout.as_raw_fd(), libc::STDOUT_FILENO);
@@ -85,29 +101,13 @@ impl LogCapture {
             return Err(error);
         }
         let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(reader);
-            let mut line = Vec::new();
-            loop {
-                line.clear();
-                match reader.read_until(b'\n', &mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let content = String::from_utf8_lossy(&line);
-                        let content = strip_ansi(&content)
-                            .trim_end_matches(['\r', '\n'])
-                            .to_string();
-                        if !content.is_empty() && sender.send(content).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        spawn_log_reader(stdout_reader, sender.clone(), LogStream::Stdout);
+        spawn_log_reader(stderr_reader, sender, LogStream::Stderr);
 
         Ok(Self {
             receiver,
-            writer,
+            stdout_writer,
+            _stderr_writer: stderr_writer,
             original_stdout: Some(original_stdout),
             original_stderr: Some(original_stderr),
         })
@@ -130,7 +130,7 @@ impl LogCapture {
 
     #[cfg(unix)]
     fn resume_stdout(&self) -> io::Result<()> {
-        replace_fd(self.writer.as_raw_fd(), libc::STDOUT_FILENO)
+        replace_fd(self.stdout_writer.as_raw_fd(), libc::STDOUT_FILENO)
     }
 
     #[cfg(not(unix))]
@@ -141,6 +141,52 @@ impl LogCapture {
     #[cfg(not(unix))]
     fn resume_stdout(&self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn create_pipe() -> io::Result<(File, OwnedFd)> {
+    let mut pipe_fds = [-1; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe {
+        (
+            File::from_raw_fd(pipe_fds[0]),
+            OwnedFd::from_raw_fd(pipe_fds[1]),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn spawn_log_reader(reader: File, sender: mpsc::Sender<CapturedLog>, stream: LogStream) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let content = String::from_utf8_lossy(&line);
+                    let kind = captured_log_kind(stream, &content);
+                    let content = strip_ansi(&content)
+                        .trim_end_matches(['\r', '\n'])
+                        .to_string();
+                    if !content.is_empty() && sender.send(CapturedLog { kind, content }).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn captured_log_kind(stream: LogStream, content: &str) -> LogKind {
+    if stream == LogStream::Stderr || content.contains("\u{1b}[7;31m") {
+        LogKind::Error
+    } else {
+        LogKind::Output
     }
 }
 
@@ -218,6 +264,8 @@ enum MessageKind {
     Workflow,
     Notice,
     System,
+    LogOutput,
+    LogError,
     Error,
 }
 
@@ -571,7 +619,7 @@ impl TerminalUi {
         self.finish_stream();
         self.messages.push(Message::new(
             MessageKind::User,
-            self.title("You"),
+            user_title(&self.agent_name),
             content,
             None,
         ));
@@ -1211,8 +1259,8 @@ impl TerminalUi {
     }
 
     fn drain_logs(&mut self) {
-        while let Ok(content) = self.log_capture.receiver.try_recv() {
-            push_log_message(&mut self.messages, content);
+        while let Ok(log) = self.log_capture.receiver.try_recv() {
+            push_log_message(&mut self.messages, log);
             self.scroll_from_bottom = 0;
         }
     }
@@ -1512,6 +1560,8 @@ fn transcript_text(messages: &[Message], use_color: bool, pulse: usize) -> Text<
             MessageKind::Workflow => ("+", Color::Green, Modifier::BOLD),
             MessageKind::Notice => ("-", Color::Blue, Modifier::BOLD),
             MessageKind::System => ("-", Color::DarkGray, Modifier::DIM),
+            MessageKind::LogOutput => ("-", Color::Gray, Modifier::empty()),
+            MessageKind::LogError => ("!", Color::Red, Modifier::BOLD),
             MessageKind::Error => ("!", Color::Red, Modifier::BOLD),
         };
         let heading = if message.title.is_empty() {
@@ -1646,10 +1696,24 @@ fn message_content_lines(message: &Message, use_color: bool) -> Vec<Line<'static
             })
             .collect()
     } else {
+        let content_color = match message.kind {
+            MessageKind::LogOutput => Some(Color::Gray),
+            MessageKind::LogError => Some(Color::Red),
+            _ => None,
+        };
         message
             .content
             .lines()
-            .map(|content_line| Line::from(format!(" {content_line}")))
+            .map(|content_line| {
+                let content = format!(" {content_line}");
+                match content_color {
+                    Some(value) => Line::from(Span::styled(
+                        content,
+                        Style::default().fg(color(use_color, value)),
+                    )),
+                    None => Line::from(content),
+                }
+            })
             .collect()
     }
 }
@@ -1733,6 +1797,8 @@ fn message_heading(message: &Message, include_output_status: bool) -> String {
         MessageKind::Workflow => "+",
         MessageKind::Notice => "-",
         MessageKind::System => "-",
+        MessageKind::LogOutput => "-",
+        MessageKind::LogError => "!",
         MessageKind::Error => "!",
     };
     let disclosure = if message.is_collapsible() {
@@ -1765,6 +1831,8 @@ fn plain_transcript(messages: &[Message]) -> String {
                 MessageKind::Workflow => "+",
                 MessageKind::Notice => "-",
                 MessageKind::System => "-",
+                MessageKind::LogOutput => "-",
+                MessageKind::LogError => "!",
                 MessageKind::Error => "!",
             };
             let heading = if message.title.is_empty() {
@@ -1794,12 +1862,20 @@ fn color(enabled: bool, value: Color) -> Color {
     if enabled { value } else { Color::Reset }
 }
 
-fn push_log_message(messages: &mut Vec<Message>, content: String) {
-    let preview = content.chars().take(LOG_PREVIEW_CHARS).collect::<String>();
+fn push_log_message(messages: &mut Vec<Message>, log: CapturedLog) {
+    let preview = log
+        .content
+        .chars()
+        .take(LOG_PREVIEW_CHARS)
+        .collect::<String>();
+    let kind = match log.kind {
+        LogKind::Output => MessageKind::LogOutput,
+        LogKind::Error => MessageKind::LogError,
+    };
     messages.push(Message::new(
-        MessageKind::System,
+        kind,
         format!("LOG: {preview}"),
-        content,
+        log.content,
         None,
     ));
 }
@@ -1893,6 +1969,10 @@ fn flush_child_stream_messages(
 
 fn agent_title(agent_name: &str, title: &str) -> String {
     format!("{agent_name}: {title}")
+}
+
+fn user_title(agent_name: &str) -> String {
+    format!("You -> {agent_name}")
 }
 
 fn finalize_assistant_message(messages: &mut Vec<Message>, title: &str, content: String) {
@@ -2071,11 +2151,49 @@ mod tests {
     #[test]
     fn log_message_uses_ten_character_preview_and_full_content() {
         let mut messages = Vec::new();
-        push_log_message(&mut messages, "一二三四五六七八九十十一条日志".to_string());
+        push_log_message(
+            &mut messages,
+            CapturedLog {
+                kind: LogKind::Output,
+                content: "一二三四五六七八九十十一条日志".to_string(),
+            },
+        );
 
         assert_eq!(messages[0].title, "LOG: 一二三四五六七八九十");
         assert_eq!(messages[0].content, "一二三四五六七八九十十一条日志");
         assert!(messages[0].is_collapsible());
+    }
+
+    #[test]
+    fn wd_log_error_ansi_is_detected_before_stripping() {
+        let content = "\u{1b}[7;31m[ERROR wd_log] failed\u{1b}[0m";
+
+        assert_eq!(
+            captured_log_kind(LogStream::Stdout, content),
+            LogKind::Error
+        );
+        assert_eq!(
+            captured_log_kind(LogStream::Stderr, "plain error"),
+            LogKind::Error
+        );
+        assert_eq!(strip_ansi(content), "[ERROR wd_log] failed");
+    }
+
+    #[test]
+    fn captured_log_streams_use_distinct_colors() {
+        let messages = vec![
+            Message::new(MessageKind::LogOutput, "LOG: output", "output", None),
+            Message::new(MessageKind::LogError, "LOG: error", "error", None),
+        ];
+
+        let rendered = transcript_text(&messages, true, 0);
+        let output_content = message_content_lines(&messages[0], true);
+        let error_content = message_content_lines(&messages[1], true);
+
+        assert_eq!(rendered.lines[0].spans[0].style.fg, Some(Color::Gray));
+        assert_eq!(rendered.lines[2].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(output_content[0].spans[0].style.fg, Some(Color::Gray));
+        assert_eq!(error_content[0].spans[0].style.fg, Some(Color::Red));
     }
 
     #[test]
@@ -2362,6 +2480,21 @@ mod tests {
         assert_eq!(
             plain_transcript(&messages),
             "> You\n Question\n\n* Assistant\n First line\n Second line"
+        );
+    }
+
+    #[test]
+    fn user_title_points_to_the_agent() {
+        let message = Message::new(
+            MessageKind::User,
+            user_title("test-agent"),
+            "Question",
+            None,
+        );
+
+        assert_eq!(
+            plain_transcript(&[message]),
+            "> You -> test-agent\n Question"
         );
     }
 
