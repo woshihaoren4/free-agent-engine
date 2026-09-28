@@ -208,7 +208,7 @@ mod tests {
     async fn test_default_tools_expose_specialized_tools_bits_ut() -> anyhow::Result<()> {
         let engine = Engine::default().await;
 
-        for tool_name in [AGENT, WORKFLOW, MEMORY_UPDATE] {
+        for tool_name in [AGENT, WORKFLOW, MEMORY_UPDATE, TODO] {
             let description = engine
                 .rt()
                 .select::<String, Value>(TaskType::Tool, tool_name.to_string())

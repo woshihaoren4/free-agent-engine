@@ -83,7 +83,7 @@ ${FAE_HOST:-~/.fae}/
     "max_tool_iterations": 128
   },
   "prompt_sections": [],
-  "tools": ["read_file", "execute_command", "memory_update"],
+  "tools": ["read_file", "execute_command", "memory_update", "todo"],
   "skills": [
     {
       "type": "name",
@@ -212,7 +212,8 @@ Keep the final summary concise.
   "apply_patch",
   "send_http_request",
   "execute_python",
-  "memory_update"
+  "memory_update",
+  "todo"
 ]
 ```
 
@@ -233,6 +234,18 @@ Keep the final summary concise.
 `user_attribute`、`preference` 或 `other`，`confidence` 可为 `user_stated`、
 `user_confirmed` 或 `system_inferred`。用户明确表达、用户确认和系统推断必须使用对应值，
 不能混用。
+
+`todo` 管理当前 Engine 实例中的临时任务清单，通过 `operation` 执行 `query`、`create`、
+`update` 或 `delete`：
+
+- `query` 不需要其他参数，返回按 ID 升序排列的全部 todo。
+- `create` 需要非空 `content`，新 todo 的 `completed` 默认为 `false`。
+- `update` 需要已有正整数 `id`，并至少提供 `content` 或 `completed` 之一。
+- `delete` 需要已有正整数 `id`，返回被删除的 todo。
+
+todo ID 从 1 开始单调递增。内容会去除首尾空白，空内容会被拒绝。todo 数据不写入
+`FAE_HOST`，重建或退出 Engine 后不会保留；需要跨运行持久化的信息应使用专门的持久化能力，
+不要写入 `memory_update` 充当临时任务列表。
 
 ## 6. Skill
 

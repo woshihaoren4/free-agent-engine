@@ -182,6 +182,7 @@ mod tests {
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>()
         );
+        assert!(config.tools.iter().any(|tool| tool == "todo"));
         assert!(config.sub_agents.is_empty());
         assert!(config.workflows.is_empty());
         assert_eq!(

@@ -48,7 +48,9 @@ The generated configuration has this shape:
     "list_directory",
     "apply_patch",
     "send_http_request",
-    "execute_python"
+    "execute_python",
+    "memory_update",
+    "todo"
   ],
   "skills": [
     {

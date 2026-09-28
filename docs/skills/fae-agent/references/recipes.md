@@ -136,7 +136,29 @@ fae init --agent-id reviewer --model gpt-5 --force
 `--force` 会重新启用全部内置工具、重新收集已安装 Skill，并重置其他 config 字段。prompt 保持
 不变。
 
-## 5. 添加或删除 Skill
+## 5. 创建任务清单 Agent
+
+需要 Agent 在一次运行中跟踪多步任务时，在 config 中启用 `todo`：
+
+```json
+{
+  "tools": ["read_file", "execute_command", "todo"]
+}
+```
+
+在 prompt 中明确任务清单的维护时机：
+
+```text
+Use the todo tool for tasks with multiple concrete steps.
+Create concise todos before execution.
+Mark each todo completed immediately after the step succeeds.
+Query the list before reporting final completion.
+```
+
+`todo` 适合当前 Engine 生命周期内的执行进度，不会写入磁盘。不要用它保存跨运行事项，也不要
+把临时任务进度写入用户长期记忆。
+
+## 6. 添加或删除 Skill
 
 按名称添加：
 
@@ -177,7 +199,7 @@ fae agent --agent-id reviewer "List the skills available to you."
 若按名称加载失败，确认 Skill 位于
 `${FAE_HOST:-~/.fae}/skills/<skill-name>/SKILL.md`。删除 Skill 时同时删除 config 中对应项。
 
-## 6. 添加 MCP
+## 7. 添加 MCP
 
 先在 `${FAE_HOST:-~/.fae}/mcp/` 下准备包含 `mcpServers` 的 MCP 配置，再把 server 名加入
 Agent config：
@@ -196,7 +218,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 
 若启动失败，检查 Agent config 中的名称是否与 MCP 配置的 `mcpServers` key 完全一致。
 
-## 7. 为不同任务隔离会话
+## 8. 为不同任务隔离会话
 
 日常会话：
 
@@ -235,7 +257,7 @@ fae agent --agent-id release-reviewer
 
 不要让用途无关的 Agent 共享 `session_id`。需要无历史上下文时，将 `history_turns` 设为 `0`。
 
-## 8. 使用自定义 FAE Home
+## 9. 使用自定义 FAE Home
 
 创建隔离 Agent：
 
@@ -251,7 +273,7 @@ fae --fae-home /tmp/fae-review agent --agent-id reviewer
 
 `--fae-home` 同时影响 Agent、Skill、MCP 和 session 的加载位置。创建和运行必须使用同一目录。
 
-## 9. 使用显式 Config 和 Prompt
+## 10. 使用显式 Config 和 Prompt
 
 不按 Agent ID 加载时，同时传入两个文件：
 
@@ -264,7 +286,7 @@ fae agent \
 
 适合临时实验或配置文件不在 FAE home 的场景。只传其中一个参数会被拒绝。
 
-## 10. 调整 Prompt
+## 11. 调整 Prompt
 
 当 Agent 能运行但行为不符合预期时，优先调整 prompt：
 
@@ -282,7 +304,7 @@ fae agent --agent-id reviewer "review the current workspace"
 
 不要通过堆叠重复、冲突或空泛的规则修正 prompt。
 
-## 11. 最小验证顺序
+## 12. 最小验证顺序
 
 先验证配置和模型：
 
@@ -310,7 +332,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 
 逐层验证能快速区分 config、模型、Tool、Skill 和 MCP 问题。
 
-## 12. 排错清单
+## 13. 排错清单
 
 ### 找不到 Config 或 Prompt
 

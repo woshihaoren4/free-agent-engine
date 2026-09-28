@@ -1,6 +1,6 @@
 ---
-name: "fae-agent"
-description: "Creates, configures, modifies, runs, and troubleshoots FAE agents. Invoke for agent initialization, config, prompts, models, tools, skills, MCP, or sessions."
+name: fae-agent
+description: Creates, configures, modifies, runs, and troubleshoots FAE agents. Invoke for agent initialization, config, prompts, models, tools, skills, MCP, or sessions.
 ---
 
 # FAE Agent
@@ -12,6 +12,7 @@ description: "Creates, configures, modifies, runs, and troubleshoots FAE agents.
 - 默认使用 `fae init` 创建 Agent，不编写代码。
 - 使用 `<agent-id>_config.json` 管理模型、会话、工具、Skill 和 MCP。
 - 用户长期记忆保存在 `<FAE_HOST>/memory/<user-id>.jsonl`，由 `memory_update` 工具维护。
+- 临时任务清单由 `todo` 工具维护，数据仅在当前 Engine 实例的生命周期内保留。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
 - 运行和验证统一使用 `fae agent`。
 - 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
@@ -84,7 +85,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
     "max_tool_iterations": 128
   },
   "prompt_sections": [],
-  "tools": ["read_file", "memory_update"],
+  "tools": ["read_file", "memory_update", "todo"],
   "skills": [
     {
       "type": "name",
@@ -110,6 +111,7 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 改会话隔离：修改 `agent.user_id` 或 `agent.session_id`。
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 允许 Agent 维护当前用户长期记忆：在 `tools` 中保留 `memory_update`。
+- 允许 Agent 跟踪当前运行中的任务进度：在 `tools` 中保留 `todo`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
