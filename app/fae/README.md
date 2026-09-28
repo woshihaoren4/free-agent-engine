@@ -35,7 +35,7 @@ The generated configuration has this shape:
   "model": {
     "model": "gpt-4o-mini",
     "trigger_compression_size": 32000,
-    "history_turns": 20,
+    "history_turns": 10,
     "max_completion_tokens": 65536,
     "temperature": null,
     "max_tool_iterations": 128
@@ -139,7 +139,8 @@ cargo run -p fae -- agent \
   "review this workspace"
 ```
 
-Available session commands are `/help`, `/status`, `/clear`, and `/exit`.
+Use `/todo <message>` to run that message in single-agent todo mode. Available
+session commands also include `/help`, `/status`, `/clear`, and `/exit`.
 
 Keyboard controls:
 

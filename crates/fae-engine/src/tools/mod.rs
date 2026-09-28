@@ -7,6 +7,8 @@ mod python;
 mod todo;
 mod workflow;
 
+use std::path::PathBuf;
+
 use crate::ToolsRuntime;
 use fae_agent::{Ctx, ToolRequest, ToolResponse, Tools};
 use serde_json::{Value, json};
@@ -63,6 +65,15 @@ pub struct DefaultTools {
     agent: AgentTool,
     memory_update: MemoryUpdateTool,
     todo: TodoTool,
+}
+
+impl DefaultTools {
+    pub fn with_host_dir(host_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            todo: TodoTool::with_host_dir(host_dir),
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait::async_trait]

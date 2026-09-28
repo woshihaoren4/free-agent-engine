@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::{Notify, RwLock};
 use tokio_stream::StreamExt;
 
+use super::single_agent_todo::{SingleAgentMode, SingleAgentTodoPlan};
 use crate::{
     CompositeSingleAgentHook, Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
     Plan, PlanBuilderWithEnv, PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput,
@@ -47,6 +48,7 @@ pub struct SingleAgentModelConfig {
     pub model: String,
     #[serde(default = "default_trigger_compression_size")]
     pub trigger_compression_size: usize,
+    #[serde(default = "default_history_turns")]
     pub history_turns: usize,
     #[serde(default = "default_max_completion_tokens")]
     pub max_completion_tokens: Option<u32>,
@@ -95,6 +97,10 @@ const fn default_trigger_compression_size() -> usize {
     32_000
 }
 
+const fn default_history_turns() -> usize {
+    DEFAULT_HISTORY_TURNS
+}
+
 const fn default_max_completion_tokens() -> Option<u32> {
     Some(32_000)
 }
@@ -104,10 +110,12 @@ const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without ass
 Continue the task from the available context and return either a tool call or a final answer.";
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
+pub const DEFAULT_HISTORY_TURNS: usize = 10;
 pub const DEFAULT_USER_ID: &str = "master";
 const AGENT_TOOL_NAME: &str = "agent";
 const WORKFLOW_TOOL_NAME: &str = "workflow";
 const MEMORY_UPDATE_TOOL_NAME: &str = "memory_update";
+const TODO_TOOL_NAME: &str = "todo";
 
 #[derive(Debug, Clone)]
 pub struct AgentToolInvocation {
@@ -159,6 +167,8 @@ pub struct SingleAgentEnv {
     pub source: SingleAgentSource,
     pub input: String,
     pub user_id: String,
+    /// `None` or an empty string uses the standard flow; `"todo"` enables todo orchestration.
+    pub mode: Option<String>,
     session_id: Option<String>,
     ancestor_agents: Vec<String>,
     session: CommonSession,
@@ -211,6 +221,7 @@ impl SingleAgentEnv {
                 source,
                 input: input.into(),
                 user_id,
+                mode: None,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -228,6 +239,11 @@ impl SingleAgentEnv {
         let user_id = user_id.into();
         self.user_id = user_id.clone();
         self.session.set_user_id(user_id);
+        self
+    }
+
+    pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
+        self.mode = Some(mode.into());
         self
     }
 
@@ -254,6 +270,7 @@ impl SingleAgentEnv {
                 source,
                 input: input.into(),
                 user_id,
+                mode: None,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -275,6 +292,7 @@ impl SingleAgentEnv {
                 source,
                 input: input.into(),
                 user_id,
+                mode: None,
                 session_id: None,
                 ancestor_agents: Vec::new(),
                 session: session.clone(),
@@ -380,7 +398,7 @@ impl CommonSession {
         )
     }
 
-    fn new_in_agent(session: CommonSession, agent_name: impl Into<String>) -> Self {
+    pub(super) fn new_in_agent(session: CommonSession, agent_name: impl Into<String>) -> Self {
         let user_id = session.user_id();
         Self::new_with_parent(
             Some(CommonSessionTarget::Agent {
@@ -490,6 +508,25 @@ impl CommonSession {
         }
     }
 
+    pub async fn set_mode(&self, mode: Option<&str>) -> anyhow::Result<()> {
+        let mode = SingleAgentMode::parse(mode)?;
+        anyhow::ensure!(
+            !self
+                .inner
+                .state
+                .lock()
+                .expect("session state poisoned")
+                .active,
+            "cannot change single-agent mode while a turn is running"
+        );
+        let mut binding = self.inner.binding.write().await;
+        let binding = binding
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("single-agent session is not bound to an engine"))?;
+        binding.mode = mode;
+        Ok(())
+    }
+
     async fn bind(&self, binding: SingleAgentBinding) -> anyhow::Result<u64> {
         let mut current = self.inner.binding.write().await;
         anyhow::ensure!(current.is_none(), "single-agent session is already bound");
@@ -497,7 +534,7 @@ impl CommonSession {
         self.activate_turn()
     }
 
-    fn activate_turn(&self) -> anyhow::Result<u64> {
+    pub(super) fn activate_turn(&self) -> anyhow::Result<u64> {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         anyhow::ensure!(!state.active, "a turn is already running");
         state.active = true;
@@ -520,7 +557,7 @@ impl CommonSession {
         }
     }
 
-    fn finish_turn(&self) {
+    pub(super) fn finish_turn(&self) {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.active = false;
         state.accepting_input = false;
@@ -529,7 +566,7 @@ impl CommonSession {
         self.inner.idle.notify_waiters();
     }
 
-    fn cancel_requested(&self) -> bool {
+    pub(super) fn cancel_requested(&self) -> bool {
         self.inner
             .state
             .lock()
@@ -537,7 +574,7 @@ impl CommonSession {
             .cancel_requested
     }
 
-    fn abort_turn(&self) {
+    pub(super) fn abort_turn(&self) {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.active = false;
         state.accepting_input = false;
@@ -609,12 +646,13 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
         }
 
         let turn_id = self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed);
-        let plan = SingleAgentPlan::new(
+        let plan = build_single_agent_plan(
             binding.ctx.clone(),
             binding.template,
             input.text,
             turn_id,
             self.clone(),
+            binding.mode,
         );
         let task = TaskReq {
             ctx: binding.ctx,
@@ -623,7 +661,7 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
                 ty: TaskType::Plan,
                 ..Default::default()
             },
-            req: Box::new(plan) as Box<dyn Plan>,
+            req: plan,
         };
 
         if let Err(error) = binding.rt.spawn(task).await {
@@ -765,6 +803,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
         anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
         env.session.set_user_id(env.user_id.clone());
+        let mode = SingleAgentMode::parse(env.mode.as_deref())?;
         let (config_path, prompt_path, _) = self.source_paths(&env.source)?;
         let (mut config, base_prompt) = self.load_config(&env.source).await?;
         config.agent.user_id = env.user_id.clone();
@@ -791,6 +830,15 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             .cloned()
             .collect::<Vec<_>>();
         let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &configured_tools).await?;
+        if mode == Some(SingleAgentMode::Todo) {
+            anyhow::ensure!(
+                matches!(
+                    tool_routes.get(TODO_TOOL_NAME),
+                    Some(CallableRoute::Tool(_))
+                ),
+                "single-agent todo mode requires the `todo` tool"
+            );
+        }
         let (mcp_definitions, mcp_routes, mcp_tools) =
             resolve_mcp_tools(&rt, &config.mcp_servers).await?;
         for (name, route) in mcp_routes {
@@ -862,16 +910,18 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             rt: rt.clone(),
             ctx: ctx.clone(),
             template: template.clone(),
+            mode,
         };
         let turn_id = env.session.bind(binding).await?;
 
-        Ok(Box::new(SingleAgentPlan::new(
+        Ok(build_single_agent_plan(
             ctx,
             template,
             env.input,
             turn_id,
             env.session,
-        )))
+            mode,
+        ))
     }
 }
 
@@ -1424,7 +1474,7 @@ fn workflow_tool_definition(workflows: &[ResolvedWorkflow]) -> ChatCompletionToo
 }
 
 #[derive(Debug, Clone)]
-enum CallableRoute {
+pub(super) enum CallableRoute {
     Tool(String),
     Mcp {
         server: String,
@@ -1443,17 +1493,18 @@ struct SingleAgentBinding {
     rt: RT,
     ctx: Ctx,
     template: SingleAgentTemplate,
+    mode: Option<SingleAgentMode>,
 }
 
 #[derive(Debug, Clone)]
-struct SingleAgentTemplate {
-    agent: SingleAgentInfo,
-    prompt: String,
-    model: SingleAgentModelConfig,
-    tool_definitions: Vec<ChatCompletionTools>,
-    tool_routes: HashMap<String, CallableRoute>,
-    ancestor_agents: Vec<String>,
-    hook: Arc<dyn SingleAgentHook>,
+pub(super) struct SingleAgentTemplate {
+    pub(super) agent: SingleAgentInfo,
+    pub(super) prompt: String,
+    pub(super) model: SingleAgentModelConfig,
+    pub(super) tool_definitions: Vec<ChatCompletionTools>,
+    pub(super) tool_routes: HashMap<String, CallableRoute>,
+    pub(super) ancestor_agents: Vec<String>,
+    pub(super) hook: Arc<dyn SingleAgentHook>,
 }
 
 #[derive(Debug, Clone)]
@@ -1490,8 +1541,10 @@ enum SingleAgentStage {
     Save,
 }
 
+type ToolCompletionFormatter = fn(&str) -> anyhow::Result<String>;
+
 #[derive(Debug)]
-struct SingleAgentPlan {
+pub(super) struct SingleAgentPlan {
     id: String,
     ctx: Ctx,
     template: SingleAgentTemplate,
@@ -1501,23 +1554,105 @@ struct SingleAgentPlan {
     stage: SingleAgentStage,
     user_memory: Vec<UserMemory>,
     messages: Vec<ChatCompletionRequestMessage>,
+    additional_history: Vec<SessionMessage>,
     unsaved_messages: Vec<SessionMessage>,
     final_output: String,
     tool_iterations: usize,
     empty_model_retries: usize,
     task_sequence: u64,
     pending_tools: HashMap<String, PendingCall>,
+    persist_session: bool,
+    terminal_output_formatter: Option<ToolCompletionFormatter>,
     owns_active_turn: bool,
     finish_on_drop: bool,
 }
 
+fn build_single_agent_plan(
+    ctx: Ctx,
+    template: SingleAgentTemplate,
+    input: String,
+    turn_id: u64,
+    session: CommonSession,
+    mode: Option<SingleAgentMode>,
+) -> Box<dyn Plan> {
+    match mode {
+        Some(SingleAgentMode::Todo) => Box::new(SingleAgentTodoPlan::new(
+            ctx, template, input, turn_id, session,
+        )),
+        None => Box::new(SingleAgentPlan::new(ctx, template, input, turn_id, session)),
+    }
+}
+
 impl SingleAgentPlan {
-    fn new(
+    pub(super) fn new(
         ctx: Ctx,
         template: SingleAgentTemplate,
         input: String,
         turn_id: u64,
         session: CommonSession,
+    ) -> Self {
+        Self::new_with_persistence(
+            ctx,
+            template,
+            input,
+            turn_id,
+            session,
+            true,
+            Vec::new(),
+            None,
+        )
+    }
+
+    pub(super) fn new_ephemeral(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        turn_id: u64,
+        session: CommonSession,
+        additional_history: Vec<SessionMessage>,
+    ) -> Self {
+        Self::new_with_persistence(
+            ctx,
+            template,
+            input,
+            turn_id,
+            session,
+            false,
+            additional_history,
+            None,
+        )
+    }
+
+    pub(super) fn new_ephemeral_until_tool_completion(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        turn_id: u64,
+        session: CommonSession,
+        additional_history: Vec<SessionMessage>,
+        terminal_output_formatter: ToolCompletionFormatter,
+    ) -> Self {
+        Self::new_with_persistence(
+            ctx,
+            template,
+            input,
+            turn_id,
+            session,
+            false,
+            additional_history,
+            Some(terminal_output_formatter),
+        )
+    }
+
+    fn new_with_persistence(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        turn_id: u64,
+        session: CommonSession,
+        persist_session: bool,
+        additional_history: Vec<SessionMessage>,
+        terminal_output_formatter: Option<ToolCompletionFormatter>,
     ) -> Self {
         let initial_message = SessionMessage::user(input.clone());
         Self {
@@ -1530,12 +1665,15 @@ impl SingleAgentPlan {
             stage: SingleAgentStage::Memory,
             user_memory: Vec::new(),
             messages: Vec::new(),
+            additional_history,
             unsaved_messages: vec![initial_message],
             final_output: String::new(),
             tool_iterations: 0,
             empty_model_retries: 0,
             task_sequence: 0,
             pending_tools: HashMap::new(),
+            persist_session,
+            terminal_output_formatter,
             owns_active_turn: true,
             finish_on_drop: false,
         }
@@ -1760,6 +1898,9 @@ impl SingleAgentPlan {
         for message in &history[start..] {
             self.messages.push(session_message_to_chat(message));
         }
+        for message in &self.additional_history {
+            self.messages.push(session_message_to_chat(message));
+        }
         self.messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
                 content: self.input.clone().into(),
@@ -1864,6 +2005,13 @@ impl SingleAgentPlan {
             Some(FinishReason::Stop | FinishReason::ToolCalls) | None => {}
         }
 
+        if self.terminal_output_formatter.is_some() {
+            anyhow::ensure!(
+                tool_calls.len() == 1,
+                "this agent step must make exactly one tool call"
+            );
+        }
+
         if tool_calls.is_empty() {
             if content.trim().is_empty() {
                 if self.empty_model_retries < MAX_EMPTY_MODEL_RETRIES {
@@ -1900,8 +2048,20 @@ impl SingleAgentPlan {
                 return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
             }
 
-            self.stage = SingleAgentStage::Save;
-            return Ok(PlanNext::Tasks(vec![self.save_task().await?]));
+            if self.persist_session {
+                self.stage = SingleAgentStage::Save;
+                return Ok(PlanNext::Tasks(vec![self.save_task().await?]));
+            }
+
+            self.finish_on_drop = true;
+            self.emit(
+                self.template.agent.name.clone(),
+                SessionEventData::Completed {
+                    content: self.final_output.clone(),
+                },
+            )
+            .await?;
+            return Ok(PlanNext::End);
         }
 
         self.empty_model_retries = 0;
@@ -1945,14 +2105,17 @@ impl SingleAgentPlan {
             .await?;
             let (task, kind) = match route {
                 CallableRoute::Tool(runtime_tool_name) => {
-                    let request = if runtime_tool_name == MEMORY_UPDATE_TOOL_NAME {
-                        ToolRequest::new(runtime_tool_name, arguments).with_invocation(
-                            ToolInvocation::UserMemory {
+                    let request = match runtime_tool_name.as_str() {
+                        MEMORY_UPDATE_TOOL_NAME => ToolRequest::new(runtime_tool_name, arguments)
+                            .with_invocation(ToolInvocation::UserMemory {
                                 user_id: self.session.user_id(),
-                            },
-                        )
-                    } else {
-                        ToolRequest::new(runtime_tool_name, arguments)
+                            }),
+                        TODO_TOOL_NAME => ToolRequest::new(runtime_tool_name, arguments)
+                            .with_invocation(ToolInvocation::Todo {
+                                agent_id: self.template.agent.name.clone(),
+                                user_id: self.session.user_id(),
+                            }),
+                        _ => ToolRequest::new(runtime_tool_name, arguments),
                     };
                     (self.tool_task(request).await?, PendingCallKind::Tool)
                 }
@@ -2096,6 +2259,10 @@ impl SingleAgentPlan {
         pending: PendingCall,
         output: String,
     ) -> anyhow::Result<PlanNext> {
+        let terminal_output = self
+            .terminal_output_formatter
+            .map(|formatter| formatter(&output))
+            .transpose()?;
         self.messages.push(ChatCompletionRequestMessage::Tool(
             ChatCompletionRequestToolMessage {
                 content: ChatCompletionRequestToolMessageContent::Text(output),
@@ -2108,6 +2275,17 @@ impl SingleAgentPlan {
         };
         *remaining -= 1;
         if *remaining == 0 {
+            if let Some(content) = terminal_output {
+                self.terminal_output_formatter = None;
+                self.final_output = content.clone();
+                self.finish_on_drop = true;
+                self.emit(
+                    self.template.agent.name.clone(),
+                    SessionEventData::Completed { content },
+                )
+                .await?;
+                return Ok(PlanNext::End);
+            }
             Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
         } else {
             Ok(PlanNext::Tasks(Vec::new()))
@@ -2454,12 +2632,12 @@ mod tests {
     #[test]
     fn model_config_uses_default_limits() {
         let config: SingleAgentModelConfig = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "history_turns": 10
+            "model": "test-model"
         }))
         .unwrap();
 
         assert_eq!(config.trigger_compression_size, 32_000);
+        assert_eq!(config.history_turns, DEFAULT_HISTORY_TURNS);
         assert_eq!(config.max_completion_tokens, Some(32_000));
         assert_eq!(config.max_tool_iterations, 128);
     }
@@ -3172,6 +3350,58 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
+    async fn todo_tool_receives_current_agent_and_user_ids() -> anyhow::Result<()> {
+        let session = CommonSession::new_with_user_id("alice");
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            TODO_TOOL_NAME.to_string(),
+            CallableRoute::Tool(TODO_TOOL_NAME.to_string()),
+        );
+        let mut plan = SingleAgentPlan::new(ctx, template, "track this".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": null,
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "todo",
+                            "arguments": "{\"operation\":\"query\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))?;
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await?
+        else {
+            panic!("expected todo tool task");
+        };
+
+        let mut request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert!(matches!(
+            request.req.take_invocation(),
+            Some(ToolInvocation::Todo { agent_id, user_id })
+                if agent_id == "test-agent" && user_id == "alice"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn workflow_calls_are_restricted_and_dispatched_through_the_workflow_tool()
     -> anyhow::Result<()> {
         let session = CommonSession::new();
@@ -3426,6 +3656,33 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
+    async fn session_mode_can_change_between_turns() {
+        let session = CommonSession::new();
+        session
+            .bind(SingleAgentBinding {
+                rt: RT::null(),
+                ctx: Ctx::null(),
+                template: test_template(),
+                mode: None,
+            })
+            .await
+            .unwrap();
+        session.finish_turn();
+
+        session.set_mode(Some("todo")).await.unwrap();
+        assert_eq!(
+            session.inner.binding.read().await.as_ref().unwrap().mode,
+            Some(SingleAgentMode::Todo)
+        );
+
+        session.set_mode(None).await.unwrap();
+        assert_eq!(
+            session.inner.binding.read().await.as_ref().unwrap().mode,
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn new_chat_cancels_the_active_plan_before_starting_another() {
         let session = CommonSession::new();
         let ctx = Ctx::null();
@@ -3435,6 +3692,7 @@ user-defined rules, and other long-term facts."
                 rt: RT::null(),
                 ctx: ctx.clone(),
                 template: template.clone(),
+                mode: None,
             })
             .await
             .unwrap();
@@ -3544,7 +3802,17 @@ user-defined rules, and other long-term facts."
             SingleAgentEnv::from_agent_id_with_user_id("reviewer", "hello", "alice");
 
         assert_eq!(env.user_id, "alice");
+        assert_eq!(env.mode, None);
         assert_eq!(session.user_id(), "alice");
+    }
+
+    #[test]
+    fn single_agent_env_accepts_todo_mode() {
+        let (env, session) = SingleAgentEnv::from_agent_id("reviewer", "hello");
+        let env = env.with_mode("todo");
+
+        assert_eq!(env.mode.as_deref(), Some("todo"));
+        assert_eq!(env.session().user_id(), session.user_id());
     }
 
     #[test]
@@ -3572,6 +3840,7 @@ user-defined rules, and other long-term facts."
                 rt: RT::null(),
                 ctx: ctx.clone(),
                 template: template.clone(),
+                mode: None,
             })
             .await
             .unwrap();
@@ -3639,6 +3908,7 @@ user-defined rules, and other long-term facts."
                 rt: RT::null(),
                 ctx: ctx.clone(),
                 template: template.clone(),
+                mode: None,
             })
             .await
             .unwrap();
@@ -3684,6 +3954,7 @@ user-defined rules, and other long-term facts."
                 rt: RT::null(),
                 ctx: ctx.clone(),
                 template: template.clone(),
+                mode: None,
             })
             .await
             .unwrap();

@@ -12,7 +12,8 @@ description: Creates, configures, modifies, runs, and troubleshoots FAE agents. 
 - 默认使用 `fae init` 创建 Agent，不编写代码。
 - 使用 `<agent-id>_config.json` 管理模型、会话、工具、Skill 和 MCP。
 - 用户长期记忆保存在 `<FAE_HOST>/memory/<user-id>.jsonl`，由 `memory_update` 工具维护。
-- 临时任务清单由 `todo` 工具维护，数据仅在当前 Engine 实例的生命周期内保留。
+- 任务清单由 `todo` 工具维护，并保存在
+  `<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
 - 运行和验证统一使用 `fae agent`。
 - 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
@@ -79,7 +80,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
   "model": {
     "model": "gpt-5",
     "trigger_compression_size": 32000,
-    "history_turns": 20,
+    "history_turns": 10,
     "max_completion_tokens": 65536,
     "temperature": 0.2,
     "max_tool_iterations": 128

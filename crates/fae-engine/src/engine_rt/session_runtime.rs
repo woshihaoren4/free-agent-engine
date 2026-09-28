@@ -365,7 +365,7 @@ fn home_dir() -> Option<PathBuf> {
         })
 }
 
-fn validate_path_segment(name: &str, segment: &str) -> fae_agent::Result<()> {
+pub(crate) fn validate_path_segment(name: &str, segment: &str) -> fae_agent::Result<()> {
     if segment.is_empty() {
         return Err(anyhow::anyhow!("{name} must not be empty").into());
     }

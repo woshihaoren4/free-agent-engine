@@ -77,7 +77,7 @@ ${FAE_HOST:-~/.fae}/
   "model": {
     "model": "gpt-5",
     "trigger_compression_size": 32000,
-    "history_turns": 20,
+    "history_turns": 10,
     "max_completion_tokens": 65536,
     "temperature": 0.2,
     "max_tool_iterations": 128
@@ -235,17 +235,22 @@ Keep the final summary concise.
 `user_confirmed` 或 `system_inferred`。用户明确表达、用户确认和系统推断必须使用对应值，
 不能混用。
 
-`todo` 管理当前 Engine 实例中的临时任务清单，通过 `operation` 执行 `query`、`create`、
+`todo` 管理当前 Agent 和用户的任务清单，通过 `operation` 执行 `query`、`create`、
 `update` 或 `delete`：
 
 - `query` 不需要其他参数，返回按 ID 升序排列的全部 todo。
-- `create` 需要非空 `content`，新 todo 的 `completed` 默认为 `false`。
+- `create` 需要非空 `contents` 数组，按数组顺序一次性创建多个 todo；新 todo 的
+  `completed` 默认为 `false`。
 - `update` 需要已有正整数 `id`，并至少提供 `content` 或 `completed` 之一。
 - `delete` 需要已有正整数 `id`，返回被删除的 todo。
 
-todo ID 从 1 开始单调递增。内容会去除首尾空白，空内容会被拒绝。todo 数据不写入
-`FAE_HOST`，重建或退出 Engine 后不会保留；需要跨运行持久化的信息应使用专门的持久化能力，
-不要写入 `memory_update` 充当临时任务列表。
+todo ID 从 1 开始单调递增。内容会去除首尾空白，空数组或包含空内容的数组会被拒绝。
+数据保存在
+`<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。
+
+`SingleAgentEnv.mode` 为空时使用普通 single-agent 流程；设为 `"todo"` 时启用 todo 模式。
+该模式要求 Agent 配置挂载 `todo` 工具，会先生成计划，再按 ID 顺序逐项执行并更新完成状态，
+最后生成总结回复。
 
 ## 6. Skill
 
@@ -377,6 +382,7 @@ fae --color never agent --agent-id reviewer
 | --- | --- |
 | `/help` | 显示命令 |
 | `/status` | 显示模型和 session |
+| `/todo <message>` | 使用 single-agent todo mode 规划并执行该条消息 |
 | `/clear` | 清空当前界面内容 |
 | `/exit`、`/quit` | 退出 |
 

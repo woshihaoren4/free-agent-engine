@@ -47,6 +47,7 @@ mod tests {
     use std::time::Duration;
 
     async fn engine_with_workflow(loader: FAEWorkflowMetadataLoader) -> Engine {
+        let home_dir = loader.home_dir().to_path_buf();
         let mut builder = EngineBuilder::new();
         builder.add_runtime(PlanRuntime::new());
         builder.add_runtime(WorkflowRuntime::with_metadata_loader(loader.clone()));
@@ -58,7 +59,7 @@ mod tests {
         builder.add_runtime(McpRuntime::new());
 
         let mut tools_runtime = ToolsRuntime::new();
-        tools_runtime.add_tool(Box::new(DefaultTools::default()));
+        tools_runtime.add_tool(Box::new(DefaultTools::with_host_dir(home_dir)));
         builder.add_runtime(tools_runtime);
 
         builder.add_plan_builder(fae_agent::SingleAgentPlanBuilder::new());
@@ -228,7 +229,7 @@ mod tests {
         let mut builder = EngineBuilder::new();
         builder.add_runtime(UserMemoryRuntime::with_host_dir(&host));
         let mut tools = ToolsRuntime::new();
-        tools.add_tool(Box::new(DefaultTools::default()));
+        tools.add_tool(Box::new(DefaultTools::with_host_dir(&host)));
         builder.add_runtime(tools);
         let engine = builder.build().await;
 

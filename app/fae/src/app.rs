@@ -11,7 +11,7 @@ use fae_agent::{
 };
 use fae_engine::{
     CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
-    SessionRuntime, SkillRuntime, ToolsRuntime, UserMemoryRuntime, WorkflowRuntime,
+    SessionRuntime, SkillRuntime, TodoTool, ToolsRuntime, UserMemoryRuntime, WorkflowRuntime,
     default_fae_host,
 };
 use serde_json::Value;
@@ -31,13 +31,19 @@ Usage: /session <command>
 Commands:
   new      start a new session
   id=<id>  switch sessions
-  clean    clear current session history";
+  clean    clear current session history and todos";
 
 #[derive(Debug, PartialEq, Eq)]
 enum AgentPromptAction {
-    Submit(String),
+    Submit(AgentPrompt),
     RestartSession,
     Exit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AgentPrompt {
+    input: String,
+    mode: Option<&'static str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -139,8 +145,13 @@ async fn run_agent(
     let engine = build_engine(loader, agent_builder).await;
 
     if !args.prompt.is_empty() {
-        let input = args.prompt.join(" ");
-        let (env, session) = SingleAgentEnv::new_with_user_id(source, input, user_id);
+        let prompt = parse_agent_prompt(args.prompt.join(" "))
+            .map_err(|message| anyhow::anyhow!(message))?;
+        let (env, session) = SingleAgentEnv::new_with_user_id(source, prompt.input, user_id);
+        let env = match prompt.mode {
+            Some(mode) => env.with_mode(mode),
+            None => env,
+        };
         let execution = engine.launch(env.with_session_id(session_id)).await?;
         let result = stream_agent_output(&session).await;
         let execution_result = execution.result::<()>().await;
@@ -172,14 +183,18 @@ async fn run_agent(
                 )
                 .await?
                 {
-                    AgentPromptAction::Submit(input) => break input,
+                    AgentPromptAction::Submit(prompt) => break prompt,
                     AgentPromptAction::RestartSession => continue,
                     AgentPromptAction::Exit => return Ok(()),
                 }
             };
 
             let (env, session) =
-                SingleAgentEnv::new_with_user_id(source.clone(), input, user_id.clone());
+                SingleAgentEnv::new_with_user_id(source.clone(), input.input, user_id.clone());
+            let env = match input.mode {
+                Some(mode) => env.with_mode(mode),
+                None => env,
+            };
             let execution = match engine.launch(env.with_session_id(session_id.clone())).await {
                 Ok(execution) => execution,
                 Err(error) => {
@@ -221,12 +236,16 @@ async fn run_agent(
                 )
                 .await?
                 {
-                    AgentPromptAction::Submit(input) => input,
+                    AgentPromptAction::Submit(prompt) => prompt,
                     AgentPromptAction::RestartSession => continue 'sessions,
                     AgentPromptAction::Exit => return Ok(()),
                 };
+                if let Err(error) = session.set_mode(input.mode).await {
+                    ui.push_error(format!("{error:#}"));
+                    continue;
+                }
                 if let Err(error) = session
-                    .call(fae_agent::SessionInput::NewChat(input.into()))
+                    .call(fae_agent::SessionInput::NewChat(input.input.into()))
                     .await
                 {
                     ui.push_error(format!("{error:#}"));
@@ -264,27 +283,58 @@ async fn stream_agent_output(
 ) -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    let mut wrote_output = false;
+    let mut output = AgentOutputStream::default();
 
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
-        if event.parament_plan_id.is_none()
-            && let SessionEventData::ModelOutput { content } = event.event_data()?
-        {
-            stdout.write_all(content.as_bytes())?;
-            stdout.flush()?;
-            wrote_output = true;
-        }
+        output.write_event(&mut stdout, &event)?;
         if terminal {
             break;
         }
     }
 
-    if wrote_output {
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
+    output.finish(&mut stdout)
+}
+
+#[derive(Debug, Default)]
+struct AgentOutputStream {
+    line_open: bool,
+    nested_output_active: bool,
+}
+
+impl AgentOutputStream {
+    fn write_event(
+        &mut self,
+        writer: &mut impl Write,
+        event: &fae_agent::SessionOutput,
+    ) -> anyhow::Result<()> {
+        let nested = event.parament_plan_id.is_some();
+        match event.event_data()? {
+            SessionEventData::ModelOutput { content } => {
+                writer.write_all(content.as_bytes())?;
+                writer.flush()?;
+                self.line_open = true;
+                self.nested_output_active |= nested;
+            }
+            SessionEventData::Completed { .. } if nested && self.nested_output_active => {
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                self.line_open = false;
+                self.nested_output_active = false;
+            }
+            _ => {}
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn finish(&mut self, writer: &mut impl Write) -> anyhow::Result<()> {
+        if self.line_open {
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+            self.line_open = false;
+        }
+        Ok(())
+    }
 }
 
 async fn run_workflow(
@@ -365,7 +415,7 @@ async fn next_agent_input(
             "/exit" | "/quit" => return Ok(AgentPromptAction::Exit),
             "/help" => {
                 ui.push_system(
-                    "/help  show commands\n/status  show model and session\n/session new  start a new session\n/session id=<id>  switch sessions\n/session clean, /clean  clear current session history\n/clear  clear the transcript\n/steer <message>  supplement a running agent\n/exit  leave the session",
+                    "/help  show commands\n/status  show model and session\n/todo <message>  plan and execute with todos\n/session new  start a new session\n/session id=<id>  switch sessions\n/session clean, /clean  clear current session history and todos\n/clear  clear the transcript\n/steer <message>  supplement a running agent\n/exit  leave the session",
                 );
             }
             "/status" => {
@@ -373,13 +423,27 @@ async fn next_agent_input(
             }
             "/clear" => ui.clear_transcript(),
             command => {
+                if command.starts_with("/todo ") {
+                    match parse_agent_prompt(input.clone()) {
+                        Ok(prompt) => {
+                            ui.push_user(&input);
+                            return Ok(AgentPromptAction::Submit(prompt));
+                        }
+                        Err(message) => {
+                            ui.push_system(message);
+                            continue;
+                        }
+                    }
+                }
                 let Some(command) = parse_session_command(command) else {
                     if command.starts_with('/') {
                         ui.push_system(format!("Unknown command `{command}`. Use /help."));
                         continue;
                     }
                     ui.push_user(&input);
-                    return Ok(AgentPromptAction::Submit(input));
+                    return Ok(AgentPromptAction::Submit(
+                        parse_agent_prompt(input).expect("regular input is always valid"),
+                    ));
                 };
                 match command {
                     Ok(SessionCommand::Help) => ui.push_system(SESSION_HELP),
@@ -398,10 +462,8 @@ async fn next_agent_input(
                         return Ok(AgentPromptAction::RestartSession);
                     }
                     Ok(SessionCommand::Clean) => {
-                        session_runtime
-                            .delete(agent_id, user_id, session_id)
-                            .await?;
-                        reset_session_ui(ui, session_id, "Cleaned session history");
+                        clean_session_data(session_runtime, agent_id, user_id, session_id).await?;
+                        reset_session_ui(ui, session_id, "Cleaned session history and todos");
                         return Ok(AgentPromptAction::RestartSession);
                     }
                     Err(message) => ui.push_system(message),
@@ -409,6 +471,35 @@ async fn next_agent_input(
             }
         }
     }
+}
+
+async fn clean_session_data(
+    session_runtime: &SessionRuntime,
+    agent_id: &str,
+    user_id: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    session_runtime
+        .delete(agent_id, user_id, session_id)
+        .await?;
+    TodoTool::with_host_dir(session_runtime.host_dir())
+        .delete_state(agent_id, user_id)
+        .await?;
+    Ok(())
+}
+
+fn parse_agent_prompt(input: String) -> Result<AgentPrompt, String> {
+    let Some(requirement) = input.strip_prefix("/todo ") else {
+        return Ok(AgentPrompt { input, mode: None });
+    };
+    let requirement = requirement.trim();
+    if requirement.is_empty() {
+        return Err("Todo requirement cannot be empty.\nUse `/todo <message>`.".to_string());
+    }
+    Ok(AgentPrompt {
+        input: requirement.to_string(),
+        mode: Some("todo"),
+    })
 }
 
 fn parse_session_command(input: &str) -> Option<Result<SessionCommand, String>> {
@@ -498,7 +589,7 @@ async fn build_engine(
     builder.add_runtime(PythonActionRuntime::default());
 
     let mut tools = ToolsRuntime::new();
-    tools.add_tool(Box::new(DefaultTools::default()));
+    tools.add_tool(Box::new(DefaultTools::with_host_dir(&home_dir)));
     builder.add_runtime(tools);
 
     builder.add_plan_builder(agent_builder);
@@ -630,6 +721,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_todo_prompt_into_todo_mode() {
+        assert_eq!(
+            parse_agent_prompt("/todo   implement retries  ".to_string()),
+            Ok(AgentPrompt {
+                input: "implement retries".to_string(),
+                mode: Some("todo"),
+            })
+        );
+        assert_eq!(
+            parse_agent_prompt("explain retries".to_string()),
+            Ok(AgentPrompt {
+                input: "explain retries".to_string(),
+                mode: None,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_empty_todo_prompt() {
+        assert!(parse_agent_prompt("/todo   ".to_string()).is_err());
+    }
+
+    #[test]
+    fn command_output_includes_nested_and_top_level_agent_messages() {
+        let nested_output: fae_agent::SessionOutput = fae_agent::SessionEvent::nested_agent(
+            "coordinator",
+            "worker",
+            1,
+            "model",
+            SessionEventData::ModelOutput {
+                content: "planned".to_string(),
+            },
+        )
+        .into();
+        let nested_completed: fae_agent::SessionOutput = fae_agent::SessionEvent::nested_agent(
+            "coordinator",
+            "worker",
+            1,
+            "worker",
+            SessionEventData::Completed {
+                content: "planned".to_string(),
+            },
+        )
+        .into();
+        let final_output: fae_agent::SessionOutput = fae_agent::SessionEvent::single_agent_for(
+            "coordinator",
+            1,
+            "model",
+            SessionEventData::ModelOutput {
+                content: "finished".to_string(),
+            },
+        )
+        .into();
+        let mut writer = Vec::new();
+        let mut output = AgentOutputStream::default();
+
+        output.write_event(&mut writer, &nested_output).unwrap();
+        output.write_event(&mut writer, &nested_completed).unwrap();
+        output.write_event(&mut writer, &final_output).unwrap();
+        output.finish(&mut writer).unwrap();
+
+        assert_eq!(String::from_utf8(writer).unwrap(), "planned\nfinished\n");
+    }
+
+    #[test]
     fn parses_session_commands() {
         assert_eq!(
             parse_session_command("/session new"),
@@ -671,6 +827,56 @@ mod tests {
             );
         }
         assert_eq!(parse_session_command("/sessions"), None);
+    }
+
+    #[tokio::test]
+    async fn clean_session_data_removes_history_and_todos() {
+        let host = std::env::temp_dir().join(format!(
+            "fae-clean-session-{}-{}",
+            std::process::id(),
+            wd_tools::uuid::v4()
+        ));
+        let runtime = SessionRuntime::with_host_dir(&host);
+        runtime
+            .add(
+                "agent-1",
+                "user-1",
+                "session-1",
+                &[fae_agent::SessionMessage::user("history")],
+            )
+            .await
+            .unwrap();
+        runtime
+            .add(
+                "agent-1",
+                "user-1",
+                "session-2",
+                &[fae_agent::SessionMessage::user("other history")],
+            )
+            .await
+            .unwrap();
+        let session_path = runtime
+            .session_path("agent-1", "user-1", "session-1")
+            .unwrap();
+        let other_session_path = runtime
+            .session_path("agent-1", "user-1", "session-2")
+            .unwrap();
+        let todo_path = session_path.parent().unwrap().join("todo.json");
+        tokio::fs::write(&todo_path, r#"{"next_id":2,"todos":{}}"#)
+            .await
+            .unwrap();
+
+        clean_session_data(&runtime, "agent-1", "user-1", "session-1")
+            .await
+            .unwrap();
+
+        assert!(!session_path.exists());
+        assert!(!todo_path.exists());
+        assert!(other_session_path.exists());
+        clean_session_data(&runtime, "agent-1", "user-1", "session-1")
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(host).await.unwrap();
     }
 
     #[tokio::test]

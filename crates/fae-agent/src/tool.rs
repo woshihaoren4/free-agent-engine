@@ -10,6 +10,7 @@ pub enum ToolInvocation {
     Agent(AgentToolInvocation),
     Workflow { user_id: String },
     UserMemory { user_id: String },
+    Todo { agent_id: String, user_id: String },
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

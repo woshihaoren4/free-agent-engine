@@ -150,13 +150,14 @@ fae init --agent-id reviewer --model gpt-5 --force
 
 ```text
 Use the todo tool for tasks with multiple concrete steps.
-Create concise todos before execution.
+Create all concise todos in one batch before execution.
 Mark each todo completed immediately after the step succeeds.
 Query the list before reporting final completion.
 ```
 
-`todo` 适合当前 Engine 生命周期内的执行进度，不会写入磁盘。不要用它保存跨运行事项，也不要
-把临时任务进度写入用户长期记忆。
+`todo` 数据保存在 `<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。通过
+`SingleAgentEnv::with_mode("todo")` 可以启用自动 todo 模式：先规划，再逐项执行，最后总结。
+todo 模式要求 Agent 配置的 `tools` 包含 `todo`。
 
 ## 6. 添加或删除 Skill
 
