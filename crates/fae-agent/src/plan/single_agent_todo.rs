@@ -704,11 +704,24 @@ mod tests {
         .into_response()
     }
 
-    fn model_tool_response(
+    fn model_parallel_tool_response(
         ctx: &Ctx,
-        tool_name: &str,
-        arguments: serde_json::Value,
+        calls: &[(&str, serde_json::Value)],
     ) -> TaskResponse {
+        let tool_calls = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (tool_name, arguments))| {
+                serde_json::json!({
+                    "id": format!("call-{}", index + 1),
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments.to_string()
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
         let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
             "id": "response-1",
             "choices": [{
@@ -716,14 +729,7 @@ mod tests {
                 "message": {
                     "content": null,
                     "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": arguments.to_string()
-                        }
-                    }]
+                    "tool_calls": tool_calls
                 },
                 "finish_reason": "tool_calls"
             }],
@@ -900,6 +906,8 @@ mod tests {
                 .1
                 .contains("create a complete execution plan")
         );
+        assert!(planning.tool_choice.is_none());
+        assert!(planning.parallel_tool_calls.is_none());
         let planning_tools = planning.tools.unwrap();
         assert_eq!(planning_tools.len(), 2);
         assert!(planning_tools.iter().any(|definition| matches!(
@@ -912,49 +920,78 @@ mod tests {
         )));
 
         let PlanNext::Tasks(mut tasks) = plan
-            .next(model_tool_response(
+            .next(model_parallel_tool_response(
                 &ctx,
-                "read_file",
-                serde_json::json!({ "path": "README.md" }),
+                &[
+                    ("read_file", serde_json::json!({ "path": "README.md" })),
+                    ("read_file", serde_json::json!({ "path": "Cargo.toml" })),
+                ],
             ))
             .await
             .unwrap()
         else {
-            panic!("expected read_file call");
+            panic!("expected read_file calls");
         };
-        let read = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
-        assert_eq!(read.req.get_tool_name(), "read_file");
+        assert_eq!(tasks.len(), 2);
+        let read_first = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let read_second = TaskReq::<ToolRequest>::try_from_request(&mut tasks[1]).unwrap();
+        assert_eq!(read_first.req.get_tool_name(), "read_file");
+        assert_eq!(read_second.req.get_tool_name(), "read_file");
 
-        let PlanNext::Tasks(_) = plan
+        let PlanNext::Tasks(tasks) = plan
             .next(
                 TaskResp {
                     ctx: ctx.clone(),
-                    meta: read.meta,
-                    resp: ToolResponse::with_result("project context".to_string()),
+                    meta: read_first.meta,
+                    resp: ToolResponse::with_result("README context".to_string()),
                 }
                 .into_response(),
             )
             .await
             .unwrap()
         else {
-            panic!("expected planning model after read_file");
+            panic!("expected pending read_file call");
+        };
+        assert!(tasks.is_empty());
+
+        let PlanNext::Tasks(_) = plan
+            .next(
+                TaskResp {
+                    ctx: ctx.clone(),
+                    meta: read_second.meta,
+                    resp: ToolResponse::with_result("Cargo context".to_string()),
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected planning model after read_file calls");
         };
 
         let PlanNext::Tasks(mut tasks) = plan
-            .next(model_tool_response(
+            .next(model_parallel_tool_response(
                 &ctx,
-                TODO_TOOL_NAME,
-                serde_json::json!({
-                    "operation": "create",
-                    "contents": ["implement", "verify"]
-                }),
+                &[
+                    ("read_file", serde_json::json!({ "path": "src/lib.rs" })),
+                    (
+                        TODO_TOOL_NAME,
+                        serde_json::json!({
+                            "operation": "create",
+                            "contents": ["implement", "verify"]
+                        }),
+                    ),
+                ],
             ))
             .await
             .unwrap()
         else {
-            panic!("expected todo create");
+            panic!("expected final planning tool calls");
         };
-        let create = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert_eq!(tasks.len(), 2);
+        let final_read = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let create = TaskReq::<ToolRequest>::try_from_request(&mut tasks[1]).unwrap();
+        assert_eq!(final_read.req.get_tool_name(), "read_file");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(create.req.get_arguments()).unwrap(),
             serde_json::json!({
@@ -963,7 +1000,7 @@ mod tests {
             })
         );
 
-        let PlanNext::Tasks(mut tasks) = plan
+        let PlanNext::Tasks(tasks) = plan
             .next(
                 TaskResp {
                     ctx: ctx.clone(),
@@ -972,6 +1009,22 @@ mod tests {
                         r#"{"todos":[{"id":1,"content":"implement","completed":false},{"id":2,"content":"verify","completed":false}]}"#
                             .to_string(),
                     ),
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected pending final read_file call");
+        };
+        assert!(tasks.is_empty());
+
+        let PlanNext::Tasks(mut tasks) = plan
+            .next(
+                TaskResp {
+                    ctx: ctx.clone(),
+                    meta: final_read.meta,
+                    resp: ToolResponse::with_result("final context".to_string()),
                 }
                 .into_response(),
             )

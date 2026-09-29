@@ -1569,6 +1569,7 @@ pub(super) struct SingleAgentPlan {
     pending_tools: HashMap<String, PendingCall>,
     persist_session: bool,
     terminal_tool_completion: Option<TerminalToolCompletion>,
+    pending_terminal_output: Option<String>,
     owns_active_turn: bool,
     finish_on_drop: bool,
 }
@@ -1684,6 +1685,7 @@ impl SingleAgentPlan {
             pending_tools: HashMap::new(),
             persist_session,
             terminal_tool_completion,
+            pending_terminal_output: None,
             owns_active_turn: true,
             finish_on_drop: false,
         }
@@ -2009,17 +2011,8 @@ impl SingleAgentPlan {
             Some(FinishReason::FunctionCall) => {
                 anyhow::bail!("legacy model function calls are not supported")
             }
-            Some(FinishReason::ToolCalls) if tool_calls.is_empty() => {
-                anyhow::bail!("model stopped for tool calls but returned no tool calls")
-            }
+            Some(FinishReason::ToolCalls) if tool_calls.is_empty() => {}
             Some(FinishReason::Stop | FinishReason::ToolCalls) | None => {}
-        }
-
-        if self.terminal_tool_completion.is_some() {
-            anyhow::ensure!(
-                tool_calls.len() == 1,
-                "this agent step must make exactly one tool call"
-            );
         }
 
         if tool_calls.is_empty() {
@@ -2282,26 +2275,36 @@ impl SingleAgentPlan {
             },
         ));
 
-        let SingleAgentStage::Tools { remaining } = &mut self.stage else {
-            anyhow::bail!("received tool response outside tool stage");
+        let all_tools_completed = {
+            let SingleAgentStage::Tools { remaining } = &mut self.stage else {
+                anyhow::bail!("received tool response outside tool stage");
+            };
+            *remaining -= 1;
+            *remaining == 0
         };
-        *remaining -= 1;
-        if *remaining == 0 {
-            if let Some(content) = terminal_output {
-                self.terminal_tool_completion = None;
-                self.final_output = content.clone();
-                self.finish_on_drop = true;
-                self.emit(
-                    self.template.agent.name.clone(),
-                    SessionEventData::Completed { content },
-                )
-                .await?;
-                return Ok(PlanNext::End);
-            }
-            Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
-        } else {
-            Ok(PlanNext::Tasks(Vec::new()))
+        if let Some(content) = terminal_output {
+            anyhow::ensure!(
+                self.pending_terminal_output.is_none(),
+                "terminal tool was called more than once in one agent step"
+            );
+            self.pending_terminal_output = Some(content);
         }
+        if !all_tools_completed {
+            return Ok(PlanNext::Tasks(Vec::new()));
+        }
+
+        if let Some(content) = self.pending_terminal_output.take() {
+            self.terminal_tool_completion = None;
+            self.final_output = content.clone();
+            self.finish_on_drop = true;
+            self.emit(
+                self.template.agent.name.clone(),
+                SessionEventData::Completed { content },
+            )
+            .await?;
+            return Ok(PlanNext::End);
+        }
+        Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
     }
 }
 
@@ -4196,7 +4199,7 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
-    async fn empty_model_response_retries_once_before_failing() {
+    async fn malformed_tool_stop_retries_once_before_failing_on_another_empty_response() {
         let session = CommonSession::new();
         session.activate_turn().unwrap();
         let mut plan = SingleAgentPlan::new(
@@ -4206,22 +4209,37 @@ user-defined rules, and other long-term facts."
             1,
             session,
         );
-        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
-            "id": "response-1",
-            "choices": [{
-                "index": 0,
-                "message": {"content": null, "role": "assistant"},
-                "finish_reason": "stop"
-            }],
-            "created": 0,
-            "model": "test-model",
-            "object": "chat.completion",
-            "usage": null
-        }))
-        .unwrap();
+        let malformed_tool_response: CreateChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "response-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {"content": null, "role": "assistant"},
+                    "finish_reason": "tool_calls"
+                }],
+                "created": 0,
+                "model": "test-model",
+                "object": "chat.completion",
+                "usage": null
+            }))
+            .unwrap();
+        let empty_response: CreateChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "response-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {"content": null, "role": "assistant"},
+                    "finish_reason": "stop"
+                }],
+                "created": 0,
+                "model": "test-model",
+                "object": "chat.completion",
+                "usage": null
+            }))
+            .unwrap();
 
         let PlanNext::Tasks(mut tasks) = plan
-            .handle_model_response(ModelResponse::Completed(response.clone()))
+            .handle_model_response(ModelResponse::Completed(malformed_tool_response))
             .await
             .unwrap()
         else {
@@ -4241,7 +4259,7 @@ user-defined rules, and other long-term facts."
         );
 
         let error = plan
-            .handle_model_response(ModelResponse::Completed(response))
+            .handle_model_response(ModelResponse::Completed(empty_response))
             .await
             .unwrap_err();
         assert!(
