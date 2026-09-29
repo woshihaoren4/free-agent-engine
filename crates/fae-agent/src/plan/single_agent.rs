@@ -1544,6 +1544,12 @@ enum SingleAgentStage {
 type ToolCompletionFormatter = fn(&str) -> anyhow::Result<String>;
 
 #[derive(Debug)]
+struct TerminalToolCompletion {
+    tool_name: String,
+    output_formatter: ToolCompletionFormatter,
+}
+
+#[derive(Debug)]
 pub(super) struct SingleAgentPlan {
     id: String,
     ctx: Ctx,
@@ -1562,7 +1568,7 @@ pub(super) struct SingleAgentPlan {
     task_sequence: u64,
     pending_tools: HashMap<String, PendingCall>,
     persist_session: bool,
-    terminal_output_formatter: Option<ToolCompletionFormatter>,
+    terminal_tool_completion: Option<TerminalToolCompletion>,
     owns_active_turn: bool,
     finish_on_drop: bool,
 }
@@ -1630,7 +1636,8 @@ impl SingleAgentPlan {
         turn_id: u64,
         session: CommonSession,
         additional_history: Vec<SessionMessage>,
-        terminal_output_formatter: ToolCompletionFormatter,
+        tool_name: impl Into<String>,
+        output_formatter: ToolCompletionFormatter,
     ) -> Self {
         Self::new_with_persistence(
             ctx,
@@ -1640,7 +1647,10 @@ impl SingleAgentPlan {
             session,
             false,
             additional_history,
-            Some(terminal_output_formatter),
+            Some(TerminalToolCompletion {
+                tool_name: tool_name.into(),
+                output_formatter,
+            }),
         )
     }
 
@@ -1652,7 +1662,7 @@ impl SingleAgentPlan {
         session: CommonSession,
         persist_session: bool,
         additional_history: Vec<SessionMessage>,
-        terminal_output_formatter: Option<ToolCompletionFormatter>,
+        terminal_tool_completion: Option<TerminalToolCompletion>,
     ) -> Self {
         let initial_message = SessionMessage::user(input.clone());
         Self {
@@ -1673,7 +1683,7 @@ impl SingleAgentPlan {
             task_sequence: 0,
             pending_tools: HashMap::new(),
             persist_session,
-            terminal_output_formatter,
+            terminal_tool_completion,
             owns_active_turn: true,
             finish_on_drop: false,
         }
@@ -2005,7 +2015,7 @@ impl SingleAgentPlan {
             Some(FinishReason::Stop | FinishReason::ToolCalls) | None => {}
         }
 
-        if self.terminal_output_formatter.is_some() {
+        if self.terminal_tool_completion.is_some() {
             anyhow::ensure!(
                 tool_calls.len() == 1,
                 "this agent step must make exactly one tool call"
@@ -2260,8 +2270,10 @@ impl SingleAgentPlan {
         output: String,
     ) -> anyhow::Result<PlanNext> {
         let terminal_output = self
-            .terminal_output_formatter
-            .map(|formatter| formatter(&output))
+            .terminal_tool_completion
+            .as_ref()
+            .filter(|terminal| terminal.tool_name == pending.tool_name)
+            .map(|terminal| (terminal.output_formatter)(&output))
             .transpose()?;
         self.messages.push(ChatCompletionRequestMessage::Tool(
             ChatCompletionRequestToolMessage {
@@ -2276,7 +2288,7 @@ impl SingleAgentPlan {
         *remaining -= 1;
         if *remaining == 0 {
             if let Some(content) = terminal_output {
-                self.terminal_output_formatter = None;
+                self.terminal_tool_completion = None;
                 self.final_output = content.clone();
                 self.finish_on_drop = true;
                 self.emit(

@@ -87,9 +87,9 @@ impl SingleAgentTodo {
         format!(
             "User requirement: {}\n\n\
              You must first think through the requirement and use the todo tool to create a \
-             complete execution plan in one call. Do not execute any part of the requirement yet. \
-             During this planning step, you may only create todos. Finish immediately after the \
-             plan is created.",
+             complete execution plan in one call. You may use other available tools to gather \
+             context before creating the plan, but do not execute any part of the requirement yet. \
+             Finish immediately after the plan is created.",
             self.requirement
         )
     }
@@ -287,11 +287,8 @@ impl SingleAgentTodoPlan {
                 template.tool_definitions = template
                     .tool_definitions
                     .into_iter()
-                    .filter_map(planning_todo_definition)
+                    .map(planning_tool_definition)
                     .collect();
-                template
-                    .tool_routes
-                    .retain(|name, _| name == TODO_TOOL_NAME);
             }
             TodoPhase::Executing => {
                 template
@@ -322,6 +319,7 @@ impl SingleAgentTodoPlan {
                 child_turn_id,
                 child_session.clone(),
                 self.todo.chat_history.clone(),
+                TODO_TOOL_NAME,
                 format_created_todos,
             )
         } else {
@@ -411,7 +409,7 @@ impl SingleAgentTodoPlan {
     }
 }
 
-fn planning_todo_definition(mut definition: ChatCompletionTools) -> Option<ChatCompletionTools> {
+fn planning_tool_definition(mut definition: ChatCompletionTools) -> ChatCompletionTools {
     match &mut definition {
         ChatCompletionTools::Function(tool) if tool.function.name == TODO_TOOL_NAME => {
             tool.function.description =
@@ -436,10 +434,10 @@ fn planning_todo_definition(mut definition: ChatCompletionTools) -> Option<ChatC
                 "additionalProperties": false
             }));
             tool.function.strict = Some(true);
-            Some(definition)
         }
-        _ => None,
+        _ => {}
     }
+    definition
 }
 
 fn is_todo_definition(definition: &ChatCompletionTools) -> bool {
@@ -837,9 +835,8 @@ mod tests {
     }
 
     #[test]
-    fn planning_todo_definition_only_allows_batch_creation() {
-        let definition =
-            planning_todo_definition(tool_definition(TODO_TOOL_NAME)).expect("todo definition");
+    fn planning_tool_definition_only_restricts_todo_to_batch_creation() {
+        let definition = planning_tool_definition(tool_definition(TODO_TOOL_NAME));
         let ChatCompletionTools::Function(tool) = definition else {
             panic!("expected function tool");
         };
@@ -856,7 +853,10 @@ mod tests {
         );
         assert!(parameters["properties"].get("id").is_none());
         assert!(parameters["properties"].get("completed").is_none());
-        assert!(planning_todo_definition(tool_definition("read_file")).is_none());
+        assert!(matches!(
+            planning_tool_definition(tool_definition("read_file")),
+            ChatCompletionTools::Function(tool) if tool.function.name == "read_file"
+        ));
     }
 
     #[tokio::test]
@@ -900,7 +900,45 @@ mod tests {
                 .1
                 .contains("create a complete execution plan")
         );
-        assert_eq!(planning.tools.unwrap().len(), 1);
+        let planning_tools = planning.tools.unwrap();
+        assert_eq!(planning_tools.len(), 2);
+        assert!(planning_tools.iter().any(|definition| matches!(
+            definition,
+            ChatCompletionTools::Function(tool) if tool.function.name == TODO_TOOL_NAME
+        )));
+        assert!(planning_tools.iter().any(|definition| matches!(
+            definition,
+            ChatCompletionTools::Function(tool) if tool.function.name == "read_file"
+        )));
+
+        let PlanNext::Tasks(mut tasks) = plan
+            .next(model_tool_response(
+                &ctx,
+                "read_file",
+                serde_json::json!({ "path": "README.md" }),
+            ))
+            .await
+            .unwrap()
+        else {
+            panic!("expected read_file call");
+        };
+        let read = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert_eq!(read.req.get_tool_name(), "read_file");
+
+        let PlanNext::Tasks(_) = plan
+            .next(
+                TaskResp {
+                    ctx: ctx.clone(),
+                    meta: read.meta,
+                    resp: ToolResponse::with_result("project context".to_string()),
+                }
+                .into_response(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected planning model after read_file");
+        };
 
         let PlanNext::Tasks(mut tasks) = plan
             .next(model_tool_response(
