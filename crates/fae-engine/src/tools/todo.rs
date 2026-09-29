@@ -29,6 +29,8 @@ impl Default for TodoTool {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TodoState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_input: Option<String>,
     next_id: u64,
     todos: BTreeMap<u64, Todo>,
 }
@@ -36,6 +38,7 @@ struct TodoState {
 impl Default for TodoState {
     fn default() -> Self {
         Self {
+            user_input: None,
             next_id: 1,
             todos: BTreeMap::new(),
         }
@@ -47,13 +50,17 @@ struct Todo {
     id: u64,
     content: String,
     completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum TodoArgs {
     Query,
-    Clear,
+    Clear {
+        user_input: Option<String>,
+    },
     Create {
         contents: Vec<String>,
     },
@@ -61,6 +68,7 @@ enum TodoArgs {
         id: u64,
         content: Option<String>,
         completed: Option<bool>,
+        assistant: Option<String>,
     },
     Delete {
         id: u64,
@@ -69,6 +77,8 @@ enum TodoArgs {
 
 #[derive(Debug, Serialize)]
 struct TodoList {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_input: Option<String>,
     todos: Vec<Todo>,
 }
 
@@ -97,7 +107,7 @@ impl Tools for TodoTool {
                     "operation": {
                         "type": "string",
                         "enum": ["query", "clear", "create", "update", "delete"],
-                        "description": "Operation to perform. create requires contents; update requires id and at least one of content or completed; delete requires id; query and clear require no other fields."
+                        "description": "Operation to perform. create requires contents; update requires id and at least one of content, completed, or assistant; delete requires id; query requires no other fields; clear optionally accepts user_input."
                     },
                     "id": {
                         "type": "integer",
@@ -121,6 +131,16 @@ impl Tools for TodoTool {
                     "completed": {
                         "type": "boolean",
                         "description": "Whether the todo is completed."
+                    },
+                    "assistant": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Assistant output produced when completing the todo."
+                    },
+                    "user_input": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Original user input associated with a newly cleared todo plan."
                     }
                 },
                 "required": ["operation"],
@@ -150,12 +170,26 @@ impl Tools for TodoTool {
 
         match args {
             TodoArgs::Query => ok_json(TodoList {
+                user_input: state.user_input,
                 todos: state.todos.values().cloned().collect(),
             }),
-            TodoArgs::Clear => {
-                state = TodoState::default();
+            TodoArgs::Clear { user_input } => {
+                let user_input = match user_input
+                    .map(|input| validate_text("user_input", input))
+                    .transpose()
+                {
+                    Ok(user_input) => user_input,
+                    Err(response) => return Ok(response),
+                };
+                state = TodoState {
+                    user_input,
+                    ..TodoState::default()
+                };
                 self.save_state(&path, &state).await?;
-                ok_json(TodoList { todos: Vec::new() })
+                ok_json(TodoList {
+                    user_input: state.user_input,
+                    todos: Vec::new(),
+                })
             }
             TodoArgs::Create { contents } => {
                 if contents.is_empty() {
@@ -184,6 +218,7 @@ impl Tools for TodoTool {
                         id: state.next_id + offset as u64,
                         content,
                         completed: false,
+                        assistant: None,
                     })
                     .collect::<Vec<_>>();
                 state.next_id = next_id;
@@ -191,33 +226,55 @@ impl Tools for TodoTool {
                     .todos
                     .extend(todos.iter().cloned().map(|todo| (todo.id, todo)));
                 self.save_state(&path, &state).await?;
-                ok_json(TodoList { todos })
+                ok_json(TodoList {
+                    user_input: state.user_input,
+                    todos,
+                })
             }
             TodoArgs::Update {
                 id,
                 content,
                 completed,
+                assistant,
             } => {
                 if id == 0 {
                     return Ok(invalid_arguments("id must be positive"));
                 }
-                if content.is_none() && completed.is_none() {
+                if content.is_none() && completed.is_none() && assistant.is_none() {
                     return Ok(invalid_arguments(
-                        "update requires at least one of content or completed",
+                        "update requires at least one of content, completed, or assistant",
                     ));
                 }
                 let content = match content.map(validate_content).transpose() {
                     Ok(content) => content,
                     Err(response) => return Ok(response),
                 };
+                let assistant = match assistant
+                    .map(|content| validate_text("assistant", content))
+                    .transpose()
+                {
+                    Ok(assistant) => assistant,
+                    Err(response) => return Ok(response),
+                };
                 let Some(todo) = state.todos.get_mut(&id) else {
                     return Ok(not_found(id));
                 };
+                if assistant.is_some() && !completed.unwrap_or(todo.completed) {
+                    return Ok(invalid_arguments(
+                        "assistant can only be set on a completed todo",
+                    ));
+                }
                 if let Some(content) = content {
                     todo.content = content;
                 }
                 if let Some(completed) = completed {
                     todo.completed = completed;
+                    if !completed {
+                        todo.assistant = None;
+                    }
+                }
+                if let Some(assistant) = assistant {
+                    todo.assistant = Some(assistant);
                 }
                 let todo = todo.clone();
                 self.save_state(&path, &state).await?;
@@ -291,9 +348,13 @@ impl TodoTool {
 }
 
 fn validate_content(content: String) -> Result<String, ToolResponse> {
+    validate_text("content", content)
+}
+
+fn validate_text(field: &str, content: String) -> Result<String, ToolResponse> {
     let content = content.trim();
     if content.is_empty() {
-        return Err(invalid_arguments("content cannot be empty"));
+        return Err(invalid_arguments(&format!("{field} cannot be empty")));
     }
     Ok(content.to_string())
 }
@@ -368,6 +429,18 @@ mod tests {
                 }]
             })
         );
+        assert_eq!(
+            execute(
+                &tool,
+                json!({
+                    "operation": "update",
+                    "id": 1,
+                    "assistant": "premature result"
+                })
+            )
+            .await["code"],
+            400
+        );
 
         let updated = execute(
             &tool,
@@ -375,12 +448,14 @@ mod tests {
                 "operation": "update",
                 "id": 1,
                 "content": "ship stable release",
-                "completed": true
+                "completed": true,
+                "assistant": "  release shipped successfully  "
             }),
         )
         .await;
         assert_eq!(updated["todo"]["content"], "ship stable release");
         assert_eq!(updated["todo"]["completed"], true);
+        assert_eq!(updated["todo"]["assistant"], "release shipped successfully");
 
         let queried = execute(&tool, json!({"operation": "query"})).await;
         assert_eq!(queried["todos"].as_array().unwrap().len(), 1);
@@ -389,6 +464,10 @@ mod tests {
         let reloaded = TodoTool::with_host_dir(&host);
         let queried = execute(&reloaded, json!({"operation": "query"})).await;
         assert_eq!(queried["todos"][0]["content"], "ship stable release");
+        assert_eq!(
+            queried["todos"][0]["assistant"],
+            "release shipped successfully"
+        );
         assert!(
             host.join("session")
                 .join("agent-1")
@@ -419,8 +498,26 @@ mod tests {
             .await["code"],
             400
         );
+        execute(
+            &tool,
+            json!({"operation": "create", "contents": ["pending task"]}),
+        )
+        .await;
         assert_eq!(
-            execute(&tool, json!({"operation": "delete", "id": 1})).await["code"],
+            execute(
+                &tool,
+                json!({
+                    "operation": "update",
+                    "id": 1,
+                    "completed": false,
+                    "assistant": "not completed"
+                })
+            )
+            .await["code"],
+            400
+        );
+        assert_eq!(
+            execute(&tool, json!({"operation": "delete", "id": 2})).await["code"],
             404
         );
         assert_eq!(
@@ -520,12 +617,25 @@ mod tests {
         .await;
 
         assert_eq!(
-            execute(&tool, json!({"operation": "clear"})).await,
-            json!({"todos": []})
+            execute(
+                &tool,
+                json!({
+                    "operation": "clear",
+                    "user_input": "  ship release  "
+                })
+            )
+            .await,
+            json!({"user_input": "ship release", "todos": []})
         );
         assert_eq!(
             execute(&tool, json!({"operation": "query"})).await,
-            json!({"todos": []})
+            json!({"user_input": "ship release", "todos": []})
+        );
+
+        let reloaded = TodoTool::with_host_dir(&host);
+        assert_eq!(
+            execute(&reloaded, json!({"operation": "query"})).await,
+            json!({"user_input": "ship release", "todos": []})
         );
         let _ = tokio::fs::remove_dir_all(host).await;
     }

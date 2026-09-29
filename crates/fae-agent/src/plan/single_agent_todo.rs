@@ -53,6 +53,8 @@ struct TodoItem {
     id: u64,
     content: String,
     completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant: Option<String>,
 }
 
 fn format_created_todos(output: &str) -> anyhow::Result<String> {
@@ -467,8 +469,11 @@ impl Plan for SingleAgentTodoPlan {
             },
         )?;
         Ok(PlanNext::Tasks(vec![
-            self.todo_task(serde_json::json!({ "operation": "clear" }))
-                .await?,
+            self.todo_task(serde_json::json!({
+                "operation": "clear",
+                "user_input": self.todo.requirement
+            }))
+            .await?,
         ]))
     }
 
@@ -508,7 +513,8 @@ impl Plan for SingleAgentTodoPlan {
                                 self.todo_task(serde_json::json!({
                                     "operation": "update",
                                     "id": id,
-                                    "completed": true
+                                    "completed": true,
+                                    "assistant": output
                                 }))
                                 .await?,
                             ]))
@@ -882,7 +888,13 @@ mod tests {
             panic!("expected reset task");
         };
         let mut reset = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
-        assert_eq!(reset.req.get_arguments(), r#"{"operation":"clear"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(reset.req.get_arguments()).unwrap(),
+            serde_json::json!({
+                "operation": "clear",
+                "user_input": "ship release"
+            })
+        );
         assert!(matches!(
             reset.req.take_invocation(),
             Some(ToolInvocation::Todo { agent_id, user_id })
@@ -1083,7 +1095,8 @@ mod tests {
             serde_json::json!({
                 "operation": "update",
                 "id": 1,
-                "completed": true
+                "completed": true,
+                "assistant": "implemented"
             })
         );
         assert!(matches!(
@@ -1095,7 +1108,7 @@ mod tests {
         let PlanNext::Tasks(mut tasks) = plan
             .next(tool_response(
                 &ctx,
-                r#"{"todo":{"id":1,"content":"implement","completed":true}}"#,
+                r#"{"todo":{"id":1,"content":"implement","completed":true,"assistant":"implemented"}}"#,
             ))
             .await
             .unwrap()
@@ -1108,7 +1121,7 @@ mod tests {
         let PlanNext::Tasks(_) = plan
             .next(tool_response(
                 &ctx,
-                r#"{"todos":[{"id":1,"content":"implement","completed":true},{"id":2,"content":"verify","completed":false}]}"#,
+                r#"{"user_input":"ship release","todos":[{"id":1,"content":"implement","completed":true,"assistant":"implemented"},{"id":2,"content":"verify","completed":false}]}"#,
             ))
             .await
             .unwrap()
@@ -1141,14 +1154,15 @@ mod tests {
             serde_json::json!({
                 "operation": "update",
                 "id": 2,
-                "completed": true
+                "completed": true,
+                "assistant": "verified"
             })
         );
 
         let PlanNext::Tasks(_) = plan
             .next(tool_response(
                 &ctx,
-                r#"{"todo":{"id":2,"content":"verify","completed":true}}"#,
+                r#"{"todo":{"id":2,"content":"verify","completed":true,"assistant":"verified"}}"#,
             ))
             .await
             .unwrap()
@@ -1159,7 +1173,7 @@ mod tests {
         let PlanNext::Tasks(_) = plan
             .next(tool_response(
                 &ctx,
-                r#"{"todos":[{"id":1,"content":"implement","completed":true},{"id":2,"content":"verify","completed":true}]}"#,
+                r#"{"user_input":"ship release","todos":[{"id":1,"content":"implement","completed":true,"assistant":"implemented"},{"id":2,"content":"verify","completed":true,"assistant":"verified"}]}"#,
             ))
             .await
             .unwrap()
