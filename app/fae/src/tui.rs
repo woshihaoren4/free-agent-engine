@@ -1003,7 +1003,7 @@ impl TerminalUi {
     }
 
     fn finish_stream(&mut self) {
-        if let Some(message) = self.messages.last_mut() {
+        for message in &mut self.messages {
             message.stream_id = None;
         }
     }
@@ -1906,17 +1906,14 @@ fn append_stream_message(
     stream_id: String,
     content: String,
 ) {
-    let current_matches = messages.last().is_some_and(|message| {
-        message.kind == kind && message.stream_id.as_ref() == Some(&stream_id)
-    });
-    if current_matches {
-        messages
-            .last_mut()
-            .expect("last message exists")
-            .content
-            .push_str(&content);
+    if let Some(message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.kind == kind && message.stream_id.as_ref() == Some(&stream_id))
+    {
+        message.content.push_str(&content);
     } else {
-        if let Some(message) = messages.last_mut() {
+        for message in messages.iter_mut() {
             message.stream_id = None;
         }
         messages.push(Message::new(kind, title, content, Some(stream_id)));
@@ -2146,6 +2143,37 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "hello");
+    }
+
+    #[test]
+    fn captured_log_does_not_split_active_stream() {
+        let mut messages = Vec::new();
+        append_stream_message(
+            &mut messages,
+            MessageKind::Assistant,
+            "Assistant",
+            "stream".to_string(),
+            "hel".to_string(),
+        );
+        push_log_message(
+            &mut messages,
+            CapturedLog {
+                kind: LogKind::Error,
+                content: "request failed, retrying".to_string(),
+            },
+        );
+        append_stream_message(
+            &mut messages,
+            MessageKind::Assistant,
+            "Assistant",
+            "stream".to_string(),
+            "lo".to_string(),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[0].stream_id.as_deref(), Some("stream"));
+        assert_eq!(messages[1].kind, MessageKind::LogError);
     }
 
     #[test]

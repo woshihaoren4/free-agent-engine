@@ -87,7 +87,7 @@ where
             match Self::request_once(client, req.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(error) => {
-                    wd_log::log_error_ln!(
+                    wd_log::log_warn_ln!(
                         "model request failed, retry {}/{} in {}s: {:?}",
                         retry_index + 1,
                         RETRY_DELAYS.len(),
