@@ -70,7 +70,7 @@ struct CapturedLog {
 struct LogCapture {
     receiver: Receiver<CapturedLog>,
     #[cfg(unix)]
-    stdout_writer: OwnedFd,
+    _stdout_writer: OwnedFd,
     #[cfg(unix)]
     _stderr_writer: OwnedFd,
     #[cfg(unix)]
@@ -106,7 +106,7 @@ impl LogCapture {
 
         Ok(Self {
             receiver,
-            stdout_writer,
+            _stdout_writer: stdout_writer,
             _stderr_writer: stderr_writer,
             original_stdout: Some(original_stdout),
             original_stderr: Some(original_stderr),
@@ -117,30 +117,6 @@ impl LogCapture {
     fn new() -> io::Result<Self> {
         let (_sender, receiver) = mpsc::channel();
         Ok(Self { receiver })
-    }
-
-    #[cfg(unix)]
-    fn pause_stdout(&self) -> io::Result<()> {
-        let original_stdout = self
-            .original_stdout
-            .as_ref()
-            .expect("stdout is available while log capture is active");
-        replace_fd(original_stdout.as_raw_fd(), libc::STDOUT_FILENO)
-    }
-
-    #[cfg(unix)]
-    fn resume_stdout(&self) -> io::Result<()> {
-        replace_fd(self.stdout_writer.as_raw_fd(), libc::STDOUT_FILENO)
-    }
-
-    #[cfg(not(unix))]
-    fn pause_stdout(&self) -> io::Result<()> {
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn resume_stdout(&self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -215,15 +191,6 @@ fn duplicate_fd(fd: libc::c_int) -> io::Result<OwnedFd> {
         Err(io::Error::last_os_error())
     } else {
         Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    }
-}
-
-#[cfg(unix)]
-fn replace_fd(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
-    if unsafe { libc::dup2(source, target) } == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }
 
@@ -1280,8 +1247,7 @@ impl TerminalUi {
         let scroll_from_bottom = self.scroll_from_bottom;
         let copy_mode = self.copy_mode;
 
-        self.log_capture.pause_stdout()?;
-        let draw_result = self.terminal.draw(|frame| {
+        self.terminal.draw(|frame| {
             draw_frame(
                 frame,
                 ViewModel {
@@ -1300,10 +1266,7 @@ impl TerminalUi {
                     copy_mode,
                 },
             );
-        });
-        let resume_result = self.log_capture.resume_stdout();
-        draw_result?;
-        resume_result?;
+        })?;
         Ok(())
     }
 }
