@@ -219,6 +219,25 @@ impl SingleAgentTodoPlan {
         }
     }
 
+    pub(super) async fn resume_from_created_todos(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        turn_id: u64,
+        session: CommonSession,
+        output: String,
+    ) -> anyhow::Result<(Self, PlanNext)> {
+        let created_todos = format_created_todos(&output)?;
+        let mut plan = Self::new(ctx, template, input.clone(), turn_id, session);
+        plan.todo.chat_history.extend([
+            SessionMessage::user(input),
+            SessionMessage::assistant(created_todos),
+        ]);
+        let prompt = plan.todo.next_prompt(&output)?;
+        let next = plan.start_child(prompt).await?;
+        Ok((plan, next))
+    }
+
     fn hook_context<'a>(&'a self, task_id: Option<&'a str>) -> SingleAgentHookContext<'a> {
         SingleAgentHookContext {
             ctx: &self.ctx,

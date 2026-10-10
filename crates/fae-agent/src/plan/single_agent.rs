@@ -1518,6 +1518,7 @@ struct PendingCall {
     call_id: String,
     tool_name: String,
     kind: PendingCallKind,
+    enters_todo_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1570,6 +1571,8 @@ pub(super) struct SingleAgentPlan {
     persist_session: bool,
     terminal_tool_completion: Option<TerminalToolCompletion>,
     pending_terminal_output: Option<String>,
+    pending_todo_output: Option<String>,
+    todo_plan: Option<Box<SingleAgentTodoPlan>>,
     owns_active_turn: bool,
     finish_on_drop: bool,
 }
@@ -1686,6 +1689,8 @@ impl SingleAgentPlan {
             persist_session,
             terminal_tool_completion,
             pending_terminal_output: None,
+            pending_todo_output: None,
+            todo_plan: None,
             owns_active_turn: true,
             finish_on_drop: false,
         }
@@ -2092,6 +2097,17 @@ impl SingleAgentPlan {
             let call_id = call.id;
             let tool_name = call.function.name;
             let arguments = call.function.arguments;
+            let enters_todo_mode = self.terminal_tool_completion.is_none()
+                && tool_name == TODO_TOOL_NAME
+                && serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|arguments| {
+                        arguments
+                            .get("operation")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|operation| operation == "create")
+                    })
+                    .unwrap_or(false);
             let route = self
                 .template
                 .tool_routes
@@ -2180,6 +2196,7 @@ impl SingleAgentPlan {
                     call_id,
                     tool_name,
                     kind,
+                    enters_todo_mode,
                 },
             );
             tasks.push(task);
@@ -2262,6 +2279,13 @@ impl SingleAgentPlan {
         pending: PendingCall,
         output: String,
     ) -> anyhow::Result<PlanNext> {
+        if pending.enters_todo_mode {
+            anyhow::ensure!(
+                self.pending_todo_output.is_none(),
+                "todo create was called more than once in one agent step"
+            );
+            self.pending_todo_output = Some(output.clone());
+        }
         let terminal_output = self
             .terminal_tool_completion
             .as_ref()
@@ -2304,6 +2328,20 @@ impl SingleAgentPlan {
             .await?;
             return Ok(PlanNext::End);
         }
+        if let Some(output) = self.pending_todo_output.take() {
+            let (todo_plan, next) = SingleAgentTodoPlan::resume_from_created_todos(
+                self.ctx.clone(),
+                self.template.clone(),
+                self.input.clone(),
+                self.turn_id,
+                self.session.clone(),
+                output,
+            )
+            .await?;
+            self.owns_active_turn = false;
+            self.todo_plan = Some(Box::new(todo_plan));
+            return Ok(next);
+        }
         Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
     }
 }
@@ -2330,6 +2368,9 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn next(&mut self, mut task_result: TaskResponse) -> anyhow::Result<PlanNext> {
+        if let Some(todo_plan) = &mut self.todo_plan {
+            return todo_plan.next(task_result).await;
+        }
         if self.session.cancel_requested() {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
@@ -2440,6 +2481,10 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn abort(&mut self, _code: i32, error: String) {
+        if let Some(todo_plan) = &mut self.todo_plan {
+            todo_plan.abort(_code, error).await;
+            return;
+        }
         self.session.abort_turn();
         self.owns_active_turn = false;
         let _ = self
@@ -3417,6 +3462,75 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
+    async fn todo_create_switches_the_current_agent_to_todo_mode() -> anyhow::Result<()> {
+        let session = CommonSession::new_with_user_id("alice");
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            TODO_TOOL_NAME.to_string(),
+            CallableRoute::Tool(TODO_TOOL_NAME.to_string()),
+        );
+        let mut plan =
+            SingleAgentPlan::new(ctx.clone(), template, "ship it".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": null,
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "todo",
+                            "arguments": "{\"operation\":\"create\",\"contents\":[\"implement\",\"verify\"]}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))?;
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await?
+        else {
+            panic!("expected todo create task");
+        };
+        let create = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+
+        let PlanNext::Tasks(tasks) = plan
+            .next(
+                TaskResp {
+                    ctx,
+                    meta: create.meta,
+                    resp: ToolResponse::with_result(
+                        r#"{"todos":[{"id":1,"content":"implement","completed":false},{"id":2,"content":"verify","completed":false}]}"#
+                            .to_string(),
+                    ),
+                }
+                .into_response(),
+            )
+            .await?
+        else {
+            panic!("expected todo execution child");
+        };
+
+        assert!(plan.todo_plan.is_some());
+        assert!(!plan.owns_active_turn);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Memory);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn workflow_calls_are_restricted_and_dispatched_through_the_workflow_tool()
     -> anyhow::Result<()> {
         let session = CommonSession::new();
@@ -3591,6 +3705,7 @@ user-defined rules, and other long-term facts."
                 call_id: "call-1".to_string(),
                 tool_name: AGENT_TOOL_NAME.to_string(),
                 kind: PendingCallKind::Tool,
+                enters_todo_mode: false,
             },
         );
 
