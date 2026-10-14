@@ -1486,6 +1486,9 @@ pub(super) enum CallableRoute {
     Workflow {
         workflow_ids: HashSet<String>,
     },
+    Orchestrated {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2122,7 +2125,7 @@ impl SingleAgentPlan {
                 },
             )
             .await?;
-            let (task, kind) = match route {
+            let routed = match route {
                 CallableRoute::Tool(runtime_tool_name) => {
                     let request = match runtime_tool_name.as_str() {
                         MEMORY_UPDATE_TOOL_NAME => ToolRequest::new(runtime_tool_name, arguments)
@@ -2136,12 +2139,12 @@ impl SingleAgentPlan {
                             }),
                         _ => ToolRequest::new(runtime_tool_name, arguments),
                     };
-                    (self.tool_task(request).await?, PendingCallKind::Tool)
+                    Some((self.tool_task(request).await?, PendingCallKind::Tool))
                 }
-                CallableRoute::Mcp { server, tool_name } => (
+                CallableRoute::Mcp { server, tool_name } => Some((
                     self.task(TaskType::Mcp, McpRequest::new(server, tool_name, arguments)),
                     PendingCallKind::Mcp,
-                ),
+                )),
                 CallableRoute::Agent { sources } => {
                     let call: SubAgentCall = serde_json::from_str(&arguments).map_err(|error| {
                         anyhow::anyhow!("invalid `{AGENT_TOOL_NAME}` arguments: {error}")
@@ -2160,14 +2163,14 @@ impl SingleAgentPlan {
                         self.template.agent.name.clone(),
                         self.template.ancestor_agents.clone(),
                     );
-                    (
+                    Some((
                         self.tool_task(
                             ToolRequest::new(AGENT_TOOL_NAME.to_string(), arguments)
                                 .with_invocation(ToolInvocation::Agent(invocation)),
                         )
                         .await?,
                         PendingCallKind::Tool,
-                    )
+                    ))
                 }
                 CallableRoute::Workflow { workflow_ids } => {
                     let call: WorkflowCall = serde_json::from_str(&arguments).map_err(|error| {
@@ -2178,7 +2181,7 @@ impl SingleAgentPlan {
                         "workflow `{}` is not configured",
                         call.workflow_id
                     );
-                    (
+                    Some((
                         self.tool_task(
                             ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments)
                                 .with_invocation(ToolInvocation::Workflow {
@@ -2187,8 +2190,29 @@ impl SingleAgentPlan {
                         )
                         .await?,
                         PendingCallKind::Tool,
-                    )
+                    ))
                 }
+                CallableRoute::Orchestrated { message } => {
+                    self.emit(
+                        tool_name.clone(),
+                        SessionEventData::ToolOutput {
+                            call_id: call_id.clone(),
+                            output: message.clone(),
+                            completed: true,
+                        },
+                    )
+                    .await?;
+                    self.messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(message),
+                            tool_call_id: call_id.clone(),
+                        },
+                    ));
+                    None
+                }
+            };
+            let Some((task, kind)) = routed else {
+                continue;
             };
             self.pending_tools.insert(
                 task.meta.id.clone(),
@@ -2200,6 +2224,9 @@ impl SingleAgentPlan {
                 },
             );
             tasks.push(task);
+        }
+        if tasks.is_empty() {
+            return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
         }
         self.stage = SingleAgentStage::Tools {
             remaining: tasks.len(),
@@ -3527,6 +3554,68 @@ user-defined rules, and other long-term facts."
         assert!(!plan.owns_active_turn);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].meta.ty, TaskType::Memory);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orchestrated_todo_call_is_returned_to_the_model_without_dispatch() -> anyhow::Result<()>
+    {
+        let session = CommonSession::new_with_user_id("alice");
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            TODO_TOOL_NAME.to_string(),
+            CallableRoute::Orchestrated {
+                message: "Todo state is managed by the orchestrator.".to_string(),
+            },
+        );
+        let mut plan = SingleAgentPlan::new(ctx, template, "implement".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": null,
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "todo",
+                            "arguments": "{\"operation\":\"query\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))?;
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await?
+        else {
+            panic!("expected the model to continue");
+        };
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Model);
+        assert!(plan.pending_tools.is_empty());
+        let request =
+            TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert!(matches!(
+            request.req.messages.last(),
+            Some(ChatCompletionRequestMessage::Tool(message))
+                if message.tool_call_id == "call-1"
+                    && serde_json::to_string(&message.content)
+                        .unwrap()
+                        .contains("managed by the orchestrator")
+        ));
         Ok(())
     }
 

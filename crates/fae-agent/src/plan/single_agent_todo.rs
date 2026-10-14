@@ -31,7 +31,12 @@ impl SingleAgentMode {
 enum TodoPhase {
     Planning,
     Executing,
-    Summarizing,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TodoNext {
+    Execute(String),
+    Complete,
 }
 
 #[derive(Debug)]
@@ -96,7 +101,7 @@ impl SingleAgentTodo {
         )
     }
 
-    fn next_prompt(&mut self, output: &str) -> anyhow::Result<String> {
+    fn next(&mut self, output: &str) -> anyhow::Result<TodoNext> {
         let list: TodoList = serde_json::from_str(output)
             .map_err(|error| anyhow::anyhow!("parse todo query response: {error}"))?;
         anyhow::ensure!(
@@ -111,9 +116,8 @@ impl SingleAgentTodo {
         }
 
         if list.todos.iter().all(|todo| todo.completed) {
-            self.phase = TodoPhase::Summarizing;
             self.current_todo_id = None;
-            return Ok(self.summary_prompt());
+            return Ok(TodoNext::Complete);
         }
 
         let next = list
@@ -134,7 +138,7 @@ impl SingleAgentTodo {
         }
         self.phase = TodoPhase::Executing;
         self.current_todo_id = Some(next.id);
-        Ok(self.execution_prompt(&list, next))
+        Ok(TodoNext::Execute(self.execution_prompt(&list, next)))
     }
 
     fn execution_prompt(&self, list: &TodoList, next: &TodoItem) -> String {
@@ -157,12 +161,6 @@ impl SingleAgentTodo {
                 next.content
             )
         }
-    }
-
-    fn summary_prompt(&self) -> String {
-        "All todos are complete. Summarize the completed work and provide the final concise \
-         response to the user. Do not perform more work."
-            .to_string()
     }
 }
 
@@ -187,6 +185,7 @@ pub(super) struct SingleAgentTodoPlan {
     child: Option<SingleAgentPlan>,
     child_session: Option<CommonSession>,
     current_prompt: Option<String>,
+    last_execution_output: Option<String>,
     final_output: Option<String>,
     task_sequence: u64,
     owns_active_turn: bool,
@@ -212,6 +211,7 @@ impl SingleAgentTodoPlan {
             child: None,
             child_session: None,
             current_prompt: None,
+            last_execution_output: None,
             final_output: None,
             task_sequence: 0,
             owns_active_turn: true,
@@ -233,7 +233,9 @@ impl SingleAgentTodoPlan {
             SessionMessage::user(input),
             SessionMessage::assistant(created_todos),
         ]);
-        let prompt = plan.todo.next_prompt(&output)?;
+        let TodoNext::Execute(prompt) = plan.todo.next(&output)? else {
+            anyhow::bail!("newly created todo plan contains no incomplete todo");
+        };
         let next = plan.start_child(prompt).await?;
         Ok((plan, next))
     }
@@ -315,22 +317,22 @@ impl SingleAgentTodoPlan {
                 template
                     .tool_definitions
                     .retain(|definition| !is_todo_definition(definition));
-                template.tool_routes.remove(TODO_TOOL_NAME);
-            }
-            TodoPhase::Summarizing => {
-                template.tool_definitions.clear();
-                template.tool_routes.clear();
+                template.tool_routes.insert(
+                    TODO_TOOL_NAME.to_string(),
+                    CallableRoute::Orchestrated {
+                        message: "Todo state is managed by the orchestrator during execution. \
+                                  Complete the assigned task without calling the todo tool."
+                            .to_string(),
+                    },
+                );
             }
         }
         template
     }
 
     async fn start_child(&mut self, prompt: String) -> anyhow::Result<PlanNext> {
-        let child_session = if self.todo.phase == TodoPhase::Summarizing {
-            CommonSession::new_with_user_id(self.session.user_id())
-        } else {
-            CommonSession::new_in_agent(self.session.clone(), self.template.agent.name.clone())
-        };
+        let child_session =
+            CommonSession::new_in_agent(self.session.clone(), self.template.agent.name.clone());
         let child_turn_id = child_session.activate_turn()?;
         let mut child = if self.todo.phase == TodoPhase::Planning {
             SingleAgentPlan::new_ephemeral_until_tool_completion(
@@ -384,14 +386,6 @@ impl SingleAgentTodoPlan {
     }
 
     async fn save_task(&mut self, content: String) -> anyhow::Result<PlanNext> {
-        self.session.emit_agent(
-            self.turn_id,
-            self.template.agent.name.clone(),
-            self.template.model.model.clone(),
-            SessionEventData::ModelOutput {
-                content: content.clone(),
-            },
-        )?;
         let messages = self
             .template
             .hook
@@ -521,12 +515,11 @@ impl Plan for SingleAgentTodoPlan {
                     PlanNext::Tasks(tasks) => Ok(PlanNext::Tasks(tasks)),
                     PlanNext::End => {
                         let output = self.finish_child().await?;
-                        if self.todo.phase == TodoPhase::Summarizing {
-                            self.save_task(output).await
-                        } else if self.todo.phase == TodoPhase::Executing {
+                        if self.todo.phase == TodoPhase::Executing {
                             let id = self.todo.current_todo_id.ok_or_else(|| {
                                 anyhow::anyhow!("todo execution has no current ID")
                             })?;
+                            self.last_execution_output = Some(output.clone());
                             self.stage = TodoPlanStage::CompleteTodo;
                             Ok(PlanNext::Tasks(vec![
                                 self.todo_task(serde_json::json!({
@@ -559,8 +552,15 @@ impl Plan for SingleAgentTodoPlan {
             TodoPlanStage::Query => {
                 let task_id = task_result.meta.id.clone();
                 let output = self.todo_output(&task_id, &mut task_result).await?;
-                let prompt = self.todo.next_prompt(&output)?;
-                self.start_child(prompt).await
+                match self.todo.next(&output)? {
+                    TodoNext::Execute(prompt) => self.start_child(prompt).await,
+                    TodoNext::Complete => {
+                        let output = self.last_execution_output.take().ok_or_else(|| {
+                            anyhow::anyhow!("todo mode completed without an execution output")
+                        })?;
+                        self.save_task(output).await
+                    }
+                }
             }
             TodoPlanStage::Save => {
                 let response = TaskResp::<SessionResponse>::try_from_response(&mut task_result)
@@ -820,27 +820,31 @@ mod tests {
     }
 
     #[test]
-    fn progresses_from_planning_to_execution_and_summary() {
+    fn progresses_from_planning_to_execution_and_completion() {
         let mut todo = SingleAgentTodo::new("ship it".to_string());
         assert_eq!(todo.phase, TodoPhase::Planning);
 
-        let prompt = todo
-            .next_prompt(r#"{"todos":[{"id":1,"content":"test","completed":false}]}"#)
+        let next = todo
+            .next(r#"{"todos":[{"id":1,"content":"test","completed":false}]}"#)
             .unwrap();
+        let TodoNext::Execute(prompt) = next else {
+            panic!("expected execution");
+        };
         assert!(prompt.contains("Complete the first task now: test"));
         assert_eq!(todo.phase, TodoPhase::Executing);
 
-        let prompt = todo
-            .next_prompt(r#"{"todos":[{"id":1,"content":"test","completed":true}]}"#)
-            .unwrap();
-        assert!(prompt.contains("Summarize the completed work"));
-        assert_eq!(todo.phase, TodoPhase::Summarizing);
+        assert_eq!(
+            todo.next(r#"{"todos":[{"id":1,"content":"test","completed":true}]}"#)
+                .unwrap(),
+            TodoNext::Complete
+        );
+        assert_eq!(todo.current_todo_id, None);
     }
 
     #[test]
     fn rejects_an_empty_plan() {
         let mut todo = SingleAgentTodo::new("ship it".to_string());
-        assert!(todo.next_prompt(r#"{"todos":[]}"#).is_err());
+        assert!(todo.next(r#"{"todos":[]}"#).is_err());
     }
 
     #[test]
@@ -891,7 +895,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrates_separate_single_agent_plans_until_summary() {
+    async fn uses_the_last_todo_output_as_the_final_result() {
         let ctx = Ctx::null();
         let session = CommonSession::new_with_user_id("alice");
         session.activate_turn().unwrap();
@@ -1189,7 +1193,7 @@ mod tests {
             panic!("expected todo query");
         };
 
-        let PlanNext::Tasks(_) = plan
+        let PlanNext::Tasks(mut tasks) = plan
             .next(tool_response(
                 &ctx,
                 r#"{"user_input":"ship release","todos":[{"id":1,"content":"implement","completed":true,"assistant":"implemented"},{"id":2,"content":"verify","completed":true,"assistant":"verified"}]}"#,
@@ -1197,31 +1201,10 @@ mod tests {
             .await
             .unwrap()
         else {
-            panic!("expected summary child");
-        };
-        let summary = advance_to_model(&mut plan, &ctx).await;
-        let summary_messages = conversation_messages(&summary);
-        assert_eq!(summary_messages.len(), 7);
-        assert_eq!(&summary_messages[..5], second_execution_messages);
-        assert_eq!(
-            summary_messages[5],
-            ("assistant".to_string(), "verified".to_string())
-        );
-        assert_eq!(summary_messages[6].0, "user");
-        assert!(
-            summary_messages[6]
-                .1
-                .contains("Summarize the completed work")
-        );
-        assert!(summary.tools.is_none());
-
-        let PlanNext::Tasks(mut tasks) = plan
-            .next(model_response(&ctx, "release shipped"))
-            .await
-            .unwrap()
-        else {
             panic!("expected outer session save");
         };
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Session);
         let save = TaskReq::<SessionRequest>::try_from_request(&mut tasks[0]).unwrap();
         let SessionRequest::Add {
             agent_id,
@@ -1239,7 +1222,7 @@ mod tests {
             messages,
             vec![
                 SessionMessage::user("ship release"),
-                SessionMessage::assistant("release shipped"),
+                SessionMessage::assistant("verified"),
             ]
         );
         assert!(matches!(
@@ -1248,7 +1231,7 @@ mod tests {
         ));
         assert_eq!(
             session.result().await.unwrap(),
-            serde_json::Value::String("release shipped".to_string())
+            serde_json::Value::String("verified".to_string())
         );
 
         let mut top_level_output = String::new();
@@ -1263,6 +1246,6 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(top_level_output, "release shipped");
+        assert!(top_level_output.is_empty());
     }
 }
