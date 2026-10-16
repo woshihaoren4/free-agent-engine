@@ -31,6 +31,11 @@ impl SessionInputData {
             ..Self::default()
         }
     }
+
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = (!images.is_empty()).then_some(images);
+        self
+    }
 }
 
 impl From<String> for SessionInputData {
@@ -113,6 +118,8 @@ pub enum SessionMessageRole {
 pub struct SessionMessage {
     pub role: SessionMessageRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
 }
 
 impl SessionMessage {
@@ -120,6 +127,15 @@ impl SessionMessage {
         Self {
             role: SessionMessageRole::User,
             content: content.into(),
+            images: None,
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Self {
+        Self {
+            role: SessionMessageRole::User,
+            content: content.into(),
+            images: (!images.is_empty()).then_some(images),
         }
     }
 
@@ -127,6 +143,7 @@ impl SessionMessage {
         Self {
             role: SessionMessageRole::Assistant,
             content: content.into(),
+            images: None,
         }
     }
 
@@ -134,6 +151,7 @@ impl SessionMessage {
         Self {
             role: SessionMessageRole::Summary,
             content: content.into(),
+            images: None,
         }
     }
 }
@@ -834,6 +852,20 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SessionInput>(value).unwrap(),
             input
+        );
+    }
+
+    #[test]
+    fn session_message_round_trips_images() {
+        let message = SessionMessage::user_with_images(
+            "describe this",
+            vec!["https://example.com/image.png".to_string()],
+        );
+        let value = serde_json::to_value(&message).unwrap();
+
+        assert_eq!(
+            serde_json::from_value::<SessionMessage>(value).unwrap(),
+            message
         );
     }
 

@@ -61,6 +61,7 @@ pub async fn initialize(home: &Path, args: &InitArgs) -> anyhow::Result<InitResu
         },
         model: SingleAgentModelConfig {
             model: args.model.clone(),
+            image_detail: Default::default(),
             trigger_compression_size: 32_000,
             history_turns: DEFAULT_HISTORY_TURNS,
             max_completion_tokens: Some(65_536),
@@ -173,6 +174,10 @@ mod tests {
         assert_eq!(config.agent.desc, "fae agent");
         assert_eq!(config.agent.user_id, DEFAULT_USER_ID);
         assert_eq!(config.model.model, "test-model");
+        assert_eq!(
+            serde_json::to_value(&config.model).unwrap()["image_detail"],
+            "auto"
+        );
         assert_eq!(config.model.history_turns, DEFAULT_HISTORY_TURNS);
         assert_eq!(config.model.max_completion_tokens, Some(65_536));
         assert_eq!(config.model.max_tool_iterations, 128);

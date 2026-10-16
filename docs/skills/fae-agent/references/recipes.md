@@ -112,6 +112,7 @@ fae agent --agent-id implementer
 {
   "model": {
     "model": "gpt-5",
+    "image_detail": "auto",
     "trigger_compression_size": 64000,
     "history_turns": 10,
     "max_completion_tokens": 8192,

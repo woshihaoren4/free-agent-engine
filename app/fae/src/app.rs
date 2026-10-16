@@ -1,13 +1,13 @@
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context;
 use fae_agent::{
     Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEventData,
-    SingleAgentEnv, SingleAgentPlanBuilder, SingleAgentSource, TaskError, TaskReq, TaskResp,
-    TaskType, WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
+    SessionInputData, SingleAgentEnv, SingleAgentPlanBuilder, SingleAgentSource, TaskError,
+    TaskReq, TaskResp, TaskType, WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::{
     CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
@@ -44,6 +44,13 @@ enum AgentPromptAction {
 struct AgentPrompt {
     input: String,
     mode: Option<&'static str>,
+    images: Vec<String>,
+}
+
+impl AgentPrompt {
+    fn session_input(&self) -> SessionInputData {
+        SessionInputData::text(self.input.clone()).with_images(self.images.clone())
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -147,7 +154,9 @@ async fn run_agent(
     if !args.prompt.is_empty() {
         let prompt = parse_agent_prompt(args.prompt.join(" "))
             .map_err(|message| anyhow::anyhow!(message))?;
-        let (env, session) = SingleAgentEnv::new_with_user_id(source, prompt.input, user_id);
+        let (env, session) =
+            SingleAgentEnv::new_with_user_id(source, prompt.input.clone(), user_id);
+        let env = env.with_images(prompt.images.clone());
         let env = match prompt.mode {
             Some(mode) => env.with_mode(mode),
             None => env,
@@ -189,8 +198,12 @@ async fn run_agent(
                 }
             };
 
-            let (env, session) =
-                SingleAgentEnv::new_with_user_id(source.clone(), input.input, user_id.clone());
+            let (env, session) = SingleAgentEnv::new_with_user_id(
+                source.clone(),
+                input.input.clone(),
+                user_id.clone(),
+            );
+            let env = env.with_images(input.images.clone());
             let env = match input.mode {
                 Some(mode) => env.with_mode(mode),
                 None => env,
@@ -245,7 +258,7 @@ async fn run_agent(
                     continue;
                 }
                 if let Err(error) = session
-                    .call(fae_agent::SessionInput::NewChat(input.input.into()))
+                    .call(fae_agent::SessionInput::NewChat(input.session_input()))
                     .await
                 {
                     ui.push_error(format!("{error:#}"));
@@ -408,7 +421,11 @@ async fn next_agent_input(
     session_runtime: &SessionRuntime,
 ) -> anyhow::Result<AgentPromptAction> {
     loop {
-        let PromptAction::Submit(input) = ui.prompt().await? else {
+        let PromptAction::Submit {
+            text: input,
+            images,
+        } = ui.prompt().await?
+        else {
             return Ok(AgentPromptAction::Exit);
         };
         match input.as_str() {
@@ -425,8 +442,9 @@ async fn next_agent_input(
             command => {
                 if command.starts_with("/todo ") {
                     match parse_agent_prompt(input.clone()) {
-                        Ok(prompt) => {
-                            ui.push_user(&input);
+                        Ok(mut prompt) => {
+                            prompt.images = images;
+                            ui.push_user(display_user_input(&input, &prompt.images));
                             return Ok(AgentPromptAction::Submit(prompt));
                         }
                         Err(message) => {
@@ -440,10 +458,11 @@ async fn next_agent_input(
                         ui.push_system(format!("Unknown command `{command}`. Use /help."));
                         continue;
                     }
-                    ui.push_user(&input);
-                    return Ok(AgentPromptAction::Submit(
-                        parse_agent_prompt(input).expect("regular input is always valid"),
-                    ));
+                    let mut prompt =
+                        parse_agent_prompt(input.clone()).expect("regular input is always valid");
+                    prompt.images = images;
+                    ui.push_user(display_user_input(&input, &prompt.images));
+                    return Ok(AgentPromptAction::Submit(prompt));
                 };
                 match command {
                     Ok(SessionCommand::Help) => ui.push_system(SESSION_HELP),
@@ -490,7 +509,11 @@ async fn clean_session_data(
 
 fn parse_agent_prompt(input: String) -> Result<AgentPrompt, String> {
     let Some(requirement) = input.strip_prefix("/todo ") else {
-        return Ok(AgentPrompt { input, mode: None });
+        return Ok(AgentPrompt {
+            input,
+            mode: None,
+            images: Vec::new(),
+        });
     };
     let requirement = requirement.trim();
     if requirement.is_empty() {
@@ -499,7 +522,29 @@ fn parse_agent_prompt(input: String) -> Result<AgentPrompt, String> {
     Ok(AgentPrompt {
         input: requirement.to_string(),
         mode: Some("todo"),
+        images: Vec::new(),
     })
+}
+
+fn display_user_input(input: &str, images: &[String]) -> String {
+    if images.is_empty() {
+        return input.to_string();
+    }
+    let names = images
+        .iter()
+        .map(|image| {
+            Path::new(image)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(image)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if input.is_empty() {
+        format!("Images: {names}")
+    } else {
+        format!("{input}\n\nImages: {names}")
+    }
 }
 
 fn parse_session_command(input: &str) -> Option<Result<SessionCommand, String>> {
@@ -727,6 +772,7 @@ mod tests {
             Ok(AgentPrompt {
                 input: "implement retries".to_string(),
                 mode: Some("todo"),
+                images: Vec::new(),
             })
         );
         assert_eq!(
@@ -734,6 +780,7 @@ mod tests {
             Ok(AgentPrompt {
                 input: "explain retries".to_string(),
                 mode: None,
+                images: Vec::new(),
             })
         );
     }

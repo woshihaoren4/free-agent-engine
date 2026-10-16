@@ -1,5 +1,6 @@
 mod app;
 mod args;
+mod file_browser;
 mod init;
 mod tui;
 mod workspace;

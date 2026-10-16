@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{self, BufRead, BufReader, IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     time::Duration,
 };
@@ -33,21 +33,24 @@ use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
 };
 use serde_json::Value;
 use tokio_stream::StreamExt;
 use tui_markdown::{AlertKind, Options as MarkdownOptions, StyleSheet, from_str_with_options};
 use unicode_width::UnicodeWidthStr;
 
-use crate::args::ColorChoice;
+use crate::{args::ColorChoice, file_browser::FileBrowser};
 
 const SPINNER: &[&str] = &["-", "\\", "|", "/"];
 const OUTPUT_STATUS: &str = "Outputting...";
 const OUTPUT_ANIMATION_STEPS: usize = OUTPUT_STATUS.len() + 3;
 const PAGE_SCROLL_LINES: u16 = 8;
 const MOUSE_SCROLL_LINES: u16 = 3;
-const LOG_PREVIEW_CHARS: usize = 10;
+const LOG_PREVIEW_CHARS: usize = 250;
+const ADD_IMAGE_LABEL: &str = " + Add image";
+const IMAGES_LABEL: &str = "  Images: ";
+const REMOVE_IMAGE_LABEL: &str = " [x]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogStream {
@@ -420,7 +423,7 @@ fn parse_steer(input: &str) -> Option<&str> {
 
 #[derive(Debug)]
 pub enum PromptAction {
-    Submit(String),
+    Submit { text: String, images: Vec<String> },
     Exit,
 }
 
@@ -449,6 +452,8 @@ pub struct TerminalUi {
     messages: Vec<Message>,
     child_streams: HashMap<String, Vec<BufferedMessage>>,
     composer: Composer,
+    attachments: Vec<String>,
+    file_browser: Option<FileBrowser>,
     input_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: String,
@@ -573,6 +578,8 @@ impl TerminalUi {
             messages: Vec::new(),
             child_streams: HashMap::new(),
             composer: Composer::default(),
+            attachments: Vec::new(),
+            file_browser: None,
             input_history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
@@ -699,6 +706,10 @@ impl TerminalUi {
                     };
                     match event? {
                         TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                            if self.file_browser.is_some() {
+                                self.handle_file_browser_key(key);
+                                continue;
+                            }
                             if self.handle_copy_mode_key(key)? {
                                 continue;
                             }
@@ -706,7 +717,9 @@ impl TerminalUi {
                                 return Ok(action);
                             }
                         }
-                        TerminalEvent::Paste(content) if !self.copy_mode => {
+                        TerminalEvent::Paste(content)
+                            if !self.copy_mode && self.file_browser.is_none() =>
+                        {
                             self.composer.insert(&content);
                         }
                         TerminalEvent::Mouse(mouse) if !self.copy_mode => self.handle_mouse(mouse),
@@ -1021,6 +1034,9 @@ impl TerminalUi {
             {
                 return Some(PromptAction::Exit);
             }
+            (KeyCode::Char('o'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.pick_files();
+            }
             (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.composer.insert("\n");
             }
@@ -1030,13 +1046,17 @@ impl TerminalUi {
                 self.composer.insert("\n");
             }
             (KeyCode::Enter, _) => {
-                if let Some(input) = self.composer.take() {
-                    if self.input_history.last() != Some(&input) {
-                        self.input_history.push(input.clone());
+                let text = self.composer.take().unwrap_or_default();
+                if !text.is_empty() || !self.attachments.is_empty() {
+                    if !text.is_empty() && self.input_history.last() != Some(&text) {
+                        self.input_history.push(text.clone());
                     }
                     self.history_index = None;
                     self.history_draft.clear();
-                    return Some(PromptAction::Submit(input));
+                    return Some(PromptAction::Submit {
+                        text,
+                        images: std::mem::take(&mut self.attachments),
+                    });
                 }
             }
             (KeyCode::Char(character), modifiers)
@@ -1061,6 +1081,77 @@ impl TerminalUi {
             _ => {}
         }
         None
+    }
+
+    fn pick_files(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Some(files) = rfd::FileDialog::new()
+                .set_directory(&self.cwd)
+                .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+                .pick_files()
+            else {
+                return;
+            };
+            self.add_attachments(files);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            self.file_browser = Some(FileBrowser::new(&self.cwd));
+        }
+    }
+
+    fn add_attachments(&mut self, files: impl IntoIterator<Item = PathBuf>) {
+        for file in files {
+            let file = file.canonicalize().unwrap_or(file);
+            if !file.is_file() {
+                continue;
+            }
+            let file = file.display().to_string();
+            if !self.attachments.contains(&file) {
+                self.attachments.push(file);
+            }
+        }
+    }
+
+    fn handle_file_browser_key(&mut self, key: KeyEvent) {
+        let mut attach = false;
+        let mut close = false;
+        let Some(browser) = self.file_browser.as_mut() else {
+            return;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => close = true,
+            (KeyCode::Up, _) => browser.move_cursor(-1),
+            (KeyCode::Down, _) => browser.move_cursor(1),
+            (KeyCode::PageUp, _) => browser.move_cursor(-(PAGE_SCROLL_LINES as isize)),
+            (KeyCode::PageDown, _) => browser.move_cursor(PAGE_SCROLL_LINES as isize),
+            (KeyCode::Home, _) => browser.move_to_start(),
+            (KeyCode::End, _) => browser.move_to_end(),
+            (KeyCode::Backspace | KeyCode::Left, _) => browser.go_to_parent(),
+            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                attach = browser.selected_count() > 0;
+            }
+            (KeyCode::Enter | KeyCode::Right, _) => browser.activate(),
+            (KeyCode::Char(' '), _) => browser.toggle_selected(),
+            (KeyCode::Char('a' | 'A'), modifiers)
+                if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                attach = browser.selected_count() > 0;
+            }
+            _ => {}
+        }
+        if close {
+            self.file_browser = None;
+        } else if attach {
+            let files = self
+                .file_browser
+                .take()
+                .map(|browser| browser.selected_paths())
+                .unwrap_or_default();
+            self.add_attachments(files);
+        }
     }
 
     fn navigate_history(&mut self, older: bool) {
@@ -1160,8 +1251,13 @@ impl TerminalUi {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.file_browser.is_some() {
+            return;
+        }
         let frame_area = self.terminal.get_frame().area();
-        let composer_area = frame_areas(frame_area, &self.composer)[2];
+        let areas = frame_areas(frame_area, &self.composer);
+        let composer_area = areas[2];
+        let attachment_area = areas[3];
         let composer_width = composer_area.width.saturating_sub(4).max(1) as usize;
         let composer_height = composer_area.height.saturating_sub(2).max(1);
         let max_composer_scroll = self
@@ -1174,6 +1270,20 @@ impl TerminalUi {
             && mouse.row >= composer_area.y
             && mouse.row < composer_area.bottom();
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if matches!(self.state, RunState::Idle | RunState::Failed)
+                    && self.mode == Mode::Agent
+                    && mouse.row == attachment_area.y
+                    && mouse.column >= attachment_area.x
+                    && mouse.column < attachment_area.right() =>
+            {
+                let column = mouse.column.saturating_sub(attachment_area.x);
+                if let Some(index) = attachment_remove_index(&self.attachments, column) {
+                    self.attachments.remove(index);
+                } else if column < ADD_IMAGE_LABEL.width() as u16 {
+                    self.pick_files();
+                }
+            }
             MouseEventKind::ScrollUp if over_scrollable_composer => {
                 self.composer
                     .scroll_up(MOUSE_SCROLL_LINES, max_composer_scroll);
@@ -1244,6 +1354,8 @@ impl TerminalUi {
         let spinner = self.spinner;
         let messages = &self.messages;
         let composer = &self.composer;
+        let attachments = &self.attachments;
+        let file_browser = self.file_browser.as_ref();
         let scroll_from_bottom = self.scroll_from_bottom;
         let copy_mode = self.copy_mode;
 
@@ -1262,10 +1374,14 @@ impl TerminalUi {
                     spinner,
                     messages,
                     composer,
+                    attachments,
                     scroll_from_bottom,
                     copy_mode,
                 },
             );
+            if let Some(browser) = file_browser {
+                draw_file_browser(frame, browser, color);
+            }
         })?;
         Ok(())
     }
@@ -1313,17 +1429,19 @@ struct ViewModel<'a> {
     spinner: usize,
     messages: &'a [Message],
     composer: &'a Composer,
+    attachments: &'a [String],
     scroll_from_bottom: u16,
     copy_mode: bool,
 }
 
-fn frame_areas(area: Rect, composer: &Composer) -> [Rect; 4] {
+fn frame_areas(area: Rect, composer: &Composer) -> [Rect; 5] {
     let composer_width = area.width.saturating_sub(4).max(1) as usize;
     let composer_height = (composer.visual_lines(composer_width) as u16 + 2).clamp(3, 8);
     Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(composer_height),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(area)
@@ -1335,7 +1453,94 @@ fn draw_frame(frame: &mut Frame<'_>, view: ViewModel<'_>) {
     draw_header(frame, areas[0], &view);
     draw_transcript(frame, areas[1], &view);
     draw_composer(frame, areas[2], &view);
-    draw_footer(frame, areas[3], &view);
+    draw_attachments(frame, areas[3], &view);
+    draw_footer(frame, areas[4], &view);
+}
+
+fn draw_file_browser(frame: &mut Frame<'_>, browser: &FileBrowser, use_color: bool) {
+    let frame_area = frame.area();
+    let width = frame_area.width.saturating_sub(4).min(100);
+    let height = frame_area.height.saturating_sub(2).min(24);
+    let area = Rect::new(
+        frame_area.x + frame_area.width.saturating_sub(width) / 2,
+        frame_area.y + frame_area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+
+    let accent = color(use_color, Color::Cyan);
+    let block = Block::default()
+        .title(format!(
+            " Attach images - {} ",
+            browser.directory().display()
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(inner);
+    let list_area = sections[0];
+    let visible_rows = list_area.height as usize;
+    let entries = browser.entries();
+    let max_offset = entries.len().saturating_sub(visible_rows);
+    let offset = browser
+        .cursor()
+        .saturating_sub(visible_rows / 2)
+        .min(max_offset);
+
+    let mut lines = Vec::new();
+    if let Some(error) = browser.error() {
+        lines.push(Line::from(Span::styled(
+            format!("Cannot read directory: {error}"),
+            Style::default().fg(color(use_color, Color::Red)),
+        )));
+    } else if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No image files in this directory",
+            Style::default().fg(color(use_color, Color::DarkGray)),
+        )));
+    } else {
+        for (index, entry) in entries.iter().enumerate().skip(offset).take(visible_rows) {
+            let marker = if entry.is_dir {
+                "[D]"
+            } else if browser.is_selected(&entry.path) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let suffix = if entry.is_dir { "/" } else { "" };
+            let style = if index == browser.cursor() {
+                Style::default().fg(Color::Black).bg(accent).bold()
+            } else if browser.is_selected(&entry.path) {
+                Style::default().fg(accent)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {}{suffix}", entry.name),
+                style,
+            )));
+        }
+    }
+
+    let footer = Text::from(vec![
+        Line::from(format!(
+            "Selected: {}  Space toggle  Enter open/toggle",
+            browser.selected_count()
+        )),
+        Line::from("A/Ctrl+Enter attach  Backspace parent  Esc cancel"),
+    ]);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines), list_area);
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(color(use_color, Color::DarkGray))),
+        sections[1],
+    );
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
@@ -1488,7 +1693,9 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
             }
             RunState::Running => " Esc interrupt  F2 copy  Wheel/PgUp/PgDn scroll ",
             RunState::Completed => " Enter close  F2 copy  Wheel/PgUp/PgDn scroll ",
-            _ => " Enter send  Shift+Enter newline  F2 copy  Wheel/PgUp/PgDn scroll  Ctrl+C quit ",
+            _ => {
+                " Enter send  Shift+Enter newline  Ctrl+O attach  F2 copy  PgUp/PgDn scroll  Ctrl+C quit "
+            }
         }
     };
     frame.render_widget(
@@ -1498,6 +1705,68 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
         ))),
         area,
     );
+}
+
+fn draw_attachments(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
+    let enabled =
+        matches!(view.state, RunState::Idle | RunState::Failed) && view.mode == Mode::Agent;
+    let button_color = if enabled {
+        color(view.color, Color::Cyan)
+    } else {
+        color(view.color, Color::DarkGray)
+    };
+    let mut spans = vec![
+        Span::styled(" + ", Style::default().fg(button_color).bold()),
+        Span::styled("Add image", Style::default().fg(button_color)),
+    ];
+    if !view.attachments.is_empty() {
+        spans.push(Span::styled(
+            IMAGES_LABEL,
+            Style::default().fg(color(view.color, Color::DarkGray)),
+        ));
+        for (index, attachment) in view.attachments.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(
+                    ", ",
+                    Style::default().fg(color(view.color, Color::DarkGray)),
+                ));
+            }
+            spans.push(Span::raw(attachment_name(attachment).to_string()));
+            spans.push(Span::styled(
+                REMOVE_IMAGE_LABEL,
+                Style::default().fg(if enabled {
+                    color(view.color, Color::Red)
+                } else {
+                    color(view.color, Color::DarkGray)
+                }),
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn attachment_name(attachment: &str) -> &str {
+    Path::new(attachment)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(attachment)
+}
+
+fn attachment_remove_index(attachments: &[String], column: u16) -> Option<usize> {
+    let mut offset = ADD_IMAGE_LABEL.width() + IMAGES_LABEL.width();
+    for (index, attachment) in attachments.iter().enumerate() {
+        if index > 0 {
+            offset += 2;
+        }
+        offset += attachment_name(attachment).width();
+        let remove_start = offset + 1;
+        let remove_end = offset + REMOVE_IMAGE_LABEL.width();
+        if (remove_start..remove_end).contains(&(column as usize)) {
+            return Some(index);
+        }
+        offset = remove_end;
+    }
+    None
 }
 
 fn transcript_text(messages: &[Message], use_color: bool, pulse: usize) -> Text<'static> {
@@ -2032,6 +2301,7 @@ mod tests {
                         spinner: 0,
                         messages: &[],
                         composer: &composer,
+                        attachments: &[],
                         scroll_from_bottom: 0,
                         copy_mode: false,
                     },
@@ -2062,6 +2332,7 @@ mod tests {
                         spinner: 0,
                         messages: &[],
                         composer: &composer,
+                        attachments: &[],
                         scroll_from_bottom: 0,
                         copy_mode: false,
                     },
@@ -2140,18 +2411,22 @@ mod tests {
     }
 
     #[test]
-    fn log_message_uses_ten_character_preview_and_full_content() {
+    fn log_message_uses_configured_character_preview_and_full_content() {
         let mut messages = Vec::new();
+        let content = "界".repeat(LOG_PREVIEW_CHARS + 1);
         push_log_message(
             &mut messages,
             CapturedLog {
                 kind: LogKind::Output,
-                content: "一二三四五六七八九十十一条日志".to_string(),
+                content: content.clone(),
             },
         );
 
-        assert_eq!(messages[0].title, "LOG: 一二三四五六七八九十");
-        assert_eq!(messages[0].content, "一二三四五六七八九十十一条日志");
+        assert_eq!(
+            messages[0].title,
+            format!("LOG: {}", "界".repeat(LOG_PREVIEW_CHARS))
+        );
+        assert_eq!(messages[0].content, content);
         assert!(messages[0].is_collapsible());
     }
 
@@ -2376,6 +2651,18 @@ mod tests {
     }
 
     #[test]
+    fn attachment_remove_hit_test_handles_multiple_and_unicode_names() {
+        let attachments = vec![
+            "/workspace/one.png".to_string(),
+            "/workspace/图.png".to_string(),
+        ];
+
+        assert_eq!(attachment_remove_index(&attachments, 30), Some(0));
+        assert_eq!(attachment_remove_index(&attachments, 42), Some(1));
+        assert_eq!(attachment_remove_index(&attachments, 29), None);
+    }
+
+    #[test]
     fn compact_layout_renders_without_overlap() {
         let backend = TestBackend::new(60, 16);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2403,6 +2690,7 @@ mod tests {
                         spinner: 0,
                         messages: &messages,
                         composer: &composer,
+                        attachments: &["/workspace/report.png".to_string()],
                         scroll_from_bottom: 0,
                         copy_mode: false,
                     },
@@ -2414,6 +2702,9 @@ mod tests {
         assert!(content.contains("FAE  AGENT:test-agent USER:test-user SESSION:test-session"));
         assert!(content.contains("A response that remains visible"));
         assert!(content.contains("Message"));
+        assert!(content.contains("+ Add image"));
+        assert!(content.contains("report.png"));
+        assert!(content.contains("[x]"));
         assert!(content.contains("Enter send"));
         assert!(content.contains("F2 copy"));
     }
@@ -2446,6 +2737,7 @@ mod tests {
                         spinner: 0,
                         messages: &messages,
                         composer: &composer,
+                        attachments: &[],
                         scroll_from_bottom: 0,
                         copy_mode: false,
                     },

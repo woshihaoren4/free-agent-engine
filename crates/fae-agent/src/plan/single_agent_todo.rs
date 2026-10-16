@@ -181,6 +181,7 @@ pub(super) struct SingleAgentTodoPlan {
     turn_id: u64,
     session: CommonSession,
     todo: SingleAgentTodo,
+    images: Vec<String>,
     stage: TodoPlanStage,
     child: Option<SingleAgentPlan>,
     child_session: Option<CommonSession>,
@@ -200,6 +201,17 @@ impl SingleAgentTodoPlan {
         turn_id: u64,
         session: CommonSession,
     ) -> Self {
+        Self::new_with_images(ctx, template, input, Vec::new(), turn_id, session)
+    }
+
+    pub(super) fn new_with_images(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        images: Vec<String>,
+        turn_id: u64,
+        session: CommonSession,
+    ) -> Self {
         Self {
             id: format!("single_agent_todo-{}", wd_tools::uuid::v4()),
             ctx,
@@ -207,6 +219,7 @@ impl SingleAgentTodoPlan {
             turn_id,
             session,
             todo: SingleAgentTodo::new(input),
+            images,
             stage: TodoPlanStage::Reset,
             child: None,
             child_session: None,
@@ -223,14 +236,22 @@ impl SingleAgentTodoPlan {
         ctx: Ctx,
         template: SingleAgentTemplate,
         input: String,
+        images: Vec<String>,
         turn_id: u64,
         session: CommonSession,
         output: String,
     ) -> anyhow::Result<(Self, PlanNext)> {
         let created_todos = format_created_todos(&output)?;
-        let mut plan = Self::new(ctx, template, input.clone(), turn_id, session);
+        let mut plan = Self::new_with_images(
+            ctx,
+            template,
+            input.clone(),
+            images.clone(),
+            turn_id,
+            session,
+        );
         plan.todo.chat_history.extend([
-            SessionMessage::user(input),
+            SessionMessage::user_with_images(input, images),
             SessionMessage::assistant(created_todos),
         ]);
         let TodoNext::Execute(prompt) = plan.todo.next(&output)? else {
@@ -334,11 +355,23 @@ impl SingleAgentTodoPlan {
         let child_session =
             CommonSession::new_in_agent(self.session.clone(), self.template.agent.name.clone());
         let child_turn_id = child_session.activate_turn()?;
-        let mut child = if self.todo.phase == TodoPhase::Planning {
+        let mut child = if self.todo.phase == TodoPhase::Planning && self.images.is_empty() {
             SingleAgentPlan::new_ephemeral_until_tool_completion(
                 self.ctx.clone(),
                 self.child_template(),
                 prompt.clone(),
+                child_turn_id,
+                child_session.clone(),
+                self.todo.chat_history.clone(),
+                TODO_TOOL_NAME,
+                format_created_todos,
+            )
+        } else if self.todo.phase == TodoPhase::Planning {
+            SingleAgentPlan::new_ephemeral_until_tool_completion_with_images(
+                self.ctx.clone(),
+                self.child_template(),
+                prompt.clone(),
+                self.images.clone(),
                 child_turn_id,
                 child_session.clone(),
                 self.todo.chat_history.clone(),
@@ -378,10 +411,14 @@ impl SingleAgentTodoPlan {
             .current_prompt
             .take()
             .ok_or_else(|| anyhow::anyhow!("single-agent todo step has no input prompt"))?;
-        self.todo.chat_history.extend([
-            SessionMessage::user(prompt),
-            SessionMessage::assistant(output.clone()),
-        ]);
+        let user_message = if self.todo.phase == TodoPhase::Planning {
+            SessionMessage::user_with_images(prompt, self.images.clone())
+        } else {
+            SessionMessage::user(prompt)
+        };
+        self.todo
+            .chat_history
+            .extend([user_message, SessionMessage::assistant(output.clone())]);
         Ok(output)
     }
 
@@ -392,7 +429,10 @@ impl SingleAgentTodoPlan {
             .on_save(
                 &self.hook_context(None),
                 vec![
-                    SessionMessage::user(self.todo.requirement.clone()),
+                    SessionMessage::user_with_images(
+                        self.todo.requirement.clone(),
+                        self.images.clone(),
+                    ),
                     SessionMessage::assistant(content.clone()),
                 ],
             )
@@ -649,6 +689,7 @@ mod tests {
             prompt: "You are a test agent.".to_string(),
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
+                image_detail: Default::default(),
                 trigger_compression_size: usize::MAX,
                 history_turns: 10,
                 max_completion_tokens: Some(1024),

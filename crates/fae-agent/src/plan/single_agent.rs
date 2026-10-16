@@ -7,18 +7,23 @@ use std::{
     },
 };
 
+use anyhow::Context;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
     ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestMessageContentPartText,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTools,
-    CreateChatCompletionRequest, FinishReason, FunctionCall, FunctionObject,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionTools, CreateChatCompletionRequest, FinishReason, FunctionCall, FunctionObject,
+    ImageDetail, ImageUrl,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Notify, RwLock};
 use tokio_stream::StreamExt;
+use wd_tools::Base64StdEncode;
 
 use super::single_agent_todo::{SingleAgentMode, SingleAgentTodoPlan};
 use crate::{
@@ -46,6 +51,8 @@ pub struct SingleAgentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleAgentModelConfig {
     pub model: String,
+    #[serde(default)]
+    pub image_detail: ImageDetail,
     #[serde(default = "default_trigger_compression_size")]
     pub trigger_compression_size: usize,
     #[serde(default = "default_history_turns")]
@@ -108,6 +115,8 @@ const fn default_max_completion_tokens() -> Option<u32> {
 const MAX_EMPTY_MODEL_RETRIES: usize = 1;
 const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without assistant output. \
 Continue the task from the available context and return either a tool call or a final answer.";
+const IMAGE_TOKEN_COST_ENV: &str = "FAE_IMAGE_TOKEN_COST";
+const DEFAULT_IMAGE_TOKEN_COST: usize = 1_280;
 
 pub const COMPRESSION_TASK_TYPE: &str = "workflow.compression";
 pub const DEFAULT_HISTORY_TURNS: usize = 10;
@@ -166,6 +175,7 @@ impl AgentToolInvocation {
 pub struct SingleAgentEnv {
     pub source: SingleAgentSource,
     pub input: String,
+    pub images: Vec<String>,
     pub user_id: String,
     /// `None` or an empty string uses the standard flow; `"todo"` enables todo orchestration.
     pub mode: Option<String>,
@@ -220,6 +230,7 @@ impl SingleAgentEnv {
             Self {
                 source,
                 input: input.into(),
+                images: Vec::new(),
                 user_id,
                 mode: None,
                 session_id: None,
@@ -247,6 +258,11 @@ impl SingleAgentEnv {
         self
     }
 
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = images;
+        self
+    }
+
     fn with_ancestor_agents(mut self, ancestor_agents: Vec<String>) -> Self {
         self.ancestor_agents = ancestor_agents;
         self
@@ -269,6 +285,7 @@ impl SingleAgentEnv {
             Self {
                 source,
                 input: input.into(),
+                images: Vec::new(),
                 user_id,
                 mode: None,
                 session_id: None,
@@ -291,6 +308,7 @@ impl SingleAgentEnv {
             Self {
                 source,
                 input: input.into(),
+                images: Vec::new(),
                 user_id,
                 mode: None,
                 session_id: None,
@@ -646,10 +664,12 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
         }
 
         let turn_id = self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed);
+        let images = input.images.unwrap_or_default();
         let plan = build_single_agent_plan(
             binding.ctx.clone(),
             binding.template,
             input.text,
+            images,
             turn_id,
             self.clone(),
             binding.mode,
@@ -800,7 +820,10 @@ impl SingleAgentPlanBuilder {
 #[async_trait::async_trait]
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
-        anyhow::ensure!(!env.input.trim().is_empty(), "input cannot be empty");
+        anyhow::ensure!(
+            !env.input.trim().is_empty() || !env.images.is_empty(),
+            "input and images cannot both be empty"
+        );
         anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
         env.session.set_user_id(env.user_id.clone());
         let mode = SingleAgentMode::parse(env.mode.as_deref())?;
@@ -918,6 +941,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             ctx,
             template,
             env.input,
+            env.images,
             turn_id,
             env.session,
             mode,
@@ -1559,6 +1583,7 @@ pub(super) struct SingleAgentPlan {
     ctx: Ctx,
     template: SingleAgentTemplate,
     input: String,
+    images: Vec<String>,
     turn_id: u64,
     session: CommonSession,
     stage: SingleAgentStage,
@@ -1584,15 +1609,24 @@ fn build_single_agent_plan(
     ctx: Ctx,
     template: SingleAgentTemplate,
     input: String,
+    images: Vec<String>,
     turn_id: u64,
     session: CommonSession,
     mode: Option<SingleAgentMode>,
 ) -> Box<dyn Plan> {
     match mode {
-        Some(SingleAgentMode::Todo) => Box::new(SingleAgentTodoPlan::new(
+        Some(SingleAgentMode::Todo) if images.is_empty() => Box::new(SingleAgentTodoPlan::new(
             ctx, template, input, turn_id, session,
         )),
-        None => Box::new(SingleAgentPlan::new(ctx, template, input, turn_id, session)),
+        Some(SingleAgentMode::Todo) => Box::new(SingleAgentTodoPlan::new_with_images(
+            ctx, template, input, images, turn_id, session,
+        )),
+        None if images.is_empty() => {
+            Box::new(SingleAgentPlan::new(ctx, template, input, turn_id, session))
+        }
+        None => Box::new(SingleAgentPlan::new_with_images(
+            ctx, template, input, images, turn_id, session,
+        )),
     }
 }
 
@@ -1608,6 +1642,28 @@ impl SingleAgentPlan {
             ctx,
             template,
             input,
+            Vec::new(),
+            turn_id,
+            session,
+            true,
+            Vec::new(),
+            None,
+        )
+    }
+
+    pub(super) fn new_with_images(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        images: Vec<String>,
+        turn_id: u64,
+        session: CommonSession,
+    ) -> Self {
+        Self::new_with_persistence(
+            ctx,
+            template,
+            input,
+            images,
             turn_id,
             session,
             true,
@@ -1628,6 +1684,7 @@ impl SingleAgentPlan {
             ctx,
             template,
             input,
+            Vec::new(),
             turn_id,
             session,
             false,
@@ -1646,10 +1703,35 @@ impl SingleAgentPlan {
         tool_name: impl Into<String>,
         output_formatter: ToolCompletionFormatter,
     ) -> Self {
+        Self::new_ephemeral_until_tool_completion_with_images(
+            ctx,
+            template,
+            input,
+            Vec::new(),
+            turn_id,
+            session,
+            additional_history,
+            tool_name,
+            output_formatter,
+        )
+    }
+
+    pub(super) fn new_ephemeral_until_tool_completion_with_images(
+        ctx: Ctx,
+        template: SingleAgentTemplate,
+        input: String,
+        images: Vec<String>,
+        turn_id: u64,
+        session: CommonSession,
+        additional_history: Vec<SessionMessage>,
+        tool_name: impl Into<String>,
+        output_formatter: ToolCompletionFormatter,
+    ) -> Self {
         Self::new_with_persistence(
             ctx,
             template,
             input,
+            images,
             turn_id,
             session,
             false,
@@ -1665,18 +1747,20 @@ impl SingleAgentPlan {
         ctx: Ctx,
         template: SingleAgentTemplate,
         input: String,
+        images: Vec<String>,
         turn_id: u64,
         session: CommonSession,
         persist_session: bool,
         additional_history: Vec<SessionMessage>,
         terminal_tool_completion: Option<TerminalToolCompletion>,
     ) -> Self {
-        let initial_message = SessionMessage::user(input.clone());
+        let initial_message = SessionMessage::user_with_images(input.clone(), images.clone());
         Self {
             id: format!("single_agent-{}", wd_tools::uuid::v4()),
             ctx,
             template,
             input,
+            images,
             turn_id,
             session,
             stage: SingleAgentStage::Memory,
@@ -1868,21 +1952,25 @@ impl SingleAgentPlan {
 
     async fn append_user_inputs(&mut self, inputs: Vec<SessionInputData>) -> anyhow::Result<()> {
         for input in inputs {
-            let input = input.text;
+            let images = input.images.unwrap_or_default();
+            let content =
+                user_message_content(&input.text, &images, &self.template.model.image_detail)
+                    .await?;
             self.emit(
                 self.template.agent.user_id.clone(),
                 SessionEventData::UserInput {
-                    content: input.clone(),
+                    content: input.text.clone(),
                 },
             )
             .await?;
             self.messages.push(ChatCompletionRequestMessage::User(
                 ChatCompletionRequestUserMessage {
-                    content: input.clone().into(),
+                    content,
                     ..Default::default()
                 },
             ));
-            self.unsaved_messages.push(SessionMessage::user(input));
+            self.unsaved_messages
+                .push(SessionMessage::user_with_images(input.text, images));
         }
         Ok(())
     }
@@ -1916,14 +2004,21 @@ impl SingleAgentPlan {
             .unwrap_or(0);
         let start = history_start.max(summary_start);
         for message in &history[start..] {
-            self.messages.push(session_message_to_chat(message));
+            self.messages
+                .push(session_message_to_chat(message, &self.template.model.image_detail).await?);
         }
         for message in &self.additional_history {
-            self.messages.push(session_message_to_chat(message));
+            self.messages
+                .push(session_message_to_chat(message, &self.template.model.image_detail).await?);
         }
         self.messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
-                content: self.input.clone().into(),
+                content: user_message_content(
+                    &self.input,
+                    &self.images,
+                    &self.template.model.image_detail,
+                )
+                .await?,
                 ..Default::default()
             },
         ));
@@ -2360,6 +2455,7 @@ impl SingleAgentPlan {
                 self.ctx.clone(),
                 self.template.clone(),
                 self.input.clone(),
+                self.images.clone(),
                 self.turn_id,
                 self.session.clone(),
                 output,
@@ -2572,10 +2668,52 @@ impl ToolCallAccumulator {
     }
 }
 
-fn estimated_tokens(value: &impl Serialize) -> usize {
-    serde_json::to_string(value)
+fn estimated_tokens(request: &CreateChatCompletionRequest) -> usize {
+    estimated_tokens_with_image_cost(request, image_token_cost())
+}
+
+fn estimated_tokens_with_image_cost(
+    request: &CreateChatCompletionRequest,
+    image_token_cost: usize,
+) -> usize {
+    let mut request = request.clone();
+    let image_count = request
+        .messages
+        .iter_mut()
+        .filter_map(|message| match message {
+            ChatCompletionRequestMessage::User(message) => match &mut message.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => Some(parts),
+                ChatCompletionRequestUserMessageContent::Text(_) => None,
+            },
+            _ => None,
+        })
+        .map(|parts| {
+            let original_len = parts.len();
+            parts.retain(|part| {
+                !matches!(
+                    part,
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                )
+            });
+            original_len - parts.len()
+        })
+        .sum::<usize>();
+
+    let text_tokens = serde_json::to_string(&request)
         .map(|json| json.chars().count().div_ceil(4).max(1))
-        .unwrap_or(1)
+        .unwrap_or(1);
+    text_tokens.saturating_add(image_count.saturating_mul(image_token_cost))
+}
+
+fn image_token_cost() -> usize {
+    image_token_cost_from(std::env::var(IMAGE_TOKEN_COST_ENV).ok().as_deref())
+}
+
+fn image_token_cost_from(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_IMAGE_TOKEN_COST)
 }
 
 fn summary_chat_message(content: &str) -> ChatCompletionRequestMessage {
@@ -2585,11 +2723,19 @@ fn summary_chat_message(content: &str) -> ChatCompletionRequestMessage {
     })
 }
 
-fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMessage {
-    match &message.role {
+async fn session_message_to_chat(
+    message: &SessionMessage,
+    image_detail: &ImageDetail,
+) -> anyhow::Result<ChatCompletionRequestMessage> {
+    Ok(match &message.role {
         SessionMessageRole::User => {
             ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                content: message.content.clone().into(),
+                content: user_message_content(
+                    &message.content,
+                    message.images.as_deref().unwrap_or_default(),
+                    image_detail,
+                )
+                .await?,
                 ..Default::default()
             })
         }
@@ -2600,7 +2746,70 @@ fn session_message_to_chat(message: &SessionMessage) -> ChatCompletionRequestMes
             })
         }
         SessionMessageRole::Summary => summary_chat_message(&message.content),
+    })
+}
+
+async fn user_message_content(
+    text: &str,
+    images: &[String],
+    image_detail: &ImageDetail,
+) -> anyhow::Result<ChatCompletionRequestUserMessageContent> {
+    if images.is_empty() {
+        return Ok(ChatCompletionRequestUserMessageContent::Text(
+            text.to_string(),
+        ));
     }
+
+    let mut parts = Vec::with_capacity(images.len() + usize::from(!text.is_empty()));
+    if !text.is_empty() {
+        parts.push(ChatCompletionRequestUserMessageContentPart::Text(
+            ChatCompletionRequestMessageContentPartText {
+                text: text.to_string(),
+            },
+        ));
+    }
+    for image in images {
+        let url = resolve_image_url(image).await?;
+        parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            ChatCompletionRequestMessageContentPartImage {
+                image_url: ImageUrl {
+                    url,
+                    detail: Some(image_detail.clone()),
+                },
+            },
+        ));
+    }
+    Ok(ChatCompletionRequestUserMessageContent::Array(parts))
+}
+
+async fn resolve_image_url(image: &str) -> anyhow::Result<String> {
+    if image.starts_with("http://")
+        || image.starts_with("https://")
+        || image.starts_with("data:image/")
+    {
+        return Ok(image.to_string());
+    }
+
+    let path = Path::new(image);
+    let format = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .and_then(|extension| match extension.as_str() {
+            "jpg" | "jpeg" => Some("jpeg"),
+            "png" => Some("png"),
+            "gif" => Some("gif"),
+            "webp" => Some("webp"),
+            _ => None,
+        })
+        .with_context(|| format!("unsupported image format for `{}`", path.display()))?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read attached image `{}`", path.display()))?;
+    Ok(format!(
+        "data:image/{format};base64,{}",
+        bytes.base64_encode_std()
+    ))
 }
 
 #[cfg(test)]
@@ -2609,6 +2818,103 @@ mod tests {
     use async_openai::types::chat::{
         CreateChatCompletionResponse, FunctionCallStream, FunctionType,
     };
+
+    #[tokio::test]
+    async fn user_message_content_keeps_remote_image_urls() {
+        let content = user_message_content(
+            "describe this",
+            &["https://example.com/image.png".to_string()],
+            &ImageDetail::High,
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(content).unwrap();
+
+        assert_eq!(value[0]["type"], "text");
+        assert_eq!(value[0]["text"], "describe this");
+        assert_eq!(value[1]["type"], "image_url");
+        assert_eq!(value[1]["image_url"]["detail"], "high");
+        assert_eq!(
+            value[1]["image_url"]["url"],
+            "https://example.com/image.png"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_content_encodes_local_images_as_data_urls() {
+        let path = std::env::temp_dir().join(format!("fae-image-{}.png", wd_tools::uuid::v4()));
+        tokio::fs::write(&path, [1, 2, 3]).await.unwrap();
+
+        let content = user_message_content("", &[path.display().to_string()], &ImageDetail::Auto)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+        let value = serde_json::to_value(content).unwrap();
+
+        assert_eq!(value[0]["type"], "image_url");
+        assert_eq!(value[0]["image_url"]["detail"], "auto");
+        assert_eq!(value[0]["image_url"]["url"], "data:image/png;base64,AQID");
+    }
+
+    #[test]
+    fn image_token_cost_uses_configured_value_or_default() {
+        assert_eq!(image_token_cost_from(None), DEFAULT_IMAGE_TOKEN_COST);
+        assert_eq!(image_token_cost_from(Some("")), DEFAULT_IMAGE_TOKEN_COST);
+        assert_eq!(
+            image_token_cost_from(Some("invalid")),
+            DEFAULT_IMAGE_TOKEN_COST
+        );
+        assert_eq!(image_token_cost_from(Some("0")), DEFAULT_IMAGE_TOKEN_COST);
+        assert_eq!(image_token_cost_from(Some("2048")), 2_048);
+    }
+
+    #[test]
+    fn estimated_tokens_assigns_each_image_a_fixed_cost() {
+        fn request_with_images(urls: &[String]) -> CreateChatCompletionRequest {
+            CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Array(
+                            urls.iter()
+                                .map(|url| {
+                                    ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                                        ChatCompletionRequestMessageContentPartImage {
+                                            image_url: ImageUrl::from(url.clone()),
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    },
+                )],
+                ..Default::default()
+            }
+        }
+
+        let no_images = request_with_images(&[]);
+        let short_urls = request_with_images(&[
+            "https://example.com/a.png".to_string(),
+            "https://example.com/b.png".to_string(),
+        ]);
+        let data_urls = request_with_images(&[
+            format!("data:image/png;base64,{}", "A".repeat(10_000)),
+            format!("data:image/png;base64,{}", "B".repeat(20_000)),
+        ]);
+        let image_token_cost = 1_280;
+        let expected =
+            estimated_tokens_with_image_cost(&no_images, image_token_cost) + 2 * image_token_cost;
+
+        assert_eq!(
+            estimated_tokens_with_image_cost(&short_urls, image_token_cost),
+            expected
+        );
+        assert_eq!(
+            estimated_tokens_with_image_cost(&data_urls, image_token_cost),
+            expected
+        );
+    }
 
     #[derive(Debug)]
     struct PromptSuffixHookBuilder {
@@ -2655,6 +2961,7 @@ mod tests {
             },
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
+                image_detail: Default::default(),
                 trigger_compression_size: 8_192,
                 history_turns: 10,
                 max_completion_tokens: Some(1_024),
@@ -2724,6 +3031,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.trigger_compression_size, 32_000);
+        assert_eq!(config.image_detail, ImageDetail::Auto);
         assert_eq!(config.history_turns, DEFAULT_HISTORY_TURNS);
         assert_eq!(config.max_completion_tokens, Some(32_000));
         assert_eq!(config.max_tool_iterations, 128);
@@ -2733,13 +3041,16 @@ mod tests {
     fn model_config_uses_trigger_compression_size_field() {
         let config: SingleAgentModelConfig = serde_json::from_value(serde_json::json!({
             "model": "test-model",
+            "image_detail": "high",
             "trigger_compression_size": 16_000,
             "history_turns": 10
         }))
         .unwrap();
 
+        assert_eq!(config.image_detail, ImageDetail::High);
         assert_eq!(config.trigger_compression_size, 16_000);
         let value = serde_json::to_value(config).unwrap();
+        assert_eq!(value["image_detail"], "high");
         assert_eq!(value["trigger_compression_size"], 16_000);
         assert!(value.get("context_size").is_none());
     }
@@ -4491,6 +4802,7 @@ user-defined rules, and other long-term facts."
             prompt: "be concise".to_string(),
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
+                image_detail: Default::default(),
                 trigger_compression_size: 1_024,
                 history_turns: 2,
                 max_completion_tokens: None,

@@ -34,6 +34,7 @@ The generated configuration has this shape:
   },
   "model": {
     "model": "gpt-4o-mini",
+    "image_detail": "auto",
     "trigger_compression_size": 32000,
     "history_turns": 10,
     "max_completion_tokens": 65536,
@@ -146,11 +147,17 @@ Keyboard controls:
 
 - `Enter`: submit
 - `Ctrl+J` or `Shift+Enter`: insert a newline
+- `Ctrl+O` or click `+ Add image`: attach one or more local images
 - `Up` / `Down`: browse input history
 - `PageUp` / `PageDown`: scroll the transcript
 - `F2`: enter copy mode; drag to select output, then press `F2` or `Esc` to resume
 - `Esc`: interrupt the active run
 - `Ctrl+C`: exit while idle, interrupt while running
+
+On Linux, the in-app file browser uses `Up`/`Down` to navigate, `Enter` to
+open a directory, `Space` to select images, `Backspace` to move to the parent
+directory, and `A` or `Ctrl+Enter` to attach the selection. Other platforms
+use the native file dialog.
 
 The TUI uses the alternate screen by default. Use `--no-alt-screen` to retain
 the interface in terminal scrollback:

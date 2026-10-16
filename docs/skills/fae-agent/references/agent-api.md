@@ -76,6 +76,7 @@ ${FAE_HOST:-~/.fae}/
   },
   "model": {
     "model": "gpt-5",
+    "image_detail": "auto",
     "trigger_compression_size": 32000,
     "history_turns": 10,
     "max_completion_tokens": 65536,
@@ -117,6 +118,7 @@ ${FAE_HOST:-~/.fae}/
 | 字段 | 规则 |
 | --- | --- |
 | `model.model` | 非空；必须是当前模型服务可用的模型名 |
+| `model.image_detail` | 可省略，默认 `auto`；图片理解精度，可选 `auto`、`low`、`high`、`original` |
 | `model.trigger_compression_size` | 可省略，默认 `32000`；显式值必须大于 0，估算 token 超过该值时先压缩上下文 |
 | `model.history_turns` | 可为 0；控制读取多少轮历史 |
 | `model.max_completion_tokens` | 可省略，默认 `65536`；设为 `null` 时不向模型传递该限制 |
