@@ -2188,6 +2188,13 @@ impl SingleAgentPlan {
             .push(ChatCompletionRequestMessage::Assistant(assistant_message));
 
         let mut tasks = Vec::with_capacity(tool_calls.len());
+        let mut available_tools = self
+            .template
+            .tool_routes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        available_tools.sort();
         for call in tool_calls {
             let ChatCompletionMessageToolCalls::Function(call) = call else {
                 anyhow::bail!("custom tool calls are not supported");
@@ -2206,12 +2213,6 @@ impl SingleAgentPlan {
                             .map(|operation| operation == "create")
                     })
                     .unwrap_or(false);
-            let route = self
-                .template
-                .tool_routes
-                .get(&tool_name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("model requested unavailable tool `{tool_name}`"))?;
             self.emit(
                 tool_name.clone(),
                 SessionEventData::ToolCall {
@@ -2220,6 +2221,36 @@ impl SingleAgentPlan {
                 },
             )
             .await?;
+            let Some(route) = self.template.tool_routes.get(&tool_name).cloned() else {
+                let output = serde_json::json!({
+                    "error": {
+                        "type": "unavailable_tool",
+                        "message": format!(
+                            "Tool `{tool_name}` is unavailable. Call one of the available tools \
+                             using its exact name."
+                        ),
+                        "requested_tool": tool_name,
+                        "available_tools": available_tools,
+                    }
+                })
+                .to_string();
+                self.emit(
+                    tool_name,
+                    SessionEventData::ToolOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                        completed: true,
+                    },
+                )
+                .await?;
+                self.messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(output),
+                        tool_call_id: call_id,
+                    },
+                ));
+                continue;
+            };
             let routed = match route {
                 CallableRoute::Tool(runtime_tool_name) => {
                     let request = match runtime_tool_name.as_str() {
@@ -3927,6 +3958,76 @@ user-defined rules, and other long-term facts."
                         .unwrap()
                         .contains("managed by the orchestrator")
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unavailable_tool_is_returned_to_the_model_as_a_tool_error() -> anyhow::Result<()> {
+        let session = CommonSession::new_with_user_id("alice");
+        session.activate_turn()?;
+        let ctx = Ctx::null();
+        let mut template = test_template();
+        template.tool_routes.insert(
+            TODO_TOOL_NAME.to_string(),
+            CallableRoute::Tool(TODO_TOOL_NAME.to_string()),
+        );
+        let mut plan = SingleAgentPlan::new(ctx, template, "update todo".to_string(), 1, session);
+        plan.stage = SingleAgentStage::Model;
+
+        let response: CreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "response-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "content": null,
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "todo_update",
+                            "arguments": "{\"id\":1,\"completed\":true}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "created": 0,
+            "model": "test-model",
+            "object": "chat.completion",
+            "usage": null
+        }))?;
+        let PlanNext::Tasks(mut tasks) = plan
+            .handle_model_response(ModelResponse::Completed(response))
+            .await?
+        else {
+            panic!("expected the model to retry after the tool error");
+        };
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].meta.ty, TaskType::Model);
+        assert!(plan.pending_tools.is_empty());
+        let request =
+            TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let ChatCompletionRequestMessage::Tool(message) = request.req.messages.last().unwrap()
+        else {
+            panic!("expected a tool error message");
+        };
+        assert_eq!(message.tool_call_id, "call-1");
+        let content = serde_json::to_value(&message.content)?;
+        let error: serde_json::Value = serde_json::from_str(
+            content
+                .as_str()
+                .expect("tool error content should be serialized as text"),
+        )?;
+        assert_eq!(error["error"]["type"], "unavailable_tool");
+        assert_eq!(error["error"]["requested_tool"], "todo_update");
+        assert!(
+            error["error"]["available_tools"]
+                .as_array()
+                .is_some_and(|tools| tools.contains(&serde_json::json!(TODO_TOOL_NAME)))
+        );
+        assert_eq!(plan.tool_iterations, 1);
         Ok(())
     }
 
