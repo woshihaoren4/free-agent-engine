@@ -176,6 +176,35 @@ impl EngineRuntime {
     fn forward_events(receiver: Receiver<Event>, runtime: Arc<Self>) {
         tokio::spawn(async move {
             while let Ok(mut event) = receiver.recv().await {
+                if let EventType::TaskResult(result) = &mut event.event_type {
+                    result.track_completion();
+                }
+                match &event.event_type {
+                    EventType::TaskResult(result)
+                        if !matches!(result.meta.ty, TaskType::Model | TaskType::Tool) =>
+                    {
+                        let _ = result.ctx.set_state(fae_agent::ContextState::succeeded(()));
+                        let _ = result.ctx.append_stack(fae_agent::ContextStackDraft::new(
+                            result.meta.clone(),
+                            fae_agent::ContextStackPhase::Succeeded,
+                        ));
+                    }
+                    EventType::TaskError(error) => {
+                        let _ = error
+                            .ctx
+                            .set_state(fae_agent::ContextState::failed(error.error.clone()));
+                        let phase = if error.ctx.state().current().is_cancelled() {
+                            fae_agent::ContextStackPhase::Cancelled
+                        } else {
+                            fae_agent::ContextStackPhase::Failed
+                        };
+                        let _ = error.ctx.append_stack(fae_agent::ContextStackDraft::new(
+                            error.meta.clone(),
+                            phase,
+                        ));
+                    }
+                    _ => {}
+                }
                 let callback_runtime_id = match &event.event_type {
                     EventType::TaskResult(result)
                         if !result.meta.plan_id.is_empty() && !result.meta.publisher.is_empty() =>
@@ -205,7 +234,8 @@ impl EngineRuntime {
                             .expect("callback runtime disappeared after engine build");
                         if let Err(error) = callback_runtime.trigger(&mut event).await {
                             if let Some(ctx) = ctx {
-                                ctx.error(error.to_string());
+                                let _ = ctx
+                                    .set_state(fae_agent::ContextState::failed(error.to_string()));
                             }
                             wd_log::log_error_ln!(
                                 "dispatch task result callback failed: {:?}",
@@ -215,7 +245,9 @@ impl EngineRuntime {
                     });
                 } else {
                     if let EventType::TaskError(error) = &event.event_type {
-                        error.ctx.error(error.error.clone());
+                        let _ = error
+                            .ctx
+                            .set_state(fae_agent::ContextState::failed(error.error.clone()));
                     }
                     if runtime.event_sender.send(event).await.is_err() {
                         break;
@@ -447,8 +479,11 @@ impl Runtime for EngineRuntime {
     }
 
     async fn spawn(&self, task: &mut TaskRequest) -> fae_agent::Result<()> {
-        if task.ctx.is_aborted() {
+        if task.ctx.state().current().is_cancelled() {
             return Err(fae_agent::Error::ContextAborted);
+        }
+        if task.ctx.state().current().is_terminal() {
+            return Err(anyhow::anyhow!("context is already terminal").into());
         }
 
         let ty = task.meta.ty.clone();
@@ -488,8 +523,11 @@ impl Runtime for EngineRuntime {
     }
 
     async fn exec(&self, task: &mut TaskRequest) -> fae_agent::Result<TaskResponse> {
-        if task.ctx.is_aborted() {
+        if task.ctx.state().current().is_cancelled() {
             return Err(fae_agent::Error::ContextAborted);
+        }
+        if task.ctx.state().current().is_terminal() {
+            return Err(anyhow::anyhow!("context is already terminal").into());
         }
 
         let ty = task.meta.ty.clone();
@@ -499,7 +537,16 @@ impl Runtime for EngineRuntime {
 
         for rt in runtimes {
             task.meta.executor = rt.id().to_string();
-            match rt.exec(task).await {
+            let ctx = task.ctx.clone();
+            let result = if ty == TaskType::Plan {
+                rt.exec(task).await
+            } else {
+                tokio::select! {
+                    result = rt.exec(task) => result,
+                    _ = ctx.cancellation() => Err(fae_agent::Error::ContextAborted),
+                }
+            };
+            match result {
                 Err(fae_agent::Error::RuntimeNoSupport) => continue,
                 result => return result,
             }

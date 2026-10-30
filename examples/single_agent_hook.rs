@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    execution.result::<()>().await?;
+    execution.result::<serde_json::Value>().await?;
     engine.exit().await?;
     Ok(())
 }

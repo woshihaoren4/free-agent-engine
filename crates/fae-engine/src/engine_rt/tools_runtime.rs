@@ -172,13 +172,21 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
         let event_sender = self.event_sender.clone();
 
         tokio::spawn(async move {
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             let runtime_id = Self::ID.to_string();
             if meta.publisher.is_empty() {
                 meta.publisher = runtime_id.clone();
             }
             let response_ctx = ctx.clone();
             let error_meta = meta.clone();
-            let result = tool.exec(&ctx, req).await.map(|resp| {
+            let result = tokio::select! {
+                result = tool.exec(&ctx, req) => result,
+                reason = ctx.cancellation() => Err(anyhow::anyhow!("{}", reason)),
+            }
+            .map(|resp| {
                 let response = TaskResp {
                     ctx: response_ctx,
                     meta,

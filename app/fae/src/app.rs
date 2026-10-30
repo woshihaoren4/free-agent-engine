@@ -163,7 +163,7 @@ async fn run_agent(
         };
         let execution = engine.launch(env.with_session_id(session_id)).await?;
         let result = stream_agent_output(&session).await;
-        let execution_result = execution.result::<()>().await;
+        let execution_result = execution.result::<Value>().await.map(|_| ());
         engine.exit().await?;
         result?;
         return execution_result;
@@ -233,7 +233,7 @@ async fn run_agent(
             if !completed {
                 return Ok(());
             }
-            if let Err(error) = execution.result::<()>().await {
+            if let Err(error) = execution.result::<Value>().await {
                 ui.push_error(format!("{error:#}"));
                 continue;
             }

@@ -1,6 +1,7 @@
 use crate::common::AnyType;
 use crate::{
-    Event, EventType, TaskError, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, common,
+    ContextStackDraft, ContextStackPhase, ContextState, Event, EventType, TaskError, TaskReq,
+    TaskRequest, TaskResp, TaskResponse, TaskType, common,
 };
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -57,20 +58,32 @@ impl RT {
         Self(Arc::new(RuntimeNull))
     }
 
-    pub async fn spawn<Req>(&self, tasks: TaskReq<Req>) -> anyhow::Result<()>
+    pub async fn spawn<Req>(&self, mut tasks: TaskReq<Req>) -> anyhow::Result<()>
     where
         Req: Send + 'static,
     {
+        if tasks.meta.id.is_empty() {
+            tasks.meta.id = wd_tools::uuid::v4();
+        }
+        if tasks.meta.ty != TaskType::Plan && tasks.ctx.scope().is_ok() {
+            tasks.ctx = tasks.ctx.fork(crate::ContextChildSpec::default())?;
+        }
         let mut task = tasks.into_request();
         self.0.spawn(&mut task).await?;
         Ok(())
     }
 
-    pub async fn exec<Req, Resp>(&self, task: TaskReq<Req>) -> anyhow::Result<TaskResp<Resp>>
+    pub async fn exec<Req, Resp>(&self, mut task: TaskReq<Req>) -> anyhow::Result<TaskResp<Resp>>
     where
         Req: Send + 'static,
         Resp: Send + 'static,
     {
+        if task.meta.id.is_empty() {
+            task.meta.id = wd_tools::uuid::v4();
+        }
+        if task.meta.ty != TaskType::Plan && task.ctx.scope().is_ok() {
+            task.ctx = task.ctx.fork(crate::ContextChildSpec::default())?;
+        }
         let mut task = task.into_request();
         let mut response = self.0.exec(&mut task).await?;
         TaskResp::<Resp>::try_from_response(&mut response).ok_or_else(|| {
@@ -199,12 +212,24 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        if req.ctx.is_aborted() {
+        if req.ctx.state().current().is_cancelled() {
             return Err(crate::Error::ContextAborted);
         }
-        let info = format!("{:?}", req.meta);
-        req.ctx.append_stack(self.id(), info);
-        self.inner.spawn(req).await
+        let ctx = req.ctx.clone();
+        let meta = req.meta.clone();
+        if meta.ty != TaskType::Plan {
+            let _ = ctx.set_state(ContextState::Running);
+        }
+        let _ = ctx.append_stack(ContextStackDraft::new(
+            meta.clone(),
+            ContextStackPhase::Dispatched,
+        ));
+        let result = self.inner.spawn(req).await;
+        if let Err(error) = &result {
+            let _ = ctx.set_state(ContextState::failed(error.to_string()));
+            let _ = ctx.append_stack(ContextStackDraft::new(meta, ContextStackPhase::Failed));
+        }
+        result
     }
 
     async fn trigger(&self, _event: &mut Event) -> crate::Result<()> {
@@ -245,13 +270,47 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        if req.ctx.is_aborted() {
+        if req.ctx.state().current().is_cancelled() {
             return Err(crate::Error::ContextAborted);
         }
-        let info = format!("{:?}", req.meta);
-        req.ctx.append_stack(self.id(), info);
-        let resp = self.inner.exec(req).await?;
-        Ok(resp.into_response())
+        let ctx = req.ctx.clone();
+        let meta = req.meta.clone();
+        if meta.ty != TaskType::Plan {
+            let _ = ctx.set_state(ContextState::Running);
+        }
+        if meta.ty != TaskType::Plan {
+            let _ = ctx.append_stack(ContextStackDraft::new(
+                meta.clone(),
+                ContextStackPhase::Started,
+            ));
+        }
+        let result = self.inner.exec(req).await;
+        match result {
+            Ok(mut resp) => {
+                let value = &mut resp.resp as &mut dyn std::any::Any;
+                if let Some(tool) = value.downcast_mut::<crate::ToolResponse>() {
+                    tool.track(ctx.clone(), meta.clone());
+                }
+                if let Some(model) = value.downcast_mut::<crate::ModelResponse>() {
+                    model.track(ctx.clone(), meta.clone());
+                }
+                // Streams finish in their consumer, after their final item.
+                if meta.ty != TaskType::Model && meta.ty != TaskType::Tool {
+                    if ctx.set_state(ContextState::succeeded(())).is_ok() {
+                        let _ = ctx.append_stack(ContextStackDraft::new(
+                            meta,
+                            ContextStackPhase::Succeeded,
+                        ));
+                    }
+                }
+                Ok(resp.into_response())
+            }
+            Err(error) => {
+                let _ = ctx.set_state(ContextState::failed(error.to_string()));
+                let _ = ctx.append_stack(ContextStackDraft::new(meta, ContextStackPhase::Failed));
+                Err(error)
+            }
+        }
     }
 
     async fn kill(&self, ty: TaskType, rtid: &str, task_id: &str) -> crate::Result<()> {

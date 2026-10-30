@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use fae_agent::{Ctx, ToolInvocation, ToolRequest, ToolResponse, Tools};
+use fae_agent::{Ctx, ToolRequest, ToolResponse, Tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -149,7 +149,7 @@ impl Tools for TodoTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, mut req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != TODO {
             return Err(unsupported_tool(req.get_tool_name()));
         }
@@ -158,12 +158,12 @@ impl Tools for TodoTool {
             Ok(args) => args,
             Err(response) => return Ok(response),
         };
-        let Some(ToolInvocation::Todo { agent_id, user_id }) = req.take_invocation() else {
-            return Ok(ToolResponse::with_error(
-                400,
-                "todo requires a single-agent context".to_string(),
-            ));
-        };
+        let scope = ctx.scope()?;
+        let agent_id = scope
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("todo requires agent ownership in context"))?;
+        let user_id = &scope.user.user_id;
         let path = self.todo_path(&agent_id, &user_id)?;
         let _guard = self.lock.lock().await;
         let mut state = self.load_state(&path).await?;
@@ -370,7 +370,7 @@ fn not_found(id: u64) -> ToolResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fae_agent::{ContextNull, ToolRespItem};
+    use fae_agent::{ContextScope, ToolRespItem};
 
     async fn execute(tool: &TodoTool, arguments: Value) -> Value {
         execute_for(tool, "agent-1", "user-1", arguments).await
@@ -382,16 +382,14 @@ mod tests {
         user_id: &str,
         arguments: Value,
     ) -> Value {
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let engine = crate::EngineBuilder::new().build().await;
+        let mut scope = ContextScope::root(user_id);
+        scope.agent_id = Some(agent_id.to_string());
+        let ctx = engine.ctx_with_scope(scope).unwrap();
         let mut response = tool
             .exec(
                 &ctx,
-                ToolRequest::new(TODO.to_string(), arguments.to_string()).with_invocation(
-                    ToolInvocation::Todo {
-                        agent_id: agent_id.to_string(),
-                        user_id: user_id.to_string(),
-                    },
-                ),
+                ToolRequest::new(TODO.to_string(), arguments.to_string()),
             )
             .await
             .unwrap();

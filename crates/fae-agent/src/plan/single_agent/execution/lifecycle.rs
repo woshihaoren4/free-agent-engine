@@ -121,6 +121,10 @@ impl Plan for SingleAgentPlan {
                     Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
                 } else {
                     self.finish_on_drop = true;
+                    self.ctx
+                        .set_state(crate::ContextState::succeeded(Value::String(
+                            self.final_output.clone(),
+                        )))?;
                     self.emit(
                         self.template.agent.name.clone(),
                         SessionEventData::Completed {
@@ -135,6 +139,9 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn abort(&mut self, _code: i32, error: String) {
+        let _ = self
+            .ctx
+            .set_state(crate::ContextState::failed(error.clone()));
         if let Some(todo_plan) = &mut self.todo_plan {
             todo_plan.abort(_code, error).await;
             return;

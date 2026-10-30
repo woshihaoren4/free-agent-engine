@@ -107,7 +107,10 @@ where
         task: TaskReq<CreateChatCompletionRequest>,
     ) -> fae_agent::Result<TaskResp<ModelResponse>> {
         let TaskReq { ctx, mut meta, req } = task;
-        let resp = Self::request(self.client.as_ref(), req).await?;
+        let resp = tokio::select! {
+            result = Self::request(self.client.as_ref(), req) => result?,
+            reason = ctx.cancellation() => return Err(anyhow::anyhow!("{}", reason).into()),
+        };
         meta.publisher = Self::ID.to_string();
 
         Ok(TaskResp { ctx, meta, resp })
@@ -144,12 +147,20 @@ where
 
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             if meta.publisher.is_empty() {
                 meta.publisher = Self::ID.to_string();
             }
             let response_ctx = ctx.clone();
             let error_meta = meta.clone();
-            let result = Self::request(client.as_ref(), req).await.map(|resp| Event {
+            let result = tokio::select! {
+                result = Self::request(client.as_ref(), req) => result,
+                reason = ctx.cancellation() => Err(anyhow::anyhow!("{}", reason).into()),
+            }
+            .map(|resp| Event {
                 from_rt_id: Self::ID.to_string(),
                 event_type: EventType::TaskResult(
                     TaskResp {

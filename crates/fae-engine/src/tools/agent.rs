@@ -80,25 +80,42 @@ impl Tools for AgentTool {
 
         let (mut env, session) = match req.take_invocation() {
             Some(ToolInvocation::Agent(invocation)) => {
-                invocation.into_env(&args.agent_id, args.input)?
+                invocation.into_env(ctx, &args.agent_id, args.input)?
             }
-            Some(ToolInvocation::Workflow { .. })
-            | Some(ToolInvocation::UserMemory { .. })
-            | Some(ToolInvocation::Todo { .. })
-            | None => SingleAgentEnv::from_agent_id(args.agent_id, args.input),
+            None => {
+                let scope = ctx.scope()?;
+                if let Some(parent) = &scope.session {
+                    SingleAgentEnv::new_with_parent_agent(
+                        fae_agent::SingleAgentSource::AgentId(args.agent_id),
+                        args.input,
+                        parent.session.clone(),
+                        scope
+                            .agent_id
+                            .clone()
+                            .or(scope.workflow_id.clone())
+                            .unwrap_or_else(|| "caller".into()),
+                    )
+                } else {
+                    SingleAgentEnv::from_agent_id_with_user_id(
+                        args.agent_id,
+                        args.input,
+                        &scope.user.user_id,
+                    )
+                }
+            }
         };
         if let Some(session_id) = args.session_id {
             env = env.with_session_id(session_id);
         }
 
         let engine = ctx.get_engine();
-        let plan = engine
-            .call(ctx.clone(), to_plan_ty::<SingleAgentEnv>(), Box::new(env))
+        let (child_ctx, plan) = engine
+            .fork_call(ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
             .await?;
         engine
             .rt()
             .exec::<_, ()>(TaskReq {
-                ctx: ctx.clone(),
+                ctx: child_ctx.clone(),
                 meta: TaskMeta {
                     ty: TaskType::Plan,
                     ..Default::default()

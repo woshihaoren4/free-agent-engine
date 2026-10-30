@@ -117,7 +117,8 @@ impl Plan for FileParsePlan {
                     .ok_or_else(|| anyhow::anyhow!("execute_python did not return stdout"))?
                     .trim()
                     .to_string();
-                self.ctx.over(Box::new(parsed));
+                self.ctx
+                    .set_state(fae_agent::ContextState::succeeded(parsed))?;
 
                 Ok(PlanNext::End)
             }
@@ -213,7 +214,13 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("{parsed}");
-    println!("{:#?}", ctx.stacks());
+    println!(
+        "{:#?}",
+        ctx.stacks(fae_agent::ContextStackQuery {
+            tree: true,
+            ..Default::default()
+        })?
+    );
     engine.exit().await?;
 
     Ok(())

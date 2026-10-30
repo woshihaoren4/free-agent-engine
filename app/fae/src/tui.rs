@@ -773,7 +773,7 @@ impl TerminalUi {
                                 RunningAction::None => {}
                                 RunningAction::Interrupt => {
                                     if let Some(execution) = execution {
-                                        execution.abort();
+                                        let _ = execution.set_state(fae_agent::ContextState::cancelled("context has been aborted"));
                                     }
                                     self.push_system("Interrupted");
                                     self.state = RunState::Idle;

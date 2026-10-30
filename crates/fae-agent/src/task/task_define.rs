@@ -26,7 +26,7 @@ pub enum TaskType {
 //     }
 // }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
     pub id: String,
     pub plan_id: String,
@@ -58,6 +58,14 @@ pub struct TaskResponse {
     resp: common::AnyType,
 }
 impl TaskResponse {
+    pub fn track_completion(&mut self) {
+        if let Some(tool) = self.resp.downcast_mut::<crate::ToolResponse>() {
+            tool.track(self.ctx.clone(), self.meta.clone());
+        }
+        if let Some(model) = self.resp.downcast_mut::<crate::ModelResponse>() {
+            model.track(self.ctx.clone(), self.meta.clone());
+        }
+    }
     pub(crate) fn new_null() -> Self {
         Self {
             ctx: Ctx::null(),

@@ -143,6 +143,14 @@ impl UserMemoryRuntime {
         task: TaskReq<UserMemoryRequest>,
     ) -> fae_agent::Result<TaskResp<UserMemoryResponse>> {
         let TaskReq { ctx, mut meta, req } = task;
+        let user_id = match &req {
+            UserMemoryRequest::Query { user_id }
+            | UserMemoryRequest::Update { user_id, .. }
+            | UserMemoryRequest::Delete { user_id, .. } => user_id,
+        };
+        if ctx.scope()?.user.user_id != *user_id {
+            return Err(anyhow::anyhow!("memory request user does not match context user").into());
+        }
         let resp = match req {
             UserMemoryRequest::Query { user_id } => self.query(&user_id).await?,
             UserMemoryRequest::Update {
@@ -202,6 +210,10 @@ impl RuntimeSelectExec<UserMemoryRequest, UserMemoryResponse, UserMemoryQuery, U
         tokio::spawn(async move {
             let ctx = task.ctx.clone();
             let meta = task.meta.clone();
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             let event_type = match runtime.execute(task).await {
                 Ok(response) => EventType::TaskResult(response.into_response()),
                 Err(error) => EventType::TaskError(TaskError {
@@ -285,9 +297,7 @@ fn validate_user_id(user_id: &str) -> fae_agent::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fae_agent::{
-        ContextNull, Ctx, RuntimeSelectExec, TaskMeta, UserMemoryCategory, UserMemoryConfidence,
-    };
+    use fae_agent::{RuntimeSelectExec, TaskMeta, UserMemoryCategory, UserMemoryConfidence};
 
     fn temp_host(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -393,7 +403,10 @@ mod tests {
         let receiver = runtime.watch().await?;
         runtime
             .spawn(TaskReq {
-                ctx: Ctx::new(Arc::new(ContextNull)),
+                ctx: crate::EngineBuilder::new()
+                    .build()
+                    .await
+                    .ctx_with_scope(fae_agent::ContextScope::root("alice"))?,
                 meta: TaskMeta {
                     id: "memory-task".to_string(),
                     plan_id: "single-agent-plan".to_string(),

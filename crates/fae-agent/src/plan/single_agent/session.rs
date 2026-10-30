@@ -14,7 +14,7 @@ pub(super) struct CommonSessionInner {
     pub(super) binding: RwLock<Option<SingleAgentBinding>>,
     state: StdMutex<CommonSessionState>,
     idle: Notify,
-    next_turn_id: AtomicU64,
+    pub(super) next_turn_id: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ struct CommonSessionState {
 pub(crate) struct CommonSessionCompletion {
     result: StdMutex<Option<Result<Value, String>>>,
     notify: Notify,
-    pub(crate) complete_context: AtomicBool,
+    context: StdMutex<Option<crate::WeakCtx>>,
 }
 
 impl Default for CommonSessionCompletion {
@@ -50,12 +50,19 @@ impl Default for CommonSessionCompletion {
         Self {
             result: StdMutex::new(None),
             notify: Notify::new(),
-            complete_context: AtomicBool::new(true),
+            context: StdMutex::new(None),
         }
     }
 }
 
 impl CommonSession {
+    pub fn same_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    pub(crate) fn bind_context(&self, ctx: Ctx) {
+        *self.completion.context.lock().unwrap() = Some(ctx.downgrade());
+        *self.completion.result.lock().unwrap() = None;
+    }
     pub(crate) fn new() -> Self {
         Self::new_with_user_id(DEFAULT_USER_ID)
     }
@@ -197,6 +204,21 @@ impl CommonSession {
     }
 
     pub async fn result(&self) -> anyhow::Result<Value> {
+        let ctx = self
+            .completion
+            .context
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(crate::WeakCtx::upgrade);
+        if let Some(ctx) = ctx {
+            return match &*ctx.terminal().await? {
+                crate::ContextState::Succeeded { output } => output.json_snapshot(),
+                crate::ContextState::Failed { error } => Err(anyhow::anyhow!("{}", error.message)),
+                crate::ContextState::Cancelled { reason } => Err(anyhow::anyhow!("{}", reason)),
+                _ => unreachable!(),
+            };
+        }
         loop {
             let notified = self.completion.notify.notified();
             tokio::pin!(notified);
@@ -326,6 +348,8 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
 
         loop {
             let idle = self.inner.idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
             let should_wait = {
                 let mut state = self.inner.state.lock().expect("session state poisoned");
                 if !state.active {
@@ -340,6 +364,18 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
                 }
             };
             if should_wait {
+                if let Some(ctx) = self
+                    .completion
+                    .context
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(crate::WeakCtx::upgrade)
+                {
+                    let _ = ctx.set_state(crate::ContextState::cancelled(
+                        "replaced by a new conversation",
+                    ));
+                }
                 idle.await;
             } else {
                 break;
@@ -347,9 +383,20 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
         }
 
         let turn_id = self.inner.next_turn_id.fetch_add(1, Ordering::Relaxed);
+        let ctx = binding.engine.context();
+        let mut scope = crate::ContextScope::root(binding.template.agent.user_id.clone());
+        scope.agent_id = Some(binding.template.agent.name.clone());
+        scope.session = Some(crate::ContextSession {
+            session_id: binding.template.agent.session_id.clone(),
+            session: self.clone(),
+        });
+        scope.turn_id = Some(turn_id);
+        ctx.bind_scope(scope)?;
+        self.bind_context(ctx.clone());
+        ctx.set_state(crate::ContextState::Running)?;
         let images = input.images.unwrap_or_default();
         let plan = build_single_agent_plan(
-            binding.ctx.clone(),
+            ctx.clone(),
             binding.template,
             input.text,
             images,
@@ -358,7 +405,7 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
             binding.mode,
         );
         let task = TaskReq {
-            ctx: binding.ctx,
+            ctx,
             meta: TaskMeta {
                 id: format!("single-agent-turn-{turn_id}"),
                 ty: TaskType::Plan,

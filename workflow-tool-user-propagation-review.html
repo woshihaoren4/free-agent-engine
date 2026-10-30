@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>代码评审报告 — free-agent-engine</title>
+  <style>
+    :root {
+      --color-p0: #dc2626;
+      --color-p0-bg: #fef2f2;
+      --color-p0-border: #fca5a5;
+      --color-p1: #d97706;
+      --color-p1-bg: #fffbeb;
+      --color-p1-border: #fcd34d;
+      --color-p2: #2563eb;
+      --color-p2-bg: #eff6ff;
+      --color-p2-border: #93c5fd;
+      --color-bg: #f8fafc;
+      --color-card: #ffffff;
+      --color-border: #e2e8f0;
+      --color-text: #1e293b;
+      --color-text-secondary: #64748b;
+      --color-code-bg: #f1f5f9;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+      background: var(--color-bg);
+      color: var(--color-text);
+      line-height: 1.6;
+      padding: 24px;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+    }
+
+    /* --- Header --- */
+    .report-header {
+      background: var(--color-card);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 28px 32px;
+      margin-bottom: 20px;
+    }
+
+    .report-header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--color-text-secondary);
+    }
+
+    .meta-item .label { font-weight: 600; color: var(--color-text); }
+
+    /* --- P0 Alert Banner --- */
+    .p0-alert {
+      background: var(--color-p0-bg);
+      border: 1px solid var(--color-p0-border);
+      border-left: 4px solid var(--color-p0);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      display: none;
+    }
+
+    .p0-alert-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--color-p0);
+      margin-bottom: 8px;
+    }
+
+    .p0-alert-list {
+      list-style: none;
+      font-size: 14px;
+    }
+
+    .p0-alert-list li {
+      padding: 2px 0;
+      color: var(--color-text);
+    }
+
+    /* --- Summary Bar --- */
+    .summary-bar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .summary-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      background: var(--color-card);
+      border: 1px solid var(--color-border);
+    }
+
+    .summary-chip .count {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .summary-chip.p0 { border-color: var(--color-p0); color: var(--color-p0); }
+    .summary-chip.p1 { border-color: var(--color-p1); color: var(--color-p1); }
+    .summary-chip.p2 { border-color: var(--color-p2); color: var(--color-p2); }
+    .summary-chip.total { border-color: var(--color-text); color: var(--color-text); }
+
+    /* --- Defect Cards --- */
+    .defect-list { display: flex; flex-direction: column; gap: 16px; }
+
+    .defect-card {
+      background: var(--color-card);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .defect-card.severity-P0 { border-left: 4px solid var(--color-p0); }
+    .defect-card.severity-P1 { border-left: 4px solid var(--color-p1); }
+    .defect-card.severity-P2 { border-left: 4px solid var(--color-p2); }
+
+    .defect-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--color-border);
+      flex-wrap: wrap;
+    }
+
+    .severity-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .severity-badge.P0 { background: var(--color-p0); }
+    .severity-badge.P1 { background: var(--color-p1); }
+    .severity-badge.P2 { background: var(--color-p2); }
+
+    .category-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--color-code-bg);
+      color: var(--color-text-secondary);
+    }
+
+    .defect-title {
+      font-size: 15px;
+      font-weight: 600;
+      flex: 1;
+    }
+
+    .confidence-tag {
+      font-size: 12px;
+      color: var(--color-text-secondary);
+      white-space: nowrap;
+    }
+
+    .defect-body { padding: 20px; }
+
+    .defect-location {
+      font-size: 13px;
+      color: var(--color-text-secondary);
+      margin-bottom: 12px;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    }
+
+    .defect-section { margin-bottom: 16px; }
+    .defect-section:last-child { margin-bottom: 0; }
+
+    .defect-section-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .defect-section p {
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .code-block {
+      background: var(--color-code-bg);
+      border: 1px solid var(--color-border);
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* --- Empty State --- */
+    .empty-state {
+      text-align: center;
+      padding: 64px 32px;
+      background: var(--color-card);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+    }
+
+    .empty-state h2 {
+      font-size: 18px;
+      color: #16a34a;
+      margin-bottom: 8px;
+    }
+
+    .empty-state p {
+      font-size: 14px;
+      color: var(--color-text-secondary);
+    }
+
+    /* --- Footer --- */
+    .report-footer {
+      text-align: center;
+      padding: 20px;
+      font-size: 12px;
+      color: var(--color-text-secondary);
+    }
+
+    /* --- Responsive --- */
+    @media (max-width: 640px) {
+      body { padding: 12px; }
+      .report-header { padding: 20px; }
+      .defect-header { padding: 12px 16px; }
+      .defect-body { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="padding:20px;margin-bottom:24px;border:1px solid #1f9254;border-radius:12px;background:#eaf7ef;color:#145c35">
+      <strong>后续修复验证 · 2026-10-30：两项问题均已修复</strong>
+      <p>Plan 回调不再提前提交流终态；Memory、Session、Workflow、MCP 和 Compression 补齐实际 Started 记录。新增 3 项集成回归修复前失败、修复后通过，154 项本地测试及工作区格式和编译检查通过。以下保留修复前的审查证据。</p>
+    </div>
+
+    <!-- ====== Header ====== -->
+    <div class="report-header">
+      <h1>代码评审报告</h1>
+      <div class="meta-grid">
+        <div class="meta-item">
+          <span class="label">仓库：</span>
+          <span>free-agent-engine</span>
+        </div>
+        <div class="meta-item">
+          <span class="label">检测模式：</span>
+          <span>方案验收与通用检测</span>
+        </div>
+        <div class="meta-item">
+          <span class="label">检测范围：</span>
+          <span>workflow-tool-user-propagation.md 与当前实现（HEAD 工作区）</span>
+        </div>
+        <div class="meta-item">
+          <span class="label">生成时间：</span>
+          <span>2026-10-30 17:11</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== P0 Alert (hidden when no P0) ====== -->
+    <div class="p0-alert">
+      <div class="p0-alert-title">高优先级告警 — 发现 P0 级别缺陷，建议立即处理</div>
+      <ul class="p0-alert-list">
+        
+      </ul>
+    </div>
+
+    <!-- ====== Summary ====== -->
+    <div class="summary-bar">
+      <div class="summary-chip p0"><span class="count">0</span> P0</div>
+      <div class="summary-chip p1"><span class="count">1</span> P1</div>
+      <div class="summary-chip p2"><span class="count">1</span> P2</div>
+      <div class="summary-chip total"><span class="count">2</span> 合计</div>
+    </div>
+
+    <!-- ====== Defect List ====== -->
+    <div class="defect-list">
+      
+    <div class="defect-card severity-P1">
+      <div class="defect-header">
+        <span class="severity-badge P1">P1</span>
+        <span class="category-badge">业务语义问题</span>
+        <span class="defect-title">Plan 回调提前完成仍未消费的模型或工具流，导致后续取消失效</span>
+        <span class="confidence-tag">置信度 10/10</span>
+      </div>
+      <div class="defect-body">
+        <div class="defect-location">crates/fae-engine/src/engine_rt/plan_runtime.rs:535-546</div>
+        <div class="defect-section">
+          <div class="defect-section-title">问题描述</div>
+          <p>对应文档第 6.2、8.5 节和 K3/S5 验收要求。task_result_callback 仅根据 plan.next 返回 Ok 就对 Model/Tool 任务提交 Succeeded，而 next 返回并不证明流消费完成。自定义 Plan 可以保存 ToolResponse 或把消费交给另一协程后继续调度。独立 Rust 复现保存一个尚未读取任何 item 的 ToolResponse 后返回下一批任务，观察任务已经 Succeeded；取消父 Context 后该任务仍保持 Succeeded，ToolResponse::next 在 100ms 超时内未退出。因为终态不可覆盖，父取消无法再将该流任务置为 Cancelled，流的取消订阅也收不到取消。这与第 12 节宣称的消费过程决定流终态不一致。现有流测试通过 RT::exec 检查，未覆盖 Plan 异步回调保留流的路径。</p>
+        </div>
+        <div class="defect-section">
+          <div class="defect-section-title">修复建议</div>
+          <p>删除对受追踪 ModelResponse/ToolResponse 的回调兜底终态提交，让 TrackedModelStream 和 ToolCompletion 在 EOF、Completed、错误或最后消费句柄丢弃时独占提交任务终态。若需兼容其他响应协议，显式区分是否由消费追踪器管理。补充 Plan 保留或异步消费响应时，在消费结束前仍为 Running、父取消可中断消费的验收用例。问题代码：if matches!(task_meta.ty, TaskType::Tool | TaskType::Model) { let state = match &amp;next { Ok(_) =&gt; ContextState::succeeded(()), Err(error) =&gt; ContextState::failed(error.to_string()) }; task_ctx.set_state(state); }</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="defect-card severity-P2">
+      <div class="defect-header">
+        <span class="severity-badge P2">P2</span>
+        <span class="category-badge">逻辑错误</span>
+        <span class="defect-title">部分异步 runtime 缺少 Started 记录，耗时从派发时间计算</span>
+        <span class="confidence-tag">置信度 10/10</span>
+      </div>
+      <div class="defect-body">
+        <div class="defect-location">crates/fae-agent/src/runtime/runtime.rs:223-227</div>
+        <div class="defect-section">
+          <div class="defect-section-title">问题描述</div>
+          <p>对应文档第 6.1/6.2 节和 K1/K3 的阶段、开始记录及执行耗时要求。通用 spawn wrapper 只追加 Dispatched；内置 Plan、Model、Tools runtime 补写 Started，但 Memory、Session、Workflow、Mcp 和 Compression 的异步执行路径未补写。独立 Rust 复现通过 Engine 的 RT::spawn 派发 Memory Query 并等待真实回调，栈阶段为 [Dispatched, Succeeded]。EngineContext::append_stack 将 Dispatched 注册为 starts 的兜底，结束条目因而关联派发记录并从派发时刻计算 elapsed_ms；无法区分排队时间与执行时间，也无法获得这些任务实际开始的轨迹。</p>
+        </div>
+        <div class="defect-section">
+          <div class="defect-section-title">修复建议</div>
+          <p>在各内置异步 runtime 确认接受并开始实际执行时追加 Started，保留 wrapper 的 Dispatched。结束记录关联实际 Started，并以该开始时刻计算执行耗时。若需要端到端耗时，单独表达派发到结束的时间。补充 Memory/Session/Workflow 等异步任务的 Dispatched→Started→终态及 parent_entry_id 验收。问题代码：ctx.append_stack(ContextStackDraft::new(meta.clone(), ContextStackPhase::Dispatched)); let result = self.inner.spawn(req).await;</p>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <!-- ====== Empty State (shown when no defects) ====== -->
+    <!-- __EMPTY_STATE_START__
+    <div class="empty-state">
+      <h2>未发现缺陷</h2>
+      <p>本次评审未发现 P0-P2 级别的缺陷。共检查 37 个文件，约 2608 行变更。</p>
+    </div>
+    __EMPTY_STATE_END__ -->
+
+    <div class="report-footer">
+      bits-code-guard &middot; 由 AI 辅助生成 &middot; 2026-10-30 17:11
+    </div>
+
+  </div>
+</body>
+</html>
+
+<!--
+╔══════════════════════════════════════════════════════════════╗
+║                        占位符说明                           ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  --- 报告元信息 ---                                          ║
+║  free-agent-engine           仓库名称                            ║
+║  方案验收与通用检测         检测模式                            ║
+║  workflow-tool-user-propagation.md 与当前实现（HEAD 工作区）          检测范围描述                         ║
+║  2026-10-30 17:11        报告生成时间 (YYYY-MM-DD HH:mm)     ║
+║                                                              ║
+║  --- 统计数据 ---                                            ║
+║  0            P0 缺陷数量                         ║
+║  1            P1 缺陷数量                         ║
+║  1            P2 缺陷数量                         ║
+║  2         缺陷总数                            ║
+║                                                              ║
+║  --- P0 告警 ---                                             ║
+║  none    有 P0 时为 "block"，无 P0 时为      ║
+║                          "none"                              ║
+║        P0 缺陷摘要列表，每项格式：         ║
+║    <li>[P0][类型] file:line | {title}</li>                   ║
+║                                                              ║
+║  --- 缺陷卡片 ---                                            ║
+║  
+    <div class="defect-card severity-P1">
+      <div class="defect-header">
+        <span class="severity-badge P1">P1</span>
+        <span class="category-badge">业务语义问题</span>
+        <span class="defect-title">Plan 回调提前完成仍未消费的模型或工具流，导致后续取消失效</span>
+        <span class="confidence-tag">置信度 10/10</span>
+      </div>
+      <div class="defect-body">
+        <div class="defect-location">crates/fae-engine/src/engine_rt/plan_runtime.rs:535-546</div>
+        <div class="defect-section">
+          <div class="defect-section-title">问题描述</div>
+          <p>对应文档第 6.2、8.5 节和 K3/S5 验收要求。task_result_callback 仅根据 plan.next 返回 Ok 就对 Model/Tool 任务提交 Succeeded，而 next 返回并不证明流消费完成。自定义 Plan 可以保存 ToolResponse 或把消费交给另一协程后继续调度。独立 Rust 复现保存一个尚未读取任何 item 的 ToolResponse 后返回下一批任务，观察任务已经 Succeeded；取消父 Context 后该任务仍保持 Succeeded，ToolResponse::next 在 100ms 超时内未退出。因为终态不可覆盖，父取消无法再将该流任务置为 Cancelled，流的取消订阅也收不到取消。这与第 12 节宣称的消费过程决定流终态不一致。现有流测试通过 RT::exec 检查，未覆盖 Plan 异步回调保留流的路径。</p>
+        </div>
+        <div class="defect-section">
+          <div class="defect-section-title">修复建议</div>
+          <p>删除对受追踪 ModelResponse/ToolResponse 的回调兜底终态提交，让 TrackedModelStream 和 ToolCompletion 在 EOF、Completed、错误或最后消费句柄丢弃时独占提交任务终态。若需兼容其他响应协议，显式区分是否由消费追踪器管理。补充 Plan 保留或异步消费响应时，在消费结束前仍为 Running、父取消可中断消费的验收用例。问题代码：if matches!(task_meta.ty, TaskType::Tool | TaskType::Model) { let state = match &amp;next { Ok(_) =&gt; ContextState::succeeded(()), Err(error) =&gt; ContextState::failed(error.to_string()) }; task_ctx.set_state(state); }</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="defect-card severity-P2">
+      <div class="defect-header">
+        <span class="severity-badge P2">P2</span>
+        <span class="category-badge">逻辑错误</span>
+        <span class="defect-title">部分异步 runtime 缺少 Started 记录，耗时从派发时间计算</span>
+        <span class="confidence-tag">置信度 10/10</span>
+      </div>
+      <div class="defect-body">
+        <div class="defect-location">crates/fae-agent/src/runtime/runtime.rs:223-227</div>
+        <div class="defect-section">
+          <div class="defect-section-title">问题描述</div>
+          <p>对应文档第 6.1/6.2 节和 K1/K3 的阶段、开始记录及执行耗时要求。通用 spawn wrapper 只追加 Dispatched；内置 Plan、Model、Tools runtime 补写 Started，但 Memory、Session、Workflow、Mcp 和 Compression 的异步执行路径未补写。独立 Rust 复现通过 Engine 的 RT::spawn 派发 Memory Query 并等待真实回调，栈阶段为 [Dispatched, Succeeded]。EngineContext::append_stack 将 Dispatched 注册为 starts 的兜底，结束条目因而关联派发记录并从派发时刻计算 elapsed_ms；无法区分排队时间与执行时间，也无法获得这些任务实际开始的轨迹。</p>
+        </div>
+        <div class="defect-section">
+          <div class="defect-section-title">修复建议</div>
+          <p>在各内置异步 runtime 确认接受并开始实际执行时追加 Started，保留 wrapper 的 Dispatched。结束记录关联实际 Started，并以该开始时刻计算执行耗时。若需要端到端耗时，单独表达派发到结束的时间。补充 Memory/Session/Workflow 等异步任务的 Dispatched→Started→终态及 parent_entry_id 验收。问题代码：ctx.append_stack(ContextStackDraft::new(meta.clone(), ContextStackPhase::Dispatched)); let result = self.inner.spawn(req).await;</p>
+        </div>
+      </div>
+    </div>        所有缺陷卡片的 HTML，单张卡片格式：  ║
+║                                                              ║
+║    <div class="defect-card severity-{severity}">             ║
+║      <div class="defect-header">                             ║
+║        <span class="severity-badge {severity}">              ║
+║          {severity}</span>                                   ║
+║        <span class="category-badge">                         ║
+║          {category_zh}</span>                                ║
+║        <span class="defect-title">                           ║
+║          {title}</span>                                       ║
+║        <span class="confidence-tag">                         ║
+║          置信度 {confidence}/10</span>                       ║
+║      </div>                                                  ║
+║      <div class="defect-body">                               ║
+║        <div class="defect-location">                         ║
+║          {file}:{start_line}-{end_line}</div>                ║
+║        <div class="defect-section">                          ║
+║          <div class="defect-section-title">                  ║
+║            问题描述</div>                                    ║
+║          <p>{rationale}</p>                                  ║
+║        </div>                                                ║
+║        <div class="defect-section">                          ║
+║          <div class="defect-section-title">                  ║
+║            问题代码</div>                                    ║
+║          <div class="code-block">                            ║
+║            {代码片段}</div>                                  ║
+║        </div>                                                ║
+║        <div class="defect-section">                          ║
+║          <div class="defect-section-title">                  ║
+║            修复建议</div>                                    ║
+║          <p>{suggestion}</p>                                 ║
+║        </div>                                                ║
+║      </div>                                                  ║
+║    </div>                                                    ║
+║                                                              ║
+║  --- 空状态 ---                                              ║
+║  无缺陷时：取消注释 __EMPTY_STATE_START__ 到                 ║
+║  __EMPTY_STATE_END__ 之间的内容，并删除 defect-list 区块      ║
+║  37          检查的文件数                         ║
+║  2608          变更行数                            ║
+║                                                              ║
+║  --- category 中英文映射 ---                                  ║
+║  LOGIC       → 逻辑错误                                     ║
+║  BUSINESS_SEMANTICS → 业务语义问题                           ║
+║  SECURITY    → 安全漏洞                                      ║
+║  CONCURRENCY → 并发问题                                      ║
+║  ROBUSTNESS  → 健壮性问题                                    ║
+║  PERFORMANCE → 性能问题                                      ║
+║  QUALITY     → 代码质量问题                                  ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+-->

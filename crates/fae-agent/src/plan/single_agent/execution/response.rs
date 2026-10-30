@@ -139,6 +139,10 @@ impl SingleAgentPlan {
             }
 
             self.finish_on_drop = true;
+            self.ctx
+                .set_state(crate::ContextState::succeeded(Value::String(
+                    self.final_output.clone(),
+                )))?;
             self.emit(
                 self.template.agent.name.clone(),
                 SessionEventData::Completed {
@@ -232,18 +236,7 @@ impl SingleAgentPlan {
             };
             let routed = match route {
                 CallableRoute::Tool(runtime_tool_name) => {
-                    let request = match runtime_tool_name.as_str() {
-                        MEMORY_UPDATE_TOOL_NAME => ToolRequest::new(runtime_tool_name, arguments)
-                            .with_invocation(ToolInvocation::UserMemory {
-                                user_id: self.session.user_id(),
-                            }),
-                        TODO_TOOL_NAME => ToolRequest::new(runtime_tool_name, arguments)
-                            .with_invocation(ToolInvocation::Todo {
-                                agent_id: self.template.agent.name.clone(),
-                                user_id: self.session.user_id(),
-                            }),
-                        _ => ToolRequest::new(runtime_tool_name, arguments),
-                    };
+                    let request = ToolRequest::new(runtime_tool_name, arguments);
                     Some((self.tool_task(request).await?, PendingCallKind::Tool))
                 }
                 CallableRoute::Mcp { server, tool_name } => Some((
@@ -264,7 +257,6 @@ impl SingleAgentPlan {
                     let invocation = AgentToolInvocation::for_sub_agent(
                         call.agent_id,
                         source,
-                        self.session.clone(),
                         self.template.agent.name.clone(),
                         self.template.ancestor_agents.clone(),
                     );
@@ -287,13 +279,8 @@ impl SingleAgentPlan {
                         call.workflow_id
                     );
                     Some((
-                        self.tool_task(
-                            ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments)
-                                .with_invocation(ToolInvocation::Workflow {
-                                    user_id: self.session.user_id(),
-                                }),
-                        )
-                        .await?,
+                        self.tool_task(ToolRequest::new(WORKFLOW_TOOL_NAME.to_string(), arguments))
+                            .await?,
                         PendingCallKind::Tool,
                     ))
                 }
@@ -453,6 +440,10 @@ impl SingleAgentPlan {
             self.terminal_tool_completion = None;
             self.final_output = content.clone();
             self.finish_on_drop = true;
+            self.ctx
+                .set_state(crate::ContextState::succeeded(Value::String(
+                    content.clone(),
+                )))?;
             self.emit(
                 self.template.agent.name.clone(),
                 SessionEventData::Completed { content },

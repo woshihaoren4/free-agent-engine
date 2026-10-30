@@ -191,6 +191,10 @@ impl RuntimeSelectExec<WorkflowActionRequest, WorkflowActionResponse, (), ()>
         tokio::spawn(async move {
             let ctx = task.ctx.clone();
             let meta = task.meta.clone();
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             let event_type = match Self::execute(model, task).await {
                 Ok(response) => EventType::TaskResult(response.into_response()),
                 Err(error) => EventType::TaskError(TaskError {

@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub(super) struct SingleAgentBinding {
     pub(super) rt: RT,
-    pub(super) ctx: Ctx,
+    pub(super) engine: crate::EngineRef,
     pub(super) template: SingleAgentTemplate,
     pub(super) mode: Option<SingleAgentMode>,
 }

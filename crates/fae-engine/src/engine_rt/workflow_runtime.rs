@@ -44,15 +44,13 @@ impl WorkflowRuntime {
         if meta.publisher.is_empty() {
             meta.publisher = Self::ID.to_string();
         }
-        let session = req.session();
-        req.defer_context_completion();
         let engine = ctx.get_engine();
-        let plan = engine
-            .call(ctx.clone(), to_plan_ty::<WorkflowEnv>(), Box::new(req))
+        let (child_ctx, plan) = engine
+            .fork_call(&ctx, to_plan_ty::<WorkflowEnv>(), Box::new(req))
             .await?;
 
         let plan_task = TaskReq {
-            ctx: ctx.clone(),
+            ctx: child_ctx.clone(),
             meta: fae_agent::TaskMeta {
                 ty: TaskType::Plan,
                 ..Default::default()
@@ -60,7 +58,7 @@ impl WorkflowRuntime {
             req: plan,
         };
         engine.rt().exec::<_, ()>(plan_task).await?;
-        let output = session.result().await?;
+        let output = child_ctx.result::<Value>().await?;
 
         Ok(TaskResp {
             ctx,
@@ -104,6 +102,10 @@ impl RuntimeSelectExec<WorkflowEnv, Value, String, WorkflowMetadata> for Workflo
             }
             let ctx = task.ctx.clone();
             let meta = task.meta.clone();
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             let event_type = match Self::execute(task).await {
                 Ok(response) => EventType::TaskResult(response.into_response()),
                 Err(error) => EventType::TaskError(TaskError {

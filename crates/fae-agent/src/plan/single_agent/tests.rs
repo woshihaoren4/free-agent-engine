@@ -926,10 +926,7 @@ user-defined rules, and other long-term facts."
         };
 
         let mut request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
-        assert!(matches!(
-            request.req.take_invocation(),
-            Some(ToolInvocation::UserMemory { user_id }) if user_id == "alice"
-        ));
+        assert!(request.req.take_invocation().is_none());
         Ok(())
     }
 
@@ -977,11 +974,7 @@ user-defined rules, and other long-term facts."
         };
 
         let mut request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
-        assert!(matches!(
-            request.req.take_invocation(),
-            Some(ToolInvocation::Todo { agent_id, user_id })
-                if agent_id == "test-agent" && user_id == "alice"
-        ));
+        assert!(request.req.take_invocation().is_none());
         Ok(())
     }
 
@@ -989,7 +982,11 @@ user-defined rules, and other long-term facts."
     async fn todo_create_switches_the_current_agent_to_todo_mode() -> anyhow::Result<()> {
         let session = CommonSession::new_with_user_id("alice");
         session.activate_turn()?;
-        let ctx = Ctx::null();
+        let mut scope = crate::ContextScope::root("alice");
+        scope.agent_id = Some("test-agent".into());
+        scope.session = Some(crate::ContextSession { session_id: "test".into(), session: session.clone() });
+        let ctx = crate::context::test_context(Some(scope));
+        ctx.set_state(crate::ContextState::Running)?;
         let mut template = test_template();
         template.tool_routes.insert(
             TODO_TOOL_NAME.to_string(),
@@ -1241,10 +1238,7 @@ user-defined rules, and other long-term facts."
         assert_eq!(tasks[0].meta.ty, TaskType::Tool);
         let mut request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
         assert_eq!(request.req.get_tool_name(), WORKFLOW_TOOL_NAME);
-        assert!(matches!(
-            request.req.take_invocation(),
-            Some(ToolInvocation::Workflow { user_id }) if user_id == DEFAULT_USER_ID
-        ));
+        assert!(request.req.take_invocation().is_none());
 
         let session = CommonSession::new();
         session.activate_turn()?;
@@ -1447,7 +1441,7 @@ user-defined rules, and other long-term facts."
         session
             .bind(SingleAgentBinding {
                 rt: RT::null(),
-                ctx: Ctx::null(),
+                engine: Ctx::null().get_engine(),
                 template: test_template(),
                 mode: None,
             })
@@ -1476,7 +1470,7 @@ user-defined rules, and other long-term facts."
         let turn_id = session
             .bind(SingleAgentBinding {
                 rt: RT::null(),
-                ctx: ctx.clone(),
+                engine: ctx.get_engine(),
                 template: template.clone(),
                 mode: None,
             })
@@ -1624,7 +1618,7 @@ user-defined rules, and other long-term facts."
         let turn_id = session
             .bind(SingleAgentBinding {
                 rt: RT::null(),
-                ctx: ctx.clone(),
+                engine: ctx.get_engine(),
                 template: template.clone(),
                 mode: None,
             })
@@ -1692,7 +1686,7 @@ user-defined rules, and other long-term facts."
         let turn_id = session
             .bind(SingleAgentBinding {
                 rt: RT::null(),
-                ctx: ctx.clone(),
+                engine: ctx.get_engine(),
                 template: template.clone(),
                 mode: None,
             })
@@ -1738,7 +1732,7 @@ user-defined rules, and other long-term facts."
         let turn_id = session
             .bind(SingleAgentBinding {
                 rt: RT::null(),
-                ctx: ctx.clone(),
+                engine: ctx.get_engine(),
                 template: template.clone(),
                 mode: None,
             })
@@ -1852,7 +1846,8 @@ user-defined rules, and other long-term facts."
     async fn no_tool_turn_streams_and_completes() {
         let session = CommonSession::new();
         session.activate_turn().unwrap();
-        let ctx = Ctx::null();
+        let ctx = crate::context::test_context(Some(crate::ContextScope::root(session.user_id())));
+        ctx.set_state(crate::ContextState::Running).unwrap();
         let template = test_template();
         let mut plan = SingleAgentPlan::new(
             ctx.clone(),

@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
 
     let first_turn = engine.launch(env).await?;
     print_turn(&session).await?;
-    first_turn.result::<()>().await?;
+    first_turn.result::<serde_json::Value>().await?;
 
     while let Some(input) = read_user_input()? {
         session.call(SessionInput::NewChat(input.into())).await?;

@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex, RwLock as StdRwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -123,6 +123,7 @@ pub const DEFAULT_HISTORY_TURNS: usize = 10;
 pub const DEFAULT_USER_ID: &str = "master";
 const AGENT_TOOL_NAME: &str = "agent";
 const WORKFLOW_TOOL_NAME: &str = "workflow";
+#[cfg(test)]
 const MEMORY_UPDATE_TOOL_NAME: &str = "memory_update";
 const TODO_TOOL_NAME: &str = "todo";
 
@@ -130,7 +131,6 @@ const TODO_TOOL_NAME: &str = "todo";
 pub struct AgentToolInvocation {
     agent_id: String,
     source: SingleAgentSource,
-    parent_session: CommonSession,
     parent_agent_name: String,
     ancestor_agents: Vec<String>,
 }
@@ -139,14 +139,12 @@ impl AgentToolInvocation {
     fn for_sub_agent(
         agent_id: String,
         source: SingleAgentSource,
-        parent_session: CommonSession,
         parent_agent_name: String,
         ancestor_agents: Vec<String>,
     ) -> Self {
         Self {
             agent_id,
             source,
-            parent_session,
             parent_agent_name,
             ancestor_agents,
         }
@@ -154,6 +152,7 @@ impl AgentToolInvocation {
 
     pub fn into_env(
         self,
+        ctx: &Ctx,
         agent_id: &str,
         input: String,
     ) -> anyhow::Result<(SingleAgentEnv, CommonSession)> {
@@ -164,7 +163,12 @@ impl AgentToolInvocation {
         let (env, session) = SingleAgentEnv::new_with_parent_agent(
             self.source,
             input,
-            self.parent_session,
+            ctx.scope()?
+                .session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("agent invocation requires caller session"))?
+                .session
+                .clone(),
             self.parent_agent_name,
         );
         Ok((env.with_ancestor_agents(self.ancestor_agents), session))
@@ -296,7 +300,7 @@ impl SingleAgentEnv {
         )
     }
 
-    fn new_with_parent_agent(
+    pub fn new_with_parent_agent(
         source: SingleAgentSource,
         input: impl Into<String>,
         parent_session: CommonSession,

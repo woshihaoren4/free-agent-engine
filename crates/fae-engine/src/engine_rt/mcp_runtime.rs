@@ -105,6 +105,10 @@ impl RuntimeSelectExec<McpRequest, McpResponse, McpQuery, Vec<McpToolInfo>> for 
         let event_sender = self.event_sender.clone();
 
         tokio::spawn(async move {
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             if meta.publisher.is_empty() {
                 meta.publisher = Self::ID.to_string();
             }

@@ -178,6 +178,7 @@ impl SessionRuntime {
         &self,
         task: TaskReq<SessionRequest>,
     ) -> fae_agent::Result<TaskResp<SessionResponse>> {
+        Self::validate_context(&task)?;
         let TaskReq { ctx, mut meta, req } = task;
         let resp = match req {
             SessionRequest::Add {
@@ -208,6 +209,45 @@ impl SessionRuntime {
 
         meta.publisher = Self::ID.to_string();
         Ok(TaskResp { ctx, meta, resp })
+    }
+
+    fn validate_context(task: &TaskReq<SessionRequest>) -> anyhow::Result<()> {
+        let (agent_id, user_id, session_id) = match &task.req {
+            SessionRequest::Add {
+                agent_id,
+                user_id,
+                session_id,
+                ..
+            }
+            | SessionRequest::Query {
+                agent_id,
+                user_id,
+                session_id,
+                ..
+            }
+            | SessionRequest::Delete {
+                agent_id,
+                user_id,
+                session_id,
+            } => (agent_id, user_id, session_id),
+        };
+        let scope = task.ctx.scope()?;
+        anyhow::ensure!(
+            scope.user.user_id == *user_id,
+            "session request user does not match context user"
+        );
+        anyhow::ensure!(
+            scope.agent_id.as_ref() == Some(agent_id),
+            "session request agent does not match context agent"
+        );
+        anyhow::ensure!(
+            scope
+                .session
+                .as_ref()
+                .is_some_and(|s| s.session_id == *session_id),
+            "session request session does not match context session"
+        );
+        Ok(())
     }
 }
 
@@ -243,11 +283,16 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
     }
 
     async fn spawn(&self, task: TaskReq<SessionRequest>) -> fae_agent::Result<()> {
+        Self::validate_context(&task)?;
         let event_sender = self.event_sender.clone();
         let host_dir = self.host_dir.clone();
 
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
+            let _ = ctx.append_stack(fae_agent::ContextStackDraft::new(
+                meta.clone(),
+                fae_agent::ContextStackPhase::Started,
+            ));
             if meta.publisher.is_empty() {
                 meta.publisher = Self::ID.to_string();
             }
@@ -388,12 +433,43 @@ pub(crate) fn validate_path_segment(name: &str, segment: &str) -> fae_agent::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fae_agent::{ContextNull, Ctx, TaskMeta};
+    use fae_agent::{ContextScope, ContextSession, TaskMeta};
     use std::sync::Arc;
 
     fn task(req: SessionRequest) -> TaskReq<SessionRequest> {
+        let (agent_id, user_id, session_id) = match &req {
+            SessionRequest::Add {
+                agent_id,
+                user_id,
+                session_id,
+                ..
+            }
+            | SessionRequest::Query {
+                agent_id,
+                user_id,
+                session_id,
+                ..
+            }
+            | SessionRequest::Delete {
+                agent_id,
+                user_id,
+                session_id,
+            } => (agent_id, user_id, session_id),
+        };
+        let (_, session) =
+            fae_agent::SingleAgentEnv::from_agent_id_with_user_id(agent_id, "test", user_id);
+        let engine = crate::Engine::new(
+            Default::default(),
+            fae_agent::RT::new(Arc::new(fae_agent::RuntimeNull)),
+        );
+        let mut scope = ContextScope::root(user_id);
+        scope.agent_id = Some(agent_id.clone());
+        scope.session = Some(ContextSession {
+            session_id: session_id.clone(),
+            session,
+        });
         TaskReq {
-            ctx: Ctx::new(Arc::new(ContextNull)),
+            ctx: engine.ctx_with_scope(scope).unwrap(),
             meta: TaskMeta {
                 ty: TaskType::Session,
                 ..Default::default()

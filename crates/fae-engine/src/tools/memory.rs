@@ -1,6 +1,6 @@
 use fae_agent::{
-    Ctx, TaskMeta, TaskReq, TaskType, ToolInvocation, ToolRequest, ToolResponse, Tools,
-    UserMemoryCategory, UserMemoryConfidence, UserMemoryRequest, UserMemoryResponse,
+    Ctx, TaskMeta, TaskReq, TaskType, ToolRequest, ToolResponse, Tools, UserMemoryCategory,
+    UserMemoryConfidence, UserMemoryRequest, UserMemoryResponse,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -87,7 +87,7 @@ impl Tools for MemoryUpdateTool {
         }))
     }
 
-    async fn exec(&self, ctx: &Ctx, mut req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != MEMORY_UPDATE {
             return Err(unsupported_tool(req.get_tool_name()));
         }
@@ -95,12 +95,7 @@ impl Tools for MemoryUpdateTool {
             Ok(args) => args,
             Err(response) => return Ok(response),
         };
-        let Some(ToolInvocation::UserMemory { user_id }) = req.take_invocation() else {
-            return Ok(ToolResponse::with_error(
-                400,
-                "memory_update requires a single-agent user context".to_string(),
-            ));
-        };
+        let user_id = ctx.scope()?.user.user_id.clone();
 
         let response = ctx
             .get_engine()

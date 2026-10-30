@@ -5,7 +5,7 @@ use super::single_agent::{CallableRoute, CommonSession, SingleAgentPlan, SingleA
 use crate::{
     Ctx, Plan, PlanNext, SessionEventData, SessionMessage, SessionRequest, SessionResponse,
     SingleAgentHookContext, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType,
-    ToolInvocation, ToolRequest, ToolRespItem, ToolResponse,
+    ToolRequest, ToolRespItem, ToolResponse,
 };
 
 const TODO_TOOL_NAME: &str = "todo";
@@ -290,12 +290,7 @@ impl SingleAgentTodoPlan {
             Some(CallableRoute::Tool(runtime_tool_name)) => runtime_tool_name.clone(),
             _ => anyhow::bail!("single-agent todo mode requires the `todo` tool"),
         };
-        let request = ToolRequest::new(runtime_tool_name, arguments.to_string()).with_invocation(
-            ToolInvocation::Todo {
-                agent_id: self.template.agent.name.clone(),
-                user_id: self.session.user_id(),
-            },
-        );
+        let request = ToolRequest::new(runtime_tool_name, arguments.to_string());
         let request = self
             .template
             .hook
@@ -355,9 +350,21 @@ impl SingleAgentTodoPlan {
         let child_session =
             CommonSession::new_in_agent(self.session.clone(), self.template.agent.name.clone());
         let child_turn_id = child_session.activate_turn()?;
+        let child_ctx = self.ctx.fork(crate::ContextChildSpec {
+            execution: true,
+            agent_id: Some(self.template.agent.name.clone()),
+            session: Some(crate::ContextSession {
+                session_id: self.template.agent.session_id.clone(),
+                session: child_session.clone(),
+            }),
+            turn_id: Some(child_turn_id),
+            ..Default::default()
+        })?;
+        child_ctx.set_state(crate::ContextState::Running)?;
+        child_session.bind_context(child_ctx.clone());
         let mut child = if self.todo.phase == TodoPhase::Planning && self.images.is_empty() {
             SingleAgentPlan::new_ephemeral_until_tool_completion(
-                self.ctx.clone(),
+                child_ctx.clone(),
                 self.child_template(),
                 prompt.clone(),
                 child_turn_id,
@@ -368,7 +375,7 @@ impl SingleAgentTodoPlan {
             )
         } else if self.todo.phase == TodoPhase::Planning {
             SingleAgentPlan::new_ephemeral_until_tool_completion_with_images(
-                self.ctx.clone(),
+                child_ctx.clone(),
                 self.child_template(),
                 prompt.clone(),
                 self.images.clone(),
@@ -380,7 +387,7 @@ impl SingleAgentTodoPlan {
             )
         } else {
             SingleAgentPlan::new_ephemeral(
-                self.ctx.clone(),
+                child_ctx.clone(),
                 self.child_template(),
                 prompt.clone(),
                 child_turn_id,
@@ -397,12 +404,13 @@ impl SingleAgentTodoPlan {
     }
 
     async fn finish_child(&mut self) -> anyhow::Result<String> {
-        self.child.take();
+        let child = self.child.take();
         let child_session = self
             .child_session
             .take()
             .expect("running todo agent requires a child session");
         let output = child_session.result().await?;
+        drop(child);
         let output = output
             .as_str()
             .map(str::to_owned)
@@ -454,6 +462,10 @@ impl SingleAgentTodoPlan {
             .take()
             .ok_or_else(|| anyhow::anyhow!("todo mode completed without final output"))?;
         self.finish_on_drop = true;
+        self.ctx
+            .set_state(crate::ContextState::succeeded(serde_json::Value::String(
+                content.clone(),
+            )))?;
         self.session.emit_agent(
             self.turn_id,
             self.template.agent.name.clone(),
@@ -937,7 +949,10 @@ mod tests {
 
     #[tokio::test]
     async fn uses_the_last_todo_output_as_the_final_result() {
-        let ctx = Ctx::null();
+        let mut scope = crate::ContextScope::root("alice");
+        scope.agent_id = Some("test-agent".into());
+        let ctx = crate::context::test_context(Some(scope));
+        ctx.set_state(crate::ContextState::Running).unwrap();
         let session = CommonSession::new_with_user_id("alice");
         session.activate_turn().unwrap();
         let mut plan = SingleAgentTodoPlan::new(
@@ -959,11 +974,7 @@ mod tests {
                 "user_input": "ship release"
             })
         );
-        assert!(matches!(
-            reset.req.take_invocation(),
-            Some(ToolInvocation::Todo { agent_id, user_id })
-                if agent_id == "test-agent" && user_id == "alice"
-        ));
+        assert!(reset.req.take_invocation().is_none());
 
         let PlanNext::Tasks(_) = plan
             .next(tool_response(&ctx, r#"{"todos":[]}"#))
@@ -1163,11 +1174,7 @@ mod tests {
                 "assistant": "implemented"
             })
         );
-        assert!(matches!(
-            update.req.take_invocation(),
-            Some(ToolInvocation::Todo { agent_id, user_id })
-                if agent_id == "test-agent" && user_id == "alice"
-        ));
+        assert!(update.req.take_invocation().is_none());
 
         let PlanNext::Tasks(mut tasks) = plan
             .next(tool_response(

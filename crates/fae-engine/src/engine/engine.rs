@@ -1,5 +1,8 @@
 use crate::{EngineContext, PlanRuntime};
-use fae_agent::{Ctx, Plan, PlanBuilder, RT, hook::plan_hook::PlanHookBuilder, to_plan_ty};
+use fae_agent::{
+    ContextScope, ContextState, Ctx, Plan, PlanBuilder, RT, hook::plan_hook::PlanHookBuilder,
+    to_plan_ty,
+};
 use std::any::type_name;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -43,6 +46,12 @@ impl Engine {
         Ctx::new(EngineContext::into_arc(self.clone()))
     }
 
+    pub fn ctx_with_scope(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
+        let ctx = self.ctx();
+        ctx.bind_scope(scope)?;
+        Ok(ctx)
+    }
+
     pub fn rt(&self) -> RT {
         self.rt.clone()
     }
@@ -76,8 +85,14 @@ impl Engine {
         tokio::spawn(async move {
             let result = Self::run_plan(plan, execution_ctx.clone()).await;
             match result {
-                Ok(()) => execution_ctx.over(Box::new(())),
-                Err(error) => execution_ctx.error(error.to_string()),
+                Ok(()) => {
+                    if !execution_ctx.state().current().is_terminal() {
+                        let _ = execution_ctx.set_state(ContextState::succeeded(()));
+                    }
+                }
+                Err(error) => {
+                    let _ = execution_ctx.set_state(ContextState::failed(error.to_string()));
+                }
             }
         });
 
@@ -95,8 +110,14 @@ impl Engine {
         let plan = self.call(ctx.clone(), ty, env).await?;
         let result = Self::run_plan(plan, ctx.clone()).await;
         match result {
-            Ok(()) => ctx.over(Box::new(())),
-            Err(error) => ctx.error(error.to_string()),
+            Ok(()) => {
+                if !ctx.state().current().is_terminal() {
+                    let _ = ctx.set_state(ContextState::succeeded(()));
+                }
+            }
+            Err(error) => {
+                let _ = ctx.set_state(ContextState::failed(error.to_string()));
+            }
         }
         let output = ctx.result::<Out>().await?;
         Ok((ctx, output))
@@ -122,7 +143,19 @@ impl Engine {
         ctx: Ctx,
         env: fae_agent::AnyType,
     ) -> anyhow::Result<Box<dyn Plan>> {
-        let mut plan = builder.build(self.rt(), ctx, env).await?;
+        let execution_ctx = ctx.clone();
+        let mut plan = match builder.build(self.rt(), ctx, env).await {
+            Ok(plan) => plan,
+            Err(error) => {
+                let _ = execution_ctx.set_state(ContextState::failed(error.to_string()));
+                return Err(error);
+            }
+        };
+        // Compatibility for generic top-level builders with no user/session fields.
+        if execution_ctx.scope().is_err() {
+            execution_ctx.bind_scope(ContextScope::root(fae_agent::DEFAULT_USER_ID))?;
+        }
+        execution_ctx.set_state(ContextState::Running)?;
         for hook in self.plan_hooks.iter() {
             plan = hook.build(plan).await;
         }
@@ -136,6 +169,22 @@ impl Engine {
 
 #[async_trait::async_trait]
 impl fae_agent::Engine for Engine {
+    fn context(&self) -> Ctx {
+        self.ctx()
+    }
+    async fn fork_call(
+        &self,
+        ctx: &Ctx,
+        ty: String,
+        mut env: fae_agent::AnyType,
+    ) -> anyhow::Result<(Ctx, Box<dyn Plan>)> {
+        let builder = self
+            .plan_builder(&ty)
+            .ok_or_else(|| anyhow::anyhow!("plan builder is not registered for `{ty}`"))?;
+        let child = ctx.fork(builder.child_spec(&mut env).await?)?;
+        let plan = self.build_plan(builder, child.clone(), env).await?;
+        Ok((child, plan))
+    }
     fn rt(&self) -> RT {
         self.rt()
     }
@@ -267,7 +316,7 @@ mod tests {
         let ctx = engine.launch(TestEnv { fail: false }).await.unwrap();
         ctx.result::<()>().await.unwrap();
 
-        assert!(ctx.is_completed());
+        assert!(ctx.state().current().is_terminal());
     }
 
     #[tokio::test]

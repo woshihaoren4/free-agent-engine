@@ -199,6 +199,17 @@ impl WorkflowPlanBuilder {
 
 #[async_trait::async_trait]
 impl PlanBuilderWithEnv<WorkflowEnv> for WorkflowPlanBuilder {
+    async fn child_spec(&self, env: &WorkflowEnv) -> anyhow::Result<crate::ContextChildSpec> {
+        Ok(crate::ContextChildSpec {
+            execution: true,
+            workflow_id: Some(env.workflow_id.clone()),
+            session: Some(crate::ContextSession {
+                session_id: wd_tools::uuid::v4(),
+                session: env.session(),
+            }),
+            ..Default::default()
+        })
+    }
     async fn build(
         &self,
         _rt: crate::RT,
@@ -218,14 +229,42 @@ fn build_workflow_plan(
     hook: Arc<dyn WorkflowHook>,
 ) -> anyhow::Result<Box<dyn Plan>> {
     anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
-    let complete_context = env.completes_context();
+    if let Ok(scope) = ctx.scope() {
+        anyhow::ensure!(
+            scope.user.user_id == env.user_id,
+            "workflow environment user does not match context user"
+        );
+        anyhow::ensure!(
+            scope.workflow_id.as_deref() == Some(&env.workflow_id),
+            "workflow ownership does not match context"
+        );
+        anyhow::ensure!(
+            scope
+                .session
+                .as_ref()
+                .is_some_and(|s| s.session.same_session(&env.session)),
+            "workflow session does not match context"
+        );
+    } else {
+        let mut scope = crate::ContextScope::root(env.user_id.clone());
+        scope.workflow_id = Some(env.workflow_id.clone());
+        scope.session = Some(crate::ContextSession {
+            session_id: wd_tools::uuid::v4(),
+            session: env.session(),
+        });
+        ctx.bind_scope(scope)?;
+    }
+    env.session.bind_context(ctx.clone());
     let WorkflowEnv {
         workflow_id: _,
         input,
         user_id,
         session,
     } = env;
-    session.set_user_id(user_id);
+    anyhow::ensure!(
+        session.user_id() == user_id,
+        "workflow environment and session users do not match"
+    );
     metadata.validate()?;
     let current = metadata
         .nodes
@@ -241,13 +280,7 @@ fn build_workflow_plan(
 
     if requires_dag_execution(&metadata) {
         return Ok(Box::new(DagWorkflowPlan::new(
-            metadata,
-            input,
-            session,
-            ctx,
-            current,
-            complete_context,
-            hook,
+            metadata, input, session, ctx, current, hook,
         )));
     }
 
@@ -264,7 +297,6 @@ fn build_workflow_plan(
         pending: None,
         task_sequence: 0,
         finished: false,
-        complete_context,
         hook,
     }))
 }
@@ -292,7 +324,6 @@ struct WorkflowPlan {
     pending: Option<PendingAction>,
     task_sequence: usize,
     finished: bool,
-    complete_context: bool,
     hook: Arc<dyn WorkflowHook>,
 }
 
@@ -320,7 +351,6 @@ struct DagWorkflowPlan {
     pending: HashMap<String, DagPendingAction>,
     task_sequence: usize,
     finished: bool,
-    complete_context: bool,
     hook: Arc<dyn WorkflowHook>,
     active_node: Option<String>,
 }
@@ -428,7 +458,6 @@ impl WorkflowPlan {
                             .clone()
                             .unwrap_or_else(|| self.input.clone()),
                     };
-                    self.emit_node_completed(self.current.clone(), output.clone(), true)?;
                     self.invoke_hook(
                         &node_id,
                         &hook_node,
@@ -437,9 +466,9 @@ impl WorkflowPlan {
                         },
                     )
                     .await?;
-                    if self.complete_context {
-                        self.ctx.over(Box::new(output));
-                    }
+                    self.ctx
+                        .set_state(crate::ContextState::succeeded(output.clone()))?;
+                    self.emit_node_completed(self.current.clone(), output.clone(), true)?;
                     self.finished = true;
                     return Ok(PlanNext::End);
                 }
@@ -532,7 +561,7 @@ impl WorkflowPlan {
             ..Default::default()
         };
 
-        let task = match action {
+        let mut task = match action {
             WorkflowAction::Workflow { workflow_id, input } => {
                 let input = self.values().resolve(&input)?;
                 let (env, _) =
@@ -586,18 +615,14 @@ impl WorkflowPlan {
                     self.metadata.id.clone(),
                     self.current.clone(),
                 );
-                let child = self
+                let (child_ctx, child) = self
                     .ctx
                     .get_engine()
-                    .call(
-                        self.ctx.clone(),
-                        to_plan_ty::<SingleAgentEnv>(),
-                        Box::new(env),
-                    )
+                    .fork_call(&self.ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
                     .await?;
                 self.pending = Some(PendingAction::SingleAgent(session));
                 TaskReq {
-                    ctx: self.ctx.clone(),
+                    ctx: child_ctx,
                     meta: TaskMeta {
                         ty: TaskType::Plan,
                         ..meta
@@ -638,6 +663,12 @@ impl WorkflowPlan {
                 extension_task(self.ctx.clone(), meta, task_type, request)
             }
         };
+        if task.meta.ty != TaskType::Plan {
+            task.ctx = self.ctx.fork(crate::ContextChildSpec {
+                node_id: Some(self.current.clone()),
+                ..Default::default()
+            })?;
+        }
         Ok(task)
     }
 
@@ -759,7 +790,6 @@ impl DagWorkflowPlan {
         session: CommonSession,
         ctx: Ctx,
         start: String,
-        complete_context: bool,
         hook: Arc<dyn WorkflowHook>,
     ) -> Self {
         let mut predecessors = HashMap::<String, HashSet<String>>::new();
@@ -789,7 +819,6 @@ impl DagWorkflowPlan {
             pending: HashMap::new(),
             task_sequence: 0,
             finished: false,
-            complete_context,
             hook,
             active_node: None,
         }
@@ -855,7 +884,7 @@ impl DagWorkflowPlan {
             ..Default::default()
         };
 
-        let (task, pending) = match action {
+        let (mut task, pending) = match action {
             WorkflowAction::Workflow { workflow_id, input } => {
                 let input = self.values().resolve(&input)?;
                 let (env, _) =
@@ -915,18 +944,14 @@ impl DagWorkflowPlan {
                     self.metadata.id.clone(),
                     node_id.to_string(),
                 );
-                let child = self
+                let (child_ctx, child) = self
                     .ctx
                     .get_engine()
-                    .call(
-                        self.ctx.clone(),
-                        to_plan_ty::<SingleAgentEnv>(),
-                        Box::new(env),
-                    )
+                    .fork_call(&self.ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
                     .await?;
                 (
                     TaskReq {
-                        ctx: self.ctx.clone(),
+                        ctx: child_ctx,
                         meta: TaskMeta {
                             ty: TaskType::Plan,
                             ..meta
@@ -973,6 +998,12 @@ impl DagWorkflowPlan {
                 )
             }
         };
+        if task.meta.ty != TaskType::Plan {
+            task.ctx = self.ctx.fork(crate::ContextChildSpec {
+                node_id: Some(node_id.to_owned()),
+                ..Default::default()
+            })?;
+        }
         self.pending.insert(
             task.meta.id.clone(),
             DagPendingAction {
@@ -1132,7 +1163,6 @@ impl DagWorkflowPlan {
                         "workflow end became ready while actions were still pending"
                     );
                     let output = self.end_output(&node_id, output)?;
-                    self.emit_node_completed(node_id.clone(), output.clone(), true)?;
                     self.invoke_hook(
                         &node_id,
                         &hook_node,
@@ -1141,9 +1171,9 @@ impl DagWorkflowPlan {
                         },
                     )
                     .await?;
-                    if self.complete_context {
-                        self.ctx.over(Box::new(output));
-                    }
+                    self.ctx
+                        .set_state(crate::ContextState::succeeded(output.clone()))?;
+                    self.emit_node_completed(node_id.clone(), output.clone(), true)?;
                     self.active_node = None;
                     self.finished = true;
                     return Ok(PlanNext::End);
@@ -1336,7 +1366,7 @@ fn only_target(node_id: &str, field: &str, targets: &[String]) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContextNull, WorkflowCondition, WorkflowMetadataBuilder};
+    use crate::{WorkflowCondition, WorkflowMetadataBuilder};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -1472,7 +1502,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let builder = recording_builder(metadata.build().unwrap(), events.clone());
         let (env, _) = WorkflowEnv::new("hooked", json!({"input": true}));
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await
@@ -1540,7 +1570,7 @@ mod tests {
         let builder = recording_builder(metadata.build().unwrap(), events.clone());
         let (env, _) = WorkflowEnv::new("hook-failure", Value::Null);
         let mut plan = builder
-            .build(crate::RT::null(), Ctx::new(Arc::new(ContextNull)), env)
+            .build(crate::RT::null(), crate::context::test_context(None), env)
             .await
             .unwrap();
 
@@ -1590,7 +1620,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let builder = recording_builder(metadata.build().unwrap(), events.clone());
         let (env, _) = WorkflowEnv::new("hooked-dag", Value::Null);
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await
@@ -1663,7 +1693,7 @@ mod tests {
 
             let (env, session) = WorkflowEnv::new("dynamic", Value::Null);
             let mut plan = plan_builder
-                .build(crate::RT::null(), Ctx::new(Arc::new(ContextNull)), env)
+                .build(crate::RT::null(), crate::context::test_context(None), env)
                 .await
                 .unwrap();
 
@@ -1675,7 +1705,7 @@ mod tests {
         let (env, _) = WorkflowEnv::new("dynamic", Value::Null);
         assert!(
             plan_builder
-                .build(crate::RT::null(), Ctx::new(Arc::new(ContextNull)), env)
+                .build(crate::RT::null(), crate::context::test_context(None), env)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -1768,7 +1798,7 @@ mod tests {
         let metadata = metadata.to_string().parse::<WorkflowMetadata>().unwrap();
         let plan_builder = WorkflowPlanBuilder::new(metadata);
         let (env, session) = WorkflowEnv::new("example", json!({"name": "Ada"}));
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = plan_builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await
@@ -1875,7 +1905,7 @@ mod tests {
         let plan_builder = WorkflowPlanBuilder::new(builder.build().unwrap());
         let (env, session) = WorkflowEnv::new("control-flow", Value::Null);
         let mut plan = plan_builder
-            .build(crate::RT::null(), Ctx::new(Arc::new(ContextNull)), env)
+            .build(crate::RT::null(), crate::context::test_context(None), env)
             .await
             .unwrap();
 
@@ -1950,7 +1980,7 @@ mod tests {
             .unwrap();
         let plan_builder = WorkflowPlanBuilder::new(builder.build().unwrap());
         let (env, session) = WorkflowEnv::new("parallel", json!({"paths": ["one.txt", "two.txt"]}));
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = plan_builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await
@@ -2079,7 +2109,7 @@ mod tests {
 
         let plan_builder = WorkflowPlanBuilder::new(builder.build().unwrap());
         let (env, _) = WorkflowEnv::new("execute-fan-out", Value::Null);
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = plan_builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await
@@ -2176,7 +2206,7 @@ mod tests {
 
         let plan_builder = WorkflowPlanBuilder::new(builder.build().unwrap());
         let (env, session) = WorkflowEnv::new("decision-fan-out", Value::Null);
-        let ctx = Ctx::new(Arc::new(ContextNull));
+        let ctx = crate::context::test_context(None);
         let mut plan = plan_builder
             .build(crate::RT::null(), ctx.clone(), env)
             .await

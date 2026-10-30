@@ -1,4 +1,6 @@
 mod context;
+#[cfg(test)]
+mod context_integration;
 mod engine;
 mod engine_rt;
 mod tools;
@@ -40,8 +42,8 @@ mod tests {
     use super::*;
     use fae_agent::{
         Ctx, EventType, FAEWorkflowMetadataLoader, Session, SessionEventData, TaskMeta, TaskReq,
-        TaskResp, TaskType, ToolInvocation, ToolRequest, ToolRespItem, ToolResponse,
-        UserMemoryQuery, UserMemoryResponse, WorkflowAction, WorkflowEnv, WorkflowMetadataBuilder,
+        TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, UserMemoryQuery,
+        UserMemoryResponse, WorkflowAction, WorkflowEnv, WorkflowMetadataBuilder,
     };
     use serde_json::{Value, json};
     use std::time::Duration;
@@ -68,6 +70,10 @@ mod tests {
     }
 
     fn tool_task(ctx: Ctx, tool_name: &str, arguments: Value) -> TaskReq<ToolRequest> {
+        if ctx.scope().is_err() {
+            ctx.bind_scope(fae_agent::ContextScope::root(fae_agent::DEFAULT_USER_ID))
+                .unwrap();
+        }
         TaskReq {
             ctx,
             meta: TaskMeta {
@@ -232,11 +238,12 @@ mod tests {
         tools.add_tool(Box::new(DefaultTools::with_host_dir(&host)));
         builder.add_runtime(tools);
         let engine = builder.build().await;
+        let memory_ctx = engine.ctx_with_scope(fae_agent::ContextScope::root("alice"))?;
 
         let response = engine
             .rt()
             .exec::<ToolRequest, ToolResponse>(TaskReq {
-                ctx: engine.ctx(),
+                ctx: memory_ctx.clone(),
                 meta: TaskMeta {
                     ty: TaskType::Tool,
                     ..Default::default()
@@ -249,17 +256,14 @@ mod tests {
                         "confidence": "user_stated"
                     })
                     .to_string(),
-                )
-                .with_invocation(ToolInvocation::UserMemory {
-                    user_id: "alice".to_string(),
-                }),
+                ),
             })
             .await?;
         let output = completed_json(response.resp).await?;
         assert_eq!(output["Updated"]["memory"]["id"], 1);
 
         let update = tool_task(
-            engine.ctx(),
+            memory_ctx.clone(),
             MEMORY_UPDATE,
             json!({
                 "operation": "update",
@@ -272,22 +276,22 @@ mod tests {
         let response = engine
             .rt()
             .exec::<ToolRequest, ToolResponse>(TaskReq {
-                req: update.req.with_invocation(ToolInvocation::UserMemory {
-                    user_id: "alice".to_string(),
-                }),
+                req: update.req,
                 ..update
             })
             .await?;
         let output = completed_json(response.resp).await?;
         assert_eq!(output["Updated"]["created"], false);
 
-        let query = tool_task(engine.ctx(), MEMORY_UPDATE, json!({"operation": "query"}));
+        let query = tool_task(
+            memory_ctx.clone(),
+            MEMORY_UPDATE,
+            json!({"operation": "query"}),
+        );
         let response = engine
             .rt()
             .exec::<ToolRequest, ToolResponse>(TaskReq {
-                req: query.req.with_invocation(ToolInvocation::UserMemory {
-                    user_id: "alice".to_string(),
-                }),
+                req: query.req,
                 ..query
             })
             .await?;
@@ -308,16 +312,14 @@ mod tests {
         assert_eq!(memories[0].content, "Prefers concise technical answers");
 
         let delete = tool_task(
-            engine.ctx(),
+            memory_ctx.clone(),
             MEMORY_UPDATE,
             json!({"operation": "delete", "id": 1}),
         );
         let response = engine
             .rt()
             .exec::<ToolRequest, ToolResponse>(TaskReq {
-                req: delete.req.with_invocation(ToolInvocation::UserMemory {
-                    user_id: "alice".to_string(),
-                }),
+                req: delete.req,
                 ..delete
             })
             .await?;
@@ -365,12 +367,26 @@ mod tests {
         let (ctx, output) = engine.invoke::<_, Value>(env).await?;
 
         assert_eq!(output, json!({"nested": 42}));
-        assert_eq!(
-            ctx.stacks().get(PlanRuntime::ID).map(Vec::len),
-            Some(2),
-            "parent and child plans should share the root context"
+        let stacks = ctx.stacks(fae_agent::ContextStackQuery {
+            tree: true,
+            limit: Some(1024),
+            ..Default::default()
+        })?;
+        assert!(
+            stacks
+                .iter()
+                .any(|entry| entry.task_meta.executor == PlanRuntime::ID)
         );
-        assert_eq!(ctx.stacks().get(WorkflowRuntime::ID).map(Vec::len), Some(1));
+        assert!(
+            stacks
+                .iter()
+                .any(|entry| entry.task_meta.executor == WorkflowRuntime::ID)
+        );
+        assert!(
+            stacks
+                .iter()
+                .any(|entry| entry.scope_id != ctx.scope().unwrap().scope_id)
+        );
         Ok(())
     }
 

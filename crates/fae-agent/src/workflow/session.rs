@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use serde_json::Value;
 
 use crate::{CommonSession, DEFAULT_USER_ID};
@@ -37,21 +35,6 @@ impl WorkflowEnv {
 
     pub fn session(&self) -> CommonSession {
         self.session.clone()
-    }
-
-    #[doc(hidden)]
-    pub fn defer_context_completion(&self) {
-        self.session
-            .completion
-            .complete_context
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) fn completes_context(&self) -> bool {
-        self.session
-            .completion
-            .complete_context
-            .load(Ordering::Acquire)
     }
 }
 

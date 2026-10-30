@@ -41,5 +41,10 @@ lerna-debug.log*
 *.temp
 .cache
 
+# macOS metadata
+.DS_Store
+
 examples/test_workspace
 examples/main
+
+/docs/faeplan/

@@ -123,13 +123,29 @@ impl SingleAgentPlanBuilder {
 
 #[async_trait::async_trait]
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
+    async fn child_spec(&self, env: &SingleAgentEnv) -> anyhow::Result<crate::ContextChildSpec> {
+        let (config, _) = self.load_config(&env.source).await?;
+        Ok(crate::ContextChildSpec {
+            execution: true,
+            session: Some(crate::ContextSession {
+                session_id: env.session_id.clone().unwrap_or(config.agent.session_id),
+                session: env.session.clone(),
+            }),
+            agent_id: Some(config.agent.name),
+            turn_id: Some(env.session.inner.next_turn_id.load(Ordering::Relaxed)),
+            ..Default::default()
+        })
+    }
     async fn build(&self, rt: RT, ctx: Ctx, env: SingleAgentEnv) -> anyhow::Result<Box<dyn Plan>> {
         anyhow::ensure!(
             !env.input.trim().is_empty() || !env.images.is_empty(),
             "input and images cannot both be empty"
         );
         anyhow::ensure!(!env.user_id.trim().is_empty(), "user_id cannot be empty");
-        env.session.set_user_id(env.user_id.clone());
+        anyhow::ensure!(
+            env.session.user_id() == env.user_id,
+            "agent environment and session users do not match"
+        );
         let mode = SingleAgentMode::parse(env.mode.as_deref())?;
         let (config_path, prompt_path, _) = self.source_paths(&env.source)?;
         let (mut config, base_prompt) = self.load_config(&env.source).await?;
@@ -145,6 +161,35 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             anyhow::ensure!(!session_id.trim().is_empty(), "session_id cannot be empty");
             config.agent.session_id = session_id;
         }
+        let turn_id = env.session.inner.next_turn_id.load(Ordering::Relaxed);
+        if let Ok(scope) = ctx.scope() {
+            anyhow::ensure!(
+                scope.user.user_id == env.user_id,
+                "agent environment user does not match context user"
+            );
+            anyhow::ensure!(
+                scope.agent_id.as_deref() == Some(&config.agent.name),
+                "agent ownership does not match context"
+            );
+            anyhow::ensure!(
+                scope
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.session_id == config.agent.session_id
+                        && s.session.same_session(&env.session)),
+                "agent session does not match context"
+            );
+        } else {
+            let mut scope = crate::ContextScope::root(env.user_id.clone());
+            scope.agent_id = Some(config.agent.name.clone());
+            scope.session = Some(crate::ContextSession {
+                session_id: config.agent.session_id.clone(),
+                session: env.session.clone(),
+            });
+            scope.turn_id = Some(turn_id);
+            ctx.bind_scope(scope)?;
+        }
+        env.session.bind_context(ctx.clone());
         let skills = resolve_skills(&rt, &config.skills).await?;
         let sub_agents = self
             .resolve_sub_agents(&config.agent.name, &config.sub_agents)
@@ -235,7 +280,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         };
         let binding = SingleAgentBinding {
             rt: rt.clone(),
-            ctx: ctx.clone(),
+            engine: ctx.get_engine(),
             template: template.clone(),
             mode,
         };
