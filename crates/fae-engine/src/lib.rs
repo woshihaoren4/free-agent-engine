@@ -1,6 +1,4 @@
 mod context;
-#[cfg(test)]
-mod context_integration;
 mod engine;
 mod engine_rt;
 mod tools;

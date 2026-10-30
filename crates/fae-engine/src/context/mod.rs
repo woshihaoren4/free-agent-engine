@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod context_integration;
+
 use crate::Engine;
 use fae_agent::*;
 use std::{
