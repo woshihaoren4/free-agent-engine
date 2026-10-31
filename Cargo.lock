@@ -1102,6 +1102,7 @@ dependencies = [
  "chrono",
  "cron",
  "fae-agent",
+ "http",
  "reqwest",
  "rmcp",
  "serde",
@@ -1110,6 +1111,7 @@ dependencies = [
  "shlex",
  "tokio",
  "tokio-stream",
+ "tower",
  "wd_log",
  "wd_tools 0.14.15",
 ]
