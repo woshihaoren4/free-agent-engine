@@ -1026,6 +1026,8 @@ user-defined rules, and other long-term facts."
             panic!("expected todo create task");
         };
         let create = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let plan_id = plan.id.clone();
+        assert_eq!(create.ctx.scope()?.todo.as_ref().unwrap().plan_id, plan_id);
 
         let PlanNext::Tasks(tasks) = plan
             .next(
@@ -1033,8 +1035,13 @@ user-defined rules, and other long-term facts."
                     ctx,
                     meta: create.meta,
                     resp: ToolResponse::with_result(
-                        r#"{"todos":[{"id":1,"content":"implement","completed":false},{"id":2,"content":"verify","completed":false}]}"#
-                            .to_string(),
+                        serde_json::json!({
+                            "plan_id": plan_id,
+                            "todos": [
+                                {"id":1,"content":"implement","completed":false},
+                                {"id":2,"content":"verify","completed":false}
+                            ]
+                        }).to_string(),
                     ),
                 }
                 .into_response(),
@@ -1045,6 +1052,8 @@ user-defined rules, and other long-term facts."
         };
 
         assert!(plan.todo_plan.is_some());
+        assert_eq!(plan.todo_plan.as_ref().unwrap().id(), plan_id);
+        assert_eq!(tasks[0].ctx.scope()?.todo.as_ref().unwrap().plan_id, plan_id);
         assert!(!plan.owns_active_turn);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].meta.ty, TaskType::Memory);

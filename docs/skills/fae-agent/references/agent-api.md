@@ -248,10 +248,17 @@ Keep the final summary concise.
   之一；完成任务时可用 `assistant` 保存该步骤的 Assistant 输出。
 - `delete` 需要已有正整数 `id`，返回被删除的 todo。
 
-todo ID 从 1 开始单调递增。内容会去除首尾空白，空数组或包含空内容的数组会被拒绝。
+todo ID 在每个计划内从 1 开始单调递增，clear 不重用 ID。内容会去除首尾空白，
+空数组或包含空内容的数组会被拒绝。
 `query` 会同时返回当前清单的 `user_input`，以及每个已记录的 `assistant` 完成内容。
 数据保存在
-`<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。
+`<FAE_HOST>/session/<agent-id>/<user-id>/todo/<plan-id>.json`。
+计划归属由可信 Context 中的 `TodoPlanScope` 传递，工具 arguments 不接受 plan_id。
+绑定计划的 query/create 返回 `plan_id`、`user_input` 与 `todos`，update/delete 返回
+`plan_id` 与 `todo`。无计划归属时只允许 query，返回按 `plan_id` 分组的 `plans`；
+旧 `todo.json` 在 `legacy` 中只读显示，不自动迁移或用于新计划。
+普通 Agent 首次调用 todo create 时自动绑定计划，接续编排沿用该 ID。
+CLI 会话清理删除当前 agent/user 的全部计划及旧文件；活跃计划存在时拒绝清理。
 
 `SingleAgentEnv.mode` 为空时使用普通 single-agent 流程；设为 `"todo"` 时启用 todo 模式。
 该模式要求 Agent 配置挂载 `todo` 工具，会先生成计划，再按 ID 顺序逐项执行并更新完成状态，

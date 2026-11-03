@@ -85,6 +85,7 @@ pub(in crate::plan) struct SingleAgentPlan {
     terminal_tool_completion: Option<TerminalToolCompletion>,
     pending_terminal_output: Option<String>,
     pending_todo_output: Option<String>,
+    todo_ctx: Option<Ctx>,
     todo_plan: Option<Box<SingleAgentTodoPlan>>,
     owns_active_turn: bool,
     finish_on_drop: bool,
@@ -262,6 +263,7 @@ impl SingleAgentPlan {
             terminal_tool_completion,
             pending_terminal_output: None,
             pending_todo_output: None,
+            todo_ctx: None,
             todo_plan: None,
             owns_active_turn: true,
             finish_on_drop: false,
@@ -298,12 +300,31 @@ impl SingleAgentPlan {
     }
 
     async fn tool_task(&mut self, request: ToolRequest) -> anyhow::Result<TaskRequest> {
+        let todo_ctx = (request.get_tool_name() == TODO_TOOL_NAME)
+            .then(|| self.todo_ctx.clone())
+            .flatten();
+        self.tool_task_with_context(request, todo_ctx).await
+    }
+
+    async fn tool_task_with_context(
+        &mut self,
+        request: ToolRequest,
+        ctx: Option<Ctx>,
+    ) -> anyhow::Result<TaskRequest> {
+        let mut hook_context = self.hook_context(None);
+        if let Some(ctx) = &ctx {
+            hook_context.ctx = ctx;
+        }
         let request = self
             .template
             .hook
-            .on_tools_req(&self.hook_context(None), request)
+            .on_tools_req(&hook_context, request)
             .await?;
-        Ok(self.task(TaskType::Tool, request))
+        let mut task = self.task(TaskType::Tool, request);
+        if let Some(ctx) = ctx {
+            task.ctx = ctx;
+        }
+        Ok(task)
     }
 
     fn history_task(&mut self) -> TaskRequest {

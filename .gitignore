@@ -48,3 +48,8 @@ examples/test_workspace
 examples/main
 
 /docs/faeplan/
+
+.idea
+.trae
+.codex
+.cloud

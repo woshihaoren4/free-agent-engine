@@ -236,8 +236,20 @@ impl SingleAgentPlan {
             };
             let routed = match route {
                 CallableRoute::Tool(runtime_tool_name) => {
+                    if enters_todo_mode && self.todo_ctx.is_none() {
+                        self.todo_ctx = Some(
+                            self.ctx
+                                .with_todo_plan(self.id.clone(), self.input.clone())?,
+                        );
+                    }
+                    let todo_ctx = (tool_name == TODO_TOOL_NAME)
+                        .then(|| self.todo_ctx.clone())
+                        .flatten();
                     let request = ToolRequest::new(runtime_tool_name, arguments);
-                    Some((self.tool_task(request).await?, PendingCallKind::Tool))
+                    Some((
+                        self.tool_task_with_context(request, todo_ctx).await?,
+                        PendingCallKind::Tool,
+                    ))
                 }
                 CallableRoute::Mcp { server, tool_name } => Some((
                     self.task(TaskType::Mcp, McpRequest::new(server, tool_name, arguments)),
@@ -399,11 +411,14 @@ impl SingleAgentPlan {
         output: String,
     ) -> anyhow::Result<PlanNext> {
         if pending.enters_todo_mode {
-            anyhow::ensure!(
-                self.pending_todo_output.is_none(),
-                "todo create was called more than once in one agent step"
-            );
-            self.pending_todo_output = Some(output.clone());
+            let result: serde_json::Value = serde_json::from_str(&output)?;
+            if result.get("code").is_none() {
+                anyhow::ensure!(
+                    self.pending_todo_output.is_none(),
+                    "todo create was called more than once in one agent step"
+                );
+                self.pending_todo_output = Some(output.clone());
+            }
         }
         let terminal_output = self
             .terminal_tool_completion
@@ -459,6 +474,9 @@ impl SingleAgentPlan {
                 self.images.clone(),
                 self.turn_id,
                 self.session.clone(),
+                self.todo_ctx
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("todo creation has no plan context"))?,
                 output,
             )
             .await?;

@@ -200,6 +200,71 @@ mod tests {
         assert_eq!(task.scope().unwrap().agent_id.as_deref(), Some("worker"));
     }
 
+    #[tokio::test]
+    async fn todo_plan_scope_inherits_only_inside_its_orchestration() {
+        let ctx = root()
+            .await
+            .fork(ContextChildSpec {
+                agent_id: Some("worker".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let owner = ctx
+            .with_todo_plan("plan-a".into(), "request".into())
+            .unwrap();
+        assert!(ctx.scope().unwrap().todo.is_none());
+        let task = owner.fork(ContextChildSpec::default()).unwrap();
+        assert_eq!(
+            task.scope().unwrap().todo.as_ref().unwrap().plan_id,
+            "plan-a"
+        );
+        let delegated = owner
+            .fork(ContextChildSpec {
+                execution: true,
+                agent_id: Some("worker".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(delegated.scope().unwrap().todo.is_none());
+        let internal = owner
+            .fork(ContextChildSpec {
+                execution: true,
+                agent_id: Some("worker".into()),
+                todo: TodoContextBinding::Inherit,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            internal.scope().unwrap().todo.as_ref().unwrap().plan_id,
+            "plan-a"
+        );
+        assert!(
+            owner
+                .fork(ContextChildSpec {
+                    execution: true,
+                    agent_id: Some("other".into()),
+                    todo: TodoContextBinding::Inherit,
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert!(
+            ctx.with_todo_plan("../escape".into(), "request".into())
+                .is_err()
+        );
+        let nested = internal
+            .with_todo_plan("plan-b".into(), "nested".into())
+            .unwrap();
+        assert_eq!(
+            nested.scope().unwrap().todo.as_ref().unwrap().plan_id,
+            "plan-b"
+        );
+        assert_eq!(
+            owner.scope().unwrap().todo.as_ref().unwrap().plan_id,
+            "plan-a"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn structured_stacks_preserve_meta_order_subtrees_and_pagination() {
         let ctx = root().await;
@@ -345,6 +410,14 @@ impl EngineContext {
         Arc::new(Self::new(engine))
     }
     fn validate(scope: &ContextScope) -> anyhow::Result<()> {
+        if let Some(todo) = &scope.todo {
+            crate::validate_path_segment("plan_id", &todo.plan_id)?;
+            anyhow::ensure!(
+                scope.agent_id.as_deref() == Some(todo.agent_id.as_str())
+                    && scope.user.user_id == todo.user_id,
+                "todo plan owner does not match context"
+            );
+        }
         anyhow::ensure!(
             !scope.user.user_id.trim().is_empty(),
             "user_id cannot be empty"
@@ -438,6 +511,7 @@ impl Context for EngineContext {
             turn_id: spec
                 .turn_id
                 .or_else(|| if spec.execution { None } else { parent.turn_id }),
+            todo: spec.todo.resolve(&parent.todo, spec.execution),
         };
         Self::validate(&scope)?;
         self.stacks

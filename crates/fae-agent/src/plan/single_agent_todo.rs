@@ -50,6 +50,8 @@ struct SingleAgentTodo {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TodoList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plan_id: Option<String>,
     todos: Vec<TodoItem>,
 }
 
@@ -166,7 +168,7 @@ impl SingleAgentTodo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TodoPlanStage {
-    Reset,
+    Initialize,
     RunningAgent,
     CompleteTodo,
     Query,
@@ -177,6 +179,7 @@ enum TodoPlanStage {
 pub(super) struct SingleAgentTodoPlan {
     id: String,
     ctx: Ctx,
+    todo_ctx: Option<Ctx>,
     template: SingleAgentTemplate,
     turn_id: u64,
     session: CommonSession,
@@ -215,12 +218,13 @@ impl SingleAgentTodoPlan {
         Self {
             id: format!("single_agent_todo-{}", wd_tools::uuid::v4()),
             ctx,
+            todo_ctx: None,
             template,
             turn_id,
             session,
             todo: SingleAgentTodo::new(input),
             images,
-            stage: TodoPlanStage::Reset,
+            stage: TodoPlanStage::Initialize,
             child: None,
             child_session: None,
             current_prompt: None,
@@ -239,8 +243,19 @@ impl SingleAgentTodoPlan {
         images: Vec<String>,
         turn_id: u64,
         session: CommonSession,
+        todo_ctx: Ctx,
         output: String,
     ) -> anyhow::Result<(Self, PlanNext)> {
+        let scope = todo_ctx.scope()?;
+        let todo_scope = scope
+            .todo
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("todo continuation requires plan ownership"))?;
+        let list: TodoList = serde_json::from_str(&output)?;
+        anyhow::ensure!(
+            list.plan_id.as_deref() == Some(todo_scope.plan_id.as_str()),
+            "todo create response does not belong to the current plan"
+        );
         let created_todos = format_created_todos(&output)?;
         let mut plan = Self::new_with_images(
             ctx,
@@ -250,6 +265,8 @@ impl SingleAgentTodoPlan {
             turn_id,
             session,
         );
+        plan.id = todo_scope.plan_id.clone();
+        plan.todo_ctx = Some(todo_ctx);
         plan.todo.chat_history.extend([
             SessionMessage::user_with_images(input, images),
             SessionMessage::assistant(created_todos),
@@ -263,7 +280,7 @@ impl SingleAgentTodoPlan {
 
     fn hook_context<'a>(&'a self, task_id: Option<&'a str>) -> SingleAgentHookContext<'a> {
         SingleAgentHookContext {
-            ctx: &self.ctx,
+            ctx: self.todo_ctx.as_ref().unwrap_or(&self.ctx),
             plan_id: &self.id,
             turn_id: self.turn_id,
             agent: &self.template.agent,
@@ -274,7 +291,7 @@ impl SingleAgentTodoPlan {
     fn task<Req: Send + 'static>(&mut self, ty: TaskType, req: Req) -> TaskRequest {
         self.task_sequence += 1;
         TaskReq {
-            ctx: self.ctx.clone(),
+            ctx: self.todo_ctx.as_ref().unwrap_or(&self.ctx).clone(),
             meta: TaskMeta {
                 id: format!("single-agent-todo-{}-{}", self.turn_id, self.task_sequence),
                 ty,
@@ -314,7 +331,15 @@ impl SingleAgentTodoPlan {
         loop {
             match response.next().await? {
                 ToolRespItem::Streaming(_) => {}
-                ToolRespItem::Completed(output) => return Ok(output),
+                ToolRespItem::Completed(output) => {
+                    let list: serde_json::Value = serde_json::from_str(&output)?;
+                    anyhow::ensure!(
+                        list.get("plan_id").and_then(serde_json::Value::as_str)
+                            == Some(self.id.as_str()),
+                        "todo response does not belong to the current plan"
+                    );
+                    return Ok(output);
+                }
             }
         }
     }
@@ -350,16 +375,21 @@ impl SingleAgentTodoPlan {
         let child_session =
             CommonSession::new_in_agent(self.session.clone(), self.template.agent.name.clone());
         let child_turn_id = child_session.activate_turn()?;
-        let child_ctx = self.ctx.fork(crate::ContextChildSpec {
-            execution: true,
-            agent_id: Some(self.template.agent.name.clone()),
-            session: Some(crate::ContextSession {
-                session_id: self.template.agent.session_id.clone(),
-                session: child_session.clone(),
-            }),
-            turn_id: Some(child_turn_id),
-            ..Default::default()
-        })?;
+        let child_ctx = self
+            .todo_ctx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("todo plan context is not initialized"))?
+            .fork(crate::ContextChildSpec {
+                execution: true,
+                agent_id: Some(self.template.agent.name.clone()),
+                session: Some(crate::ContextSession {
+                    session_id: self.template.agent.session_id.clone(),
+                    session: child_session.clone(),
+                }),
+                turn_id: Some(child_turn_id),
+                todo: crate::TodoContextBinding::Inherit,
+                ..Default::default()
+            })?;
         child_ctx.set_state(crate::ContextState::Running)?;
         child_session.bind_context(child_ctx.clone());
         let mut child = if self.todo.phase == TodoPhase::Planning && self.images.is_empty() {
@@ -525,6 +555,12 @@ impl Plan for SingleAgentTodoPlan {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
+        if self.todo_ctx.is_none() {
+            self.todo_ctx = Some(
+                self.ctx
+                    .with_todo_plan(self.id.clone(), self.todo.requirement.clone())?,
+            );
+        }
         self.session.emit_agent(
             self.turn_id,
             self.template.agent.name.clone(),
@@ -535,7 +571,7 @@ impl Plan for SingleAgentTodoPlan {
         )?;
         Ok(PlanNext::Tasks(vec![
             self.todo_task(serde_json::json!({
-                "operation": "clear",
+                "operation": "initialize",
                 "user_input": self.todo.requirement
             }))
             .await?,
@@ -551,7 +587,7 @@ impl Plan for SingleAgentTodoPlan {
         }
 
         match self.stage {
-            TodoPlanStage::Reset => {
+            TodoPlanStage::Initialize => {
                 let task_id = task_result.meta.id.clone();
                 self.todo_output(&task_id, &mut task_result).await?;
                 self.start_child(self.todo.planning_prompt()).await
@@ -728,10 +764,17 @@ mod tests {
     }
 
     fn tool_response(ctx: &Ctx, output: &str) -> TaskResponse {
+        let output = match serde_json::from_str::<serde_json::Value>(output) {
+            Ok(mut value) if value.is_object() => {
+                value["plan_id"] = serde_json::json!("test-todo-plan");
+                value.to_string()
+            }
+            _ => output.to_string(),
+        };
         TaskResp {
             ctx: ctx.clone(),
             meta: TaskMeta::default(),
-            resp: ToolResponse::with_result(output.to_string()),
+            resp: ToolResponse::with_result(output),
         }
         .into_response()
     }
@@ -962,6 +1005,7 @@ mod tests {
             1,
             session.clone(),
         );
+        plan.id = "test-todo-plan".into();
 
         let PlanNext::Tasks(mut tasks) = plan.init().await.unwrap() else {
             panic!("expected reset task");
@@ -970,9 +1014,13 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(reset.req.get_arguments()).unwrap(),
             serde_json::json!({
-                "operation": "clear",
+                "operation": "initialize",
                 "user_input": "ship release"
             })
+        );
+        assert_eq!(
+            reset.ctx.scope().unwrap().todo.as_ref().unwrap().plan_id,
+            plan.id
         );
         assert!(reset.req.take_invocation().is_none());
 

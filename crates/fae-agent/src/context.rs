@@ -47,6 +47,68 @@ pub struct ContextSession {
     pub session: CommonSession,
 }
 
+/// The outer todo orchestration owns this ID, including all of its child steps.
+#[derive(Debug)]
+pub struct TodoPlanScope {
+    pub plan_id: String,
+    pub agent_id: String,
+    pub user_id: String,
+    pub user_input: String,
+    lease: Mutex<Option<Box<dyn TodoPlanLease>>>,
+}
+
+pub trait TodoPlanLease: Debug + Send + Sync {}
+impl<T: Debug + Send + Sync> TodoPlanLease for T {}
+
+impl TodoPlanScope {
+    pub fn new(plan_id: String, agent_id: String, user_id: String, user_input: String) -> Self {
+        Self {
+            plan_id,
+            agent_id,
+            user_id,
+            user_input,
+            lease: Mutex::new(None),
+        }
+    }
+
+    /// Keep storage ownership alive for the entire orchestration and its child contexts.
+    pub fn acquire_lease(
+        &self,
+        acquire: impl FnOnce() -> anyhow::Result<Box<dyn TodoPlanLease>>,
+    ) -> anyhow::Result<()> {
+        let mut lease = self.lease.lock().unwrap();
+        if lease.is_none() {
+            *lease = Some(acquire()?);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum TodoContextBinding {
+    /// Task children inherit; independently delegated executions start unbound.
+    #[default]
+    Auto,
+    Inherit,
+    Clear,
+    Bind(Arc<TodoPlanScope>),
+}
+
+impl TodoContextBinding {
+    pub fn resolve(
+        self,
+        parent: &Option<Arc<TodoPlanScope>>,
+        execution: bool,
+    ) -> Option<Arc<TodoPlanScope>> {
+        match self {
+            Self::Auto if execution => None,
+            Self::Auto | Self::Inherit => parent.clone(),
+            Self::Clear => None,
+            Self::Bind(scope) => Some(scope),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ContextScope {
     pub scope_id: String,
@@ -57,6 +119,7 @@ pub struct ContextScope {
     pub workflow_id: Option<String>,
     pub node_id: Option<String>,
     pub turn_id: Option<u64>,
+    pub todo: Option<Arc<TodoPlanScope>>,
 }
 impl ContextScope {
     pub fn root(user_id: impl Into<String>) -> Self {
@@ -71,6 +134,7 @@ impl ContextScope {
             workflow_id: None,
             node_id: None,
             turn_id: None,
+            todo: None,
         }
     }
 }
@@ -84,6 +148,7 @@ pub struct ContextChildSpec {
     pub node_id: Option<String>,
     pub turn_id: Option<u64>,
     pub execution: bool,
+    pub todo: TodoContextBinding,
 }
 
 #[derive(Clone)]
@@ -292,6 +357,26 @@ impl WeakCtx {
     }
 }
 impl Ctx {
+    /// Prepare an independent tool scope without mutating the caller's scope.
+    pub fn with_todo_plan(&self, plan_id: String, user_input: String) -> anyhow::Result<Self> {
+        let scope = self.scope()?;
+        let agent_id = scope
+            .agent_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("todo requires agent ownership in context"))?;
+        let ctx = self.fork(ContextChildSpec {
+            todo: TodoContextBinding::Bind(Arc::new(TodoPlanScope::new(
+                plan_id,
+                agent_id,
+                scope.user.user_id.clone(),
+                user_input,
+            ))),
+            ..Default::default()
+        })?;
+        ctx.set_state(ContextState::Running)?;
+        Ok(ctx)
+    }
+
     pub fn downgrade(&self) -> WeakCtx {
         WeakCtx(Arc::downgrade(&self.0))
     }
@@ -368,6 +453,7 @@ pub(crate) fn test_context(scope: Option<ContextScope>) -> Ctx {
             let mut scope = (*parent).clone();
             scope.scope_id = wd_tools::uuid::v4();
             scope.parent_scope_id = Some(parent.scope_id.clone());
+            scope.todo = spec.todo.resolve(&parent.todo, spec.execution);
             if spec.execution {
                 scope.session = spec.session;
                 scope.agent_id = spec.agent_id;

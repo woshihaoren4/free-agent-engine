@@ -174,6 +174,20 @@ async fn normal_todo_and_normal_turns_keep_task_contexts_independent() -> anyhow
     assert_eq!(first_ctx.result::<Value>().await?, json!("done"));
     let observed = calls.lock().unwrap();
     assert_eq!(observed.len(), 4);
+    assert!(observed[0].ctx.scope()?.todo.is_none());
+    assert!(observed[3].ctx.scope()?.todo.is_none());
+    let todo_plan_id = observed[1]
+        .ctx
+        .scope()?
+        .todo
+        .as_ref()
+        .unwrap()
+        .plan_id
+        .clone();
+    assert_eq!(
+        observed[2].ctx.scope()?.todo.as_ref().unwrap().plan_id,
+        todo_plan_id
+    );
     for call in observed.iter() {
         let scope = call.ctx.scope()?;
         assert_eq!(scope.user.user_id, "alice");
@@ -191,8 +205,10 @@ async fn normal_todo_and_normal_turns_keep_task_contexts_independent() -> anyhow
         ));
     }
     drop(observed);
-    let todos: Value =
-        serde_json::from_slice(&tokio::fs::read(home.join("session/poet/alice/todo.json")).await?)?;
+    let todos: Value = serde_json::from_slice(
+        &tokio::fs::read(home.join(format!("session/poet/alice/todo/{todo_plan_id}.json"))).await?,
+    )?;
+    assert_eq!(todos["plan_id"], todo_plan_id);
     assert_eq!(todos["todos"]["1"]["completed"], json!(true));
     engine.exit().await?;
     tokio::fs::remove_dir_all(home).await?;

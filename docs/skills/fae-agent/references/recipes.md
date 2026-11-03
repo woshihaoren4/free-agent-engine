@@ -156,7 +156,9 @@ Mark each todo completed immediately after the step succeeds.
 Query the list before reporting final completion.
 ```
 
-`todo` 数据保存在 `<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。通过
+`todo` 数据按外层 todo 编排的 `plan_id` 保存在
+`<FAE_HOST>/session/<agent-id>/<user-id>/todo/<plan-id>.json`。子步骤沿用同一归属；
+并发计划各自维护任务。通过
 `SingleAgentEnv::with_mode("todo")` 可以启用自动 todo 模式：先规划，再逐项执行，最后总结。
 todo 模式要求 Agent 配置的 `tools` 包含 `todo`。
 

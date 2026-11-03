@@ -498,12 +498,12 @@ async fn clean_session_data(
     user_id: &str,
     session_id: &str,
 ) -> anyhow::Result<()> {
+    let todos = TodoTool::with_host_dir(session_runtime.host_dir());
+    let guard = todos.lock_for_cleanup(agent_id, user_id).await?;
     session_runtime
         .delete(agent_id, user_id, session_id)
         .await?;
-    TodoTool::with_host_dir(session_runtime.host_dir())
-        .delete_state(agent_id, user_id)
-        .await?;
+    guard.delete_state().await?;
     Ok(())
 }
 
@@ -912,6 +912,13 @@ mod tests {
         tokio::fs::write(&todo_path, r#"{"next_id":2,"todos":{}}"#)
             .await
             .unwrap();
+        let plans = session_path.parent().unwrap().join("todo");
+        tokio::fs::create_dir_all(&plans).await.unwrap();
+        for plan in ["plan-a", "plan-b"] {
+            tokio::fs::write(plans.join(format!("{plan}.json")), "{}")
+                .await
+                .unwrap();
+        }
 
         clean_session_data(&runtime, "agent-1", "user-1", "session-1")
             .await
@@ -919,10 +926,67 @@ mod tests {
 
         assert!(!session_path.exists());
         assert!(!todo_path.exists());
+        assert!(!plans.exists());
         assert!(other_session_path.exists());
         clean_session_data(&runtime, "agent-1", "user-1", "session-1")
             .await
             .unwrap();
+        tokio::fs::remove_dir_all(host).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clean_session_data_preserves_history_while_a_todo_plan_is_active() {
+        use fae_agent::Tools;
+        let host = std::env::temp_dir().join(format!("fae-clean-active-{}", wd_tools::uuid::v4()));
+        let runtime = SessionRuntime::with_host_dir(&host);
+        runtime
+            .add(
+                "agent-1",
+                "alice",
+                "session-1",
+                &[fae_agent::SessionMessage::user("history")],
+            )
+            .await
+            .unwrap();
+        let engine = fae_engine::EngineBuilder::new().build().await;
+        let mut scope = fae_agent::ContextScope::root("alice");
+        scope.agent_id = Some("agent-1".into());
+        let ctx = engine
+            .ctx_with_scope(scope)
+            .unwrap()
+            .with_todo_plan("plan-1".into(), "request".into())
+            .unwrap();
+        let tool = TodoTool::with_host_dir(&host);
+        let mut response = tool
+            .exec(
+                &ctx,
+                fae_agent::ToolRequest::new(
+                    "todo".into(),
+                    json!({"operation":"create","contents":["task"]}).to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        response.next().await.unwrap();
+        let history = runtime
+            .session_path("agent-1", "alice", "session-1")
+            .unwrap();
+        let plan = history.parent().unwrap().join("todo/plan-1.json");
+        assert!(
+            clean_session_data(&runtime, "agent-1", "alice", "session-1")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("busy")
+        );
+        assert!(history.exists());
+        assert!(plan.exists());
+        drop(ctx);
+        clean_session_data(&runtime, "agent-1", "alice", "session-1")
+            .await
+            .unwrap();
+        assert!(!history.exists());
+        assert!(!plan.exists());
         tokio::fs::remove_dir_all(host).await.unwrap();
     }
 

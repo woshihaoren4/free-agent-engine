@@ -13,7 +13,7 @@ description: Creates, configures, modifies, runs, and troubleshoots FAE agents. 
 - 使用 `<agent-id>_config.json` 管理模型、会话、工具、Skill 和 MCP。
 - 用户长期记忆保存在 `<FAE_HOST>/memory/<user-id>.jsonl`，由 `memory_update` 工具维护。
 - 任务清单由 `todo` 工具维护，并保存在
-  `<FAE_HOST>/session/<agent-id>/<user-id>/todo.json`。
+  `<FAE_HOST>/session/<agent-id>/<user-id>/todo/<plan-id>.json`，按外层 todo 编排计划隔离。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
 - 运行和验证统一使用 `fae agent`。
 - 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
