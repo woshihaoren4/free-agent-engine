@@ -476,6 +476,7 @@ impl Context for EngineContext {
             .scope
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("context scope is not bound"))?;
+        let timer_execution = spec.timer_binding(parent);
         let scope = ContextScope {
             scope_id: wd_tools::uuid::v4(),
             parent_scope_id: Some(parent.scope_id.clone()),
@@ -512,6 +513,7 @@ impl Context for EngineContext {
                 .turn_id
                 .or_else(|| if spec.execution { None } else { parent.turn_id }),
             todo: spec.todo.resolve(&parent.todo, spec.execution),
+            timer_execution,
         };
         Self::validate(&scope)?;
         self.stacks

@@ -7,7 +7,7 @@ and streamed model output in one stable TUI.
 ## Background service
 
 The terminal UI and direct CLI commands are WebSocket clients. A separate
-`fae` process owns engines, workflows, history, todos and memory. Business
+`fae` process owns engines, workflows, history, todos, memory and cron timers. Business
 commands (including `init`) automatically start it at `127.0.0.1:6666` when
 needed. Closing the client leaves the service and its active tasks running.
 
@@ -102,7 +102,8 @@ The generated configuration has this shape:
     "send_http_request",
     "execute_python",
     "memory_update",
-    "todo"
+    "todo",
+    "timer"
   ],
   "skills": [
     {
@@ -123,6 +124,70 @@ The generated configuration has this shape:
   "workflows": []
 }
 ```
+
+## Cron timers
+
+New agent configs include `timer`; add it to `tools` in existing configs to
+enable scheduling. Ask the agent to create, query, update or delete a timer.
+For example, the agent can call:
+
+```json
+{
+  "operation": "create",
+  "idempotency_key": "daily-summary-1",
+  "name": "Daily workspace summary",
+  "input": "Summarize today's changes in this workspace.",
+  "schedule": {
+    "kind": "loop",
+    "cron": "0 0 9 * * *",
+    "timezone": "Asia/Shanghai"
+  }
+}
+```
+
+Schedules support `once`, `repeat` with a positive `max_fires`, and `loop`.
+Cron accepts 5 fields (minute through weekday), 6 (seconds through weekday),
+or 7 (including year), using the cron 0.16 dialect. Timezone defaults to UTC.
+Query returns UTC timestamps, `next_local`, future previews and, with
+`include_occurrences: true`, recent execution statuses and new session IDs.
+Query supports `id`, `state`, `limit` (1–100), `cursor` and `include_deleted`.
+Update requires `id` and `expected_revision`; `enabled: false` pauses and
+`enabled: true` resumes without resetting the count. Supply the entire
+`schedule` when changing it. Reuse the creation key when retrying a request.
+Delete accepts an optional `expected_revision` and keeps a tombstone.
+
+Each firing creates a separate chat session under the saved user and agent,
+using the original workspace and freshly loaded agent configuration. It
+loads user memory without copying the creating conversation. Config user
+and default session changes do not override timer ownership. A missing
+source, renamed agent or invalid workspace fails that occurrence.
+
+Closing the client or cleaning session history/todos leaves timers active.
+The service must remain running: stopping it, sleeping or shutting down the
+machine prevents on-time execution. On recovery, `coalesce` (default) merges
+missed times into one; `skip` ignores them. Executions of the same timer do
+not overlap; at most one additional due time is retained and coalesced.
+Counts measure durably accepted firings, including failures and cancellations.
+Deleting a timer suppresses pending work but does not cancel an execution
+already handed off.
+
+State is stored separately at
+`<FAE home>/timer/<agent>/<user>/state.json`, protected by `timer.lock`.
+The service runs at most 2 timer rounds within its 8-round/32-session limits.
+The pending queue is capped at 256; excess due times wait without consuming
+counts. Definitions are limited to 100 per agent/user and 1000 per home.
+Completed occurrence history retains up to 1000 entries per partition or
+30 days; active entries and creation idempotency records are preserved.
+Pending occurrences replay with their original session IDs after restart;
+dispatching/running occurrences become `interrupted` and are not rerun.
+There is no operating-system wakeup, login startup or native timer CLI.
+
+For embedding, own one `TimerRuntime`, consume its single `watch()` stream,
+and install `handle.client()` into session engines. A trusted
+`TimerExecutionBindingResolver` supplies the execution source/workspace;
+the default resolver uses `ContextScope.timer_execution`, inherited by task
+contexts and rebound for child agents. Call `exit()` on the host runtime
+when shutting down; client engine exit does not stop the shared scheduler.
 
 The prompt file is wrapped in `<setting>`. Resolved capabilities are appended
 before history as `<skills>`, `<mcp>`, `<sub_agent>`, and `<workflow>` sections.

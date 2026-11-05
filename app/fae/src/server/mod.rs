@@ -7,6 +7,7 @@ pub mod registry;
 pub mod replay;
 pub mod runtime;
 pub mod session;
+pub mod timer;
 pub mod workspace;
 
 use crate::protocol::*;
@@ -50,7 +51,10 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
         executable: std::env::current_exe()?,
     };
     let token = format!("{}{}", wd_tools::uuid::v4(), wd_tools::uuid::v4());
-    let registry = registry::Registry::new(home.clone(), config.instance_id.clone());
+    let timer = fae_engine::TimerRuntime::with_home_dir(home.clone()).await?;
+    let registry =
+        registry::Registry::with_timer(home.clone(), config.instance_id.clone(), timer.handle());
+    let services = timer::ServerServices::start(timer, registry.clone()).await?;
     let (shutdown, mut stopping) = watch::channel(false);
     let signal = lifecycle::stop_signal()?;
     tokio::pin!(signal);
@@ -124,7 +128,11 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
         }
     }
     drop(listener);
-    let result = tokio::time::timeout(Duration::from_secs(10), registry.shutdown()).await;
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        services.stop_dispatch().await;
+        registry.shutdown().await
+    })
+    .await;
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

@@ -5,6 +5,7 @@ pub struct SingleAgentPlanBuilder {
     home_dir: PathBuf,
     hooks: Vec<Arc<dyn SingleAgentHookBuilder>>,
     frozen_sources: HashMap<String, (SingleAgentConfig, String)>,
+    timer_workspace: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for SingleAgentPlanBuilder {
@@ -32,11 +33,17 @@ impl SingleAgentPlanBuilder {
             home_dir: home_dir.into(),
             hooks: Vec::new(),
             frozen_sources: HashMap::new(),
+            timer_workspace: None,
         }
     }
 
     pub fn home_dir(&self) -> &Path {
         &self.home_dir
+    }
+
+    /// Trusted host execution environment; never populated from model arguments.
+    pub fn set_timer_workspace(&mut self, workspace: PathBuf) {
+        self.timer_workspace = Some(workspace);
     }
 
     pub fn hooks(&self) -> &[Arc<dyn SingleAgentHookBuilder>] {
@@ -102,7 +109,8 @@ impl SingleAgentPlanBuilder {
     /// Fix a source's configuration for the lifetime of a session engine.
     pub async fn freeze_source(&mut self, source: &SingleAgentSource) -> anyhow::Result<()> {
         let snapshot = self.load_config(source).await?;
-        self.frozen_sources.insert(serde_json::to_string(source)?, snapshot);
+        self.frozen_sources
+            .insert(serde_json::to_string(source)?, snapshot);
         Ok(())
     }
 
@@ -138,6 +146,8 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
     async fn child_spec(&self, env: &SingleAgentEnv) -> anyhow::Result<crate::ContextChildSpec> {
         let (config, _) = self.load_config(&env.source).await?;
         Ok(crate::ContextChildSpec {
+            timer_source: Some(env.source.clone()),
+            timer_workspace: self.timer_workspace.clone(),
             execution: true,
             session: Some(crate::ContextSession {
                 session_id: env.session_id.clone().unwrap_or(config.agent.session_id),
@@ -199,6 +209,16 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
                 session: env.session.clone(),
             });
             scope.turn_id = Some(turn_id);
+            if let Some(workspace) = &self.timer_workspace {
+                scope.timer_execution = Some(Arc::new(crate::TimerExecutionBinding {
+                    owner: crate::TimerOwner {
+                        agent_id: config.agent.name.clone(),
+                        user_id: env.user_id.clone(),
+                    },
+                    source: env.source.clone(),
+                    workspace: workspace.clone(),
+                }));
+            }
             ctx.bind_scope(scope)?;
         }
         env.session.bind_context(ctx.clone());

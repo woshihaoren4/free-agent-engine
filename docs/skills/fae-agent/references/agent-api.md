@@ -215,7 +215,8 @@ Keep the final summary concise.
   "send_http_request",
   "execute_python",
   "memory_update",
-  "todo"
+  "todo",
+  "timer"
 ]
 ```
 
@@ -228,6 +229,21 @@ Keep the final summary concise.
 ```
 
 工具名必须与 `fae` 注册名称完全一致。模型是否调用工具还取决于模型能力、prompt 和具体任务。
+
+`timer` 管理当前用户、当前 Agent 的持久化 cron 定时器；到期后后台服务在保存的工作区下
+启动独立的新 chat session。参数不接受用户、Agent、session 或工作区覆盖。`create` 需要
+`name`、`input`、`idempotency_key` 和 `schedule`；重试沿用幂等键。schedule 的 kind 为
+`once`、`repeat`（需要正整数 `max_fires`）或 `loop`，cron 支持五、六、七字段，
+timezone 默认为 UTC，支持 IANA 时区。`query` 可带 `id`、`state`、`limit`、`cursor`、
+`include_deleted` 和 `include_occurrences`。`update` 需要 `id`、`expected_revision`，
+可替换 name/input/schedule/misfire_policy，或用 `enabled` 暂停/恢复；`delete` 支持可选
+`expected_revision`。查询 occurrence 可获得执行状态和新的 session ID。
+
+关闭客户端、清理 history/todo 不会删除定时器；服务停止或机器休眠时不能准时执行。
+恢复时默认 `coalesce` 合并漏触发，可配置 `skip`。同一定时器不并发，次数按已落盘接受
+的触发计算，失败和取消也消耗次数。已交接执行故障重启后标记 interrupted，不自动重跑。
+数据保存到 `<FAE_HOST>/timer/<agent-id>/<user-id>/state.json`，详情见
+[CLI 定时器说明](../../../../app/fae/README.md#cron-timers)。
 
 `memory_update` 只操作当前 Single Agent 的 `user_id`，模型不能指定其他用户。通过
 `operation` 执行 `create`、`update`、`delete` 或 `query`。新增需要 `category`、`content`

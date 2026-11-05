@@ -4,6 +4,7 @@ mod file;
 mod http;
 mod memory;
 mod python;
+mod timer;
 mod todo;
 mod workflow;
 
@@ -19,6 +20,7 @@ pub use file::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 pub use http::SendHttpRequestTool;
 pub use memory::MemoryUpdateTool;
 pub use python::ExecutePythonTool;
+pub use timer::TimerTool;
 pub use todo::TodoTool;
 pub use workflow::WorkflowTool;
 
@@ -34,6 +36,7 @@ pub const WORKFLOW: &str = "workflow";
 pub const AGENT: &str = "agent";
 pub const MEMORY_UPDATE: &str = "memory_update";
 pub const TODO: &str = "todo";
+pub const TIMER: &str = "timer";
 pub const DEFAULT_TOOL_NAMES: &[&str] = &[
     EXECUTE_COMMAND,
     READ_FILE,
@@ -46,6 +49,7 @@ pub const DEFAULT_TOOL_NAMES: &[&str] = &[
     AGENT,
     MEMORY_UPDATE,
     TODO,
+    TIMER,
 ];
 
 pub fn register_default_tools(runtime: &mut ToolsRuntime) {
@@ -65,6 +69,7 @@ pub struct DefaultTools {
     agent: AgentTool,
     memory_update: MemoryUpdateTool,
     todo: TodoTool,
+    timer: TimerTool,
 }
 
 impl DefaultTools {
@@ -99,6 +104,7 @@ impl Tools for DefaultTools {
             AGENT => self.agent.desc(ctx, tool_name).await,
             MEMORY_UPDATE => self.memory_update.desc(ctx, tool_name).await,
             TODO => self.todo.desc(ctx, tool_name).await,
+            TIMER => self.timer.desc(ctx, tool_name).await,
             _ => Err(unsupported_tool(tool_name)),
         }
     }
@@ -118,6 +124,7 @@ impl Tools for DefaultTools {
             AGENT => self.agent.exec(ctx, req).await,
             MEMORY_UPDATE => self.memory_update.exec(ctx, req).await,
             TODO => self.todo.exec(ctx, req).await,
+            TIMER => self.timer.exec(ctx, req).await,
             _ => Err(unsupported_tool(req.get_tool_name())),
         }
     }

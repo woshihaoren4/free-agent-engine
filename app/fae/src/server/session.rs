@@ -29,6 +29,11 @@ pub enum Command {
     },
     Output(SessionOutput),
     Finished(RoundOutcome),
+    InternalStart {
+        input: String,
+        occurrence: fae_agent::TimerOccurrence,
+        reply: oneshot::Sender<Result<String, ProtocolError>>,
+    },
     Stop(Option<oneshot::Sender<anyhow::Result<()>>>),
 }
 
@@ -52,6 +57,9 @@ pub struct Actor {
     replay: Replay,
     requests: Requests,
     workflow_launched: bool,
+    timer_occurrence: Option<fae_agent::TimerOccurrence>,
+    round_reserved: bool,
+    done: tokio::sync::watch::Sender<Option<String>>,
 }
 
 impl Actor {
@@ -63,6 +71,7 @@ impl Actor {
         info: SessionInfo,
         builder: SingleAgentPlanBuilder,
         tx: mpsc::Sender<Command>,
+        done: tokio::sync::watch::Sender<Option<String>>,
     ) -> Self {
         Self {
             registry,
@@ -84,7 +93,13 @@ impl Actor {
             replay: Replay::new(),
             requests: Requests::new(),
             workflow_launched: false,
+            timer_occurrence: None,
+            round_reserved: false,
+            done,
         }
+    }
+    pub fn reserve_internal_round(&mut self) {
+        self.round_reserved = true;
     }
     fn envelope(&self, request: Option<&str>, body: ServerMessage) -> ServerEnvelope {
         ServerEnvelope::new(&self.registry.instance, Some(&self.stream), request, body)
@@ -132,14 +147,25 @@ impl Actor {
         &mut self,
         input: Option<(fae_agent::SessionInputData, Option<String>)>,
     ) -> Result<String, ProtocolError> {
-        self.registry.reserve_round(&self.key)?;
+        if self.round_reserved {
+            self.round_reserved = false;
+        } else {
+            self.registry.reserve_round(&self.key)?;
+        }
         let round = wd_tools::uuid::v4();
         self.round = Some(round.clone());
         self.cancel_pending = false;
         self.context = None;
         if self.engine.is_none() {
             let loader = fae_agent::FAEWorkflowMetadataLoader::with_home_dir(&self.registry.home);
-            self.engine = Some(build_engine(loader, self.builder.take().unwrap()).await);
+            self.engine = Some(
+                build_engine(
+                    loader,
+                    self.builder.take().unwrap(),
+                    self.registry.timer.clone(),
+                )
+                .await,
+            );
         }
         let engine = self.engine.as_ref().unwrap().clone();
         let previous = self.session.clone();
@@ -147,6 +173,8 @@ impl Actor {
         let target = self.target.clone();
         let user = self.info.user_id.clone();
         let session_id = self.info.session_id.clone();
+        let agent_id = self.key.target.clone();
+        let workspace = self.info.workspace.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = async {
@@ -166,12 +194,27 @@ impl Actor {
                             (session, None, state)
                         } else {
                             let (env, session) =
-                                SingleAgentEnv::new_with_user_id(source, input.text, user);
+                                SingleAgentEnv::new_with_user_id(source, input.text, user.clone());
                             let mut env = env
                                 .with_images(input.images.unwrap_or_default())
-                                .with_session_id(session_id);
+                                .with_session_id(session_id.clone());
                             env.mode = mode;
-                            let ctx = engine.launch(env).await?;
+                            let mut scope = fae_agent::ContextScope::root(user);
+                            scope.agent_id = Some(agent_id.clone());
+                            scope.session = Some(fae_agent::ContextSession {
+                                session_id,
+                                session: session.clone(),
+                            });
+                            scope.timer_execution =
+                                Some(Arc::new(fae_agent::TimerExecutionBinding {
+                                    owner: fae_agent::TimerOwner {
+                                        agent_id,
+                                        user_id: scope.user.user_id.clone(),
+                                    },
+                                    source: env.source.clone(),
+                                    workspace,
+                                }));
+                            let ctx = engine.launch_with_scope(scope, env).await?;
                             let state = ctx.state();
                             tx.send(Command::Started {
                                 session: session.clone(),
@@ -382,6 +425,20 @@ impl Actor {
     pub async fn run(mut self, mut rx: mpsc::Receiver<Command>) {
         while let Some(command) = rx.recv().await {
             match command {
+                Command::InternalStart {
+                    input,
+                    occurrence,
+                    reply,
+                } => {
+                    self.timer_occurrence = Some(occurrence);
+                    let result = self
+                        .start(Some((fae_agent::SessionInputData::text(input), None)))
+                        .await;
+                    if result.is_err() {
+                        self.stop = true;
+                    }
+                    let _ = reply.send(result);
+                }
                 Command::Attach {
                     out,
                     request,
@@ -465,6 +522,21 @@ impl Actor {
                 Command::Started { session, context } => {
                     self.session = Some(session);
                     self.context = context;
+                    if let (Some(timer), Some(o)) = (&self.registry.timer, &self.timer_occurrence) {
+                        if let Err(e) = timer
+                            .acknowledge(
+                                &o.owner,
+                                &o.occurrence_id,
+                                fae_agent::TimerOccurrenceStatus::Running,
+                                self.round.clone(),
+                                None,
+                            )
+                            .await
+                        {
+                            eprintln!("timer running receipt: {e:#}");
+                            let _ = self.cancel().await;
+                        }
+                    }
                     if self.cancel_pending {
                         let _ = self.cancel().await;
                     }
@@ -485,8 +557,33 @@ impl Actor {
                     }
                 }
                 Command::Finished(outcome) => {
+                    if let (Some(timer), Some(o)) = (&self.registry.timer, &self.timer_occurrence) {
+                        use fae_agent::TimerOccurrenceStatus as Status;
+                        let (status, error) = match &outcome {
+                            RoundOutcome::Succeeded { .. } => (Status::Succeeded, None),
+                            RoundOutcome::Failed { message } => {
+                                (Status::Failed, Some(message.clone()))
+                            }
+                            RoundOutcome::Cancelled { reason } => {
+                                (Status::Cancelled, Some(reason.clone()))
+                            }
+                        };
+                        if let Err(e) = timer
+                            .acknowledge(
+                                &o.owner,
+                                &o.occurrence_id,
+                                status,
+                                self.round.clone(),
+                                error,
+                            )
+                            .await
+                        {
+                            eprintln!("timer terminal receipt: {e:#}");
+                        }
+                        self.timer_occurrence = None;
+                    }
                     if let Some(round) = self.round.take() {
-                        self.registry.finish_round(&self.key);
+                        self.stop |= self.registry.finish_round(&self.key);
                         self.cancel_pending = false;
                         self.context = None;
                         let seq = self.replay.next_seq();
@@ -525,6 +622,13 @@ impl Actor {
         } else {
             Ok(())
         };
+        let _ = self.done.send(Some(
+            result
+                .as_ref()
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default(),
+        ));
         if let Some(reply) = self.stop_reply {
             let _ = reply.send(result);
         }

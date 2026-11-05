@@ -120,6 +120,7 @@ pub struct ContextScope {
     pub node_id: Option<String>,
     pub turn_id: Option<u64>,
     pub todo: Option<Arc<TodoPlanScope>>,
+    pub timer_execution: Option<Arc<crate::TimerExecutionBinding>>,
 }
 impl ContextScope {
     pub fn root(user_id: impl Into<String>) -> Self {
@@ -135,6 +136,7 @@ impl ContextScope {
             node_id: None,
             turn_id: None,
             todo: None,
+            timer_execution: None,
         }
     }
 }
@@ -142,6 +144,8 @@ impl ContextScope {
 /// An execution child replaces execution ownership; a task child inherits it.
 #[derive(Debug, Clone, Default)]
 pub struct ContextChildSpec {
+    pub timer_source: Option<crate::SingleAgentSource>,
+    pub timer_workspace: Option<std::path::PathBuf>,
     pub session: Option<ContextSession>,
     pub agent_id: Option<String>,
     pub workflow_id: Option<String>,
@@ -149,6 +153,32 @@ pub struct ContextChildSpec {
     pub turn_id: Option<u64>,
     pub execution: bool,
     pub todo: TodoContextBinding,
+}
+impl ContextChildSpec {
+    /// The inherited user always wins, including agents entered from workflows.
+    pub fn timer_binding(
+        &self,
+        parent: &ContextScope,
+    ) -> Option<Arc<crate::TimerExecutionBinding>> {
+        if let Some(binding) = &parent.timer_execution {
+            let mut binding = (**binding).clone();
+            if let Some(source) = &self.timer_source {
+                binding.source = source.clone();
+                if let Some(agent) = &self.agent_id {
+                    binding.owner.agent_id = agent.clone();
+                }
+            }
+            return Some(Arc::new(binding));
+        }
+        Some(Arc::new(crate::TimerExecutionBinding {
+            owner: crate::TimerOwner {
+                agent_id: self.agent_id.clone()?,
+                user_id: parent.user.user_id.clone(),
+            },
+            source: self.timer_source.clone()?,
+            workspace: self.timer_workspace.clone()?,
+        }))
+    }
 }
 
 #[derive(Clone)]
@@ -453,6 +483,7 @@ pub(crate) fn test_context(scope: Option<ContextScope>) -> Ctx {
             let mut scope = (*parent).clone();
             scope.scope_id = wd_tools::uuid::v4();
             scope.parent_scope_id = Some(parent.scope_id.clone());
+            scope.timer_execution = spec.timer_binding(&parent);
             scope.todo = spec.todo.resolve(&parent.todo, spec.execution);
             if spec.execution {
                 scope.session = spec.session;

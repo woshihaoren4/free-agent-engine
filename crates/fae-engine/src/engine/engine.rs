@@ -78,6 +78,20 @@ impl Engine {
         Env: std::fmt::Debug + Send + Sync + 'static,
     {
         let ctx = self.ctx();
+        self.launch_context(ctx, env).await
+    }
+
+    pub async fn launch_with_scope<Env>(&self, scope: ContextScope, env: Env) -> anyhow::Result<Ctx>
+    where
+        Env: std::fmt::Debug + Send + Sync + 'static,
+    {
+        self.launch_context(self.ctx_with_scope(scope)?, env).await
+    }
+
+    async fn launch_context<Env>(&self, ctx: Ctx, env: Env) -> anyhow::Result<Ctx>
+    where
+        Env: std::fmt::Debug + Send + Sync + 'static,
+    {
         let ty = to_plan_ty::<Env>();
         let plan = self.call(ctx.clone(), ty, env).await?;
         let execution_ctx = ctx.clone();

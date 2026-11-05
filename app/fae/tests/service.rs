@@ -269,7 +269,18 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                             .find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap().to_string();
                         tx.send(text.clone()).await.unwrap();
                         if text.contains("slow") { tokio::time::sleep(Duration::from_secs(30)).await; }
-                        let (delta, reason) = if text == "delegate" {
+                        let tool_result = body["messages"].as_array().unwrap().last().is_some_and(|m| m["role"] == "tool");
+                        let (delta, reason) = if text.starts_with("timer:create:") && !tool_result {
+                            use chrono::{Datelike, Timelike};
+                            let at = chrono::Utc::now() + chrono::Duration::seconds(4);
+                            let schedule = if text.ends_with("repeat") {
+                                json!({"kind":"repeat","cron":"0/2 * * * * *","max_fires":3})
+                            } else {
+                                json!({"kind":"once","cron":format!("{} {} {} {} {} * {}", at.second(), at.minute(), at.hour(), at.day(), at.month(), at.year())})
+                            };
+                            let args = json!({"operation":"create","idempotency_key":text,"name":"Service timer","input":"background timer input","schedule":schedule});
+                            (json!({"role":"assistant","tool_calls":[{"index":0,"id":"timer-1","type":"function","function":{"name":"timer","arguments":args.to_string()}}]}), "tool_calls")
+                        } else if text == "delegate" {
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"agent","arguments":"{\"agent_id\":\"worker\",\"input\":\"slow child\"}"}}]}), "tool_calls")
                         } else { (json!({"role":"assistant","content":"mock answer"}), "stop") };
                         let chunk = |delta: Value, finish: Value| json!({"id":"mock","object":"chat.completion.chunk","created":1,"model":"mock",
@@ -283,6 +294,181 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
         }
     });
     (base, rx, task)
+}
+
+async fn timer_state(service: &Service, user: &str, accepted: u64, terminal: usize) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(bytes) =
+                std::fs::read(service.home.join(format!("timer/fae/{user}/state.json")))
+            {
+                let state: Value = serde_json::from_slice(&bytes).unwrap();
+                let done = state["occurrences"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|o| o["status"] == "succeeded")
+                    .count();
+                if state["timers"][0]["accepted_count"] == accepted && done >= terminal {
+                    return state;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "timer timeout ({accepted}/{terminal}): {e}; state={:?}; log={:?}",
+            std::fs::read_to_string(service.home.join(format!("timer/fae/{user}/state.json"))),
+            std::fs::read_to_string(service.home.join("startup.log"))
+        )
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timer_runs_without_client_after_clean_and_config_user_change() {
+    let (base, mut requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    let config_path = service.home.join("agents/fae_config.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["agent"]["user_id"] = json!("alice");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut client = Client::open(
+        &service.home,
+        &service.config,
+        service.agent("timer-origin"),
+    )
+    .await
+    .unwrap();
+    input(&mut client, "timer:create:once").await;
+    assert!(matches!(
+        finish(&mut client).await.1,
+        RoundOutcome::Succeeded { .. }
+    ));
+    let state = timer_state(&service, "alice", 0, 0).await;
+    assert_eq!(state["timers"][0]["created_session_id"], "timer-origin");
+    assert!(matches!(
+        client.request(ClientMessage::Clean).await.unwrap(),
+        ServerMessage::Cleaned
+    ));
+    drop(client);
+    config["agent"]["user_id"] = json!("bob");
+    config["agent"]["session_id"] = json!("changed-default");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let state = timer_state(&service, "alice", 1, 1).await;
+    let o = &state["occurrences"][0];
+    assert_eq!(o["owner"]["user_id"], "alice");
+    assert_eq!(o["status"], "succeeded");
+    let session = o["session_id"].as_str().unwrap();
+    assert_ne!(session, "timer-origin");
+    assert_ne!(session, "changed-default");
+    let history = std::fs::read_to_string(
+        service
+            .home
+            .join(format!("session/fae/alice/{session}.jsonl")),
+    )
+    .unwrap();
+    assert!(history.contains("background timer input"));
+    assert!(history.contains("mock answer"));
+    assert!(
+        !service
+            .home
+            .join(format!("session/fae/bob/{session}.jsonl"))
+            .exists()
+    );
+    assert!(
+        !service
+            .home
+            .join("session/fae/alice/timer-origin.jsonl")
+            .exists()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if requests.recv().await.unwrap() == "background timer input" {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    );
+    service.stop().await;
+    model_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeat_timer_recovers_after_service_restart_with_distinct_sessions() {
+    let (base, _requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    let mut client = Client::open(
+        &service.home,
+        &service.config,
+        service.agent("repeat-origin"),
+    )
+    .await
+    .unwrap();
+    input(&mut client, "timer:create:repeat").await;
+    assert!(matches!(
+        finish(&mut client).await.1,
+        RoundOutcome::Succeeded { .. }
+    ));
+    client
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    drop(client);
+    timer_state(&service, "master", 1, 1).await;
+    service.stop().await;
+    service.child = Command::new(env!("CARGO_BIN_EXE_fae"))
+        .arg("--fae-home")
+        .arg(&service.home)
+        .args(["server", "start", "--foreground", "--port"])
+        .arg(service.config.port.to_string())
+        .env("OPENAI_BASE_URL", &base)
+        .env("OPENAI_API_KEY", "test-key")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(config) = fae::server::lifecycle::read_config(&service.home) {
+                if client::hello(&service.home, &config).await.is_ok() {
+                    service.config = config;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let state = timer_state(&service, "master", 3, 3).await;
+    let sessions: std::collections::HashSet<_> = state["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["session_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(state["timers"][0]["state"], "completed");
+    for session in sessions {
+        assert_ne!(session, "repeat-origin");
+        assert!(
+            service
+                .home
+                .join(format!("session/fae/master/{session}.jsonl"))
+                .exists()
+        );
+    }
+    service.stop().await;
+    model_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

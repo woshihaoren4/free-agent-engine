@@ -20,7 +20,72 @@ pub struct Key {
     pub user: String,
     pub session: String,
 }
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_waits_for_cleanup_after_command_receiver_closes() {
+        let registry = Registry::new(PathBuf::from("."), "test".into());
+        let key = Key {
+            kind: "agent".into(),
+            target: "worker".into(),
+            user: "alice".into(),
+            session: "timer-session".into(),
+        };
+        let (tx, rx) = mpsc::channel(1);
+        let (done, closed) = tokio::sync::watch::channel(None);
+        drop(rx);
+        registry.state.lock().unwrap().entries.insert(
+            key.clone(),
+            Entry {
+                timer: true,
+                closed,
+                key: key.clone(),
+                open: OpenSession {
+                    target: SessionTarget::Agent {
+                        source: fae_agent::SingleAgentSource::AgentId("worker".into()),
+                    },
+                    workspace: PathBuf::from("."),
+                    session_id: Some("timer-session".into()),
+                    resume: None,
+                },
+                stream: "stream".into(),
+                tx,
+                leased: false,
+                lease_id: String::new(),
+                active: false,
+                closing: true,
+                disconnected: None,
+            },
+        );
+        {
+            let mut state = registry.state.lock().unwrap();
+            let entry = state.entries.get_mut(&key).unwrap();
+            entry.leased = true;
+            entry.closing = false;
+        }
+        assert!(!registry.finish_round(&key));
+        {
+            let mut state = registry.state.lock().unwrap();
+            let entry = state.entries.get_mut(&key).unwrap();
+            assert!(!entry.closing);
+            entry.leased = false;
+            entry.timer = true;
+        }
+        assert!(registry.finish_round(&key));
+        let r = registry.clone();
+        let shutdown = tokio::spawn(async move { r.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        done.send(Some(String::new())).unwrap();
+        shutdown.await.unwrap().unwrap();
+    }
+}
 pub struct Entry {
+    pub timer: bool,
+    pub closed: tokio::sync::watch::Receiver<Option<String>>,
     pub key: Key,
     pub open: OpenSession,
     pub stream: String,
@@ -41,6 +106,7 @@ pub struct Registry {
     pub home: PathBuf,
     pub instance: String,
     pub state: Mutex<State>,
+    pub timer: Option<fae_engine::TimerHandle>,
 }
 impl Registry {
     pub fn new(home: PathBuf, instance: String) -> Arc<Self> {
@@ -48,6 +114,19 @@ impl Registry {
             home,
             instance,
             state: Mutex::new(State::default()),
+            timer: None,
+        })
+    }
+    pub fn with_timer(
+        home: PathBuf,
+        instance: String,
+        timer: fae_engine::TimerHandle,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            home,
+            instance,
+            state: Mutex::new(State::default()),
+            timer: Some(timer),
         })
     }
     pub fn counts(&self) -> (usize, usize) {
@@ -87,13 +166,18 @@ impl Registry {
         entry.active = true;
         Ok(())
     }
-    pub fn finish_round(&self, key: &Key) {
+    pub fn finish_round(&self, key: &Key) -> bool {
         if let Some(entry) = self.state.lock().unwrap().entries.get_mut(key) {
+            let close = entry.timer && !entry.leased;
             entry.active = false;
+            entry.timer = false;
+            entry.closing |= close;
             if !entry.leased {
                 entry.disconnected = Some(Instant::now());
             }
+            return close;
         }
+        false
     }
     pub fn remove(&self, key: &Key, stream: &str) {
         let mut state = self.state.lock().unwrap();
@@ -155,8 +239,15 @@ impl Registry {
                         })
             });
             if let Some(entry) = candidate {
-                if open.resume.as_ref().is_some_and(|resume| resume.stream_id != entry.stream) {
-                    return Err(ProtocolError::new("resume_expired", "Resume stream does not match this session"));
+                if open
+                    .resume
+                    .as_ref()
+                    .is_some_and(|resume| resume.stream_id != entry.stream)
+                {
+                    return Err(ProtocolError::new(
+                        "resume_expired",
+                        "Resume stream does not match this session",
+                    ));
                 }
                 if entry.closing {
                     return Err(ProtocolError::new(
@@ -217,6 +308,7 @@ impl Registry {
             ));
         }
         let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
+        builder.set_timer_workspace(open.workspace.clone());
         builder.add_hook(WorkspaceHookBuilder::new(open.workspace.clone()));
         let (target, name, user, model, session, kind) = match &open.target {
             SessionTarget::Agent { source } => {
@@ -333,9 +425,12 @@ impl Registry {
                 }
                 let stream = wd_tools::uuid::v4();
                 let (tx, rx) = mpsc::channel(512);
+                let (done, closed) = tokio::sync::watch::channel(None);
                 state.entries.insert(
                     key.clone(),
                     Entry {
+                        timer: false,
+                        closed,
                         key: key.clone(),
                         open: open.clone(),
                         stream: stream.clone(),
@@ -347,10 +442,10 @@ impl Registry {
                         disconnected: None,
                     },
                 );
-                (tx, stream, Some(rx))
+                (tx, stream, Some((rx, done)))
             }
         };
-        if let Some(rx) = new_actor {
+        if let Some((rx, done)) = new_actor {
             let info = SessionInfo {
                 target_id: target,
                 name,
@@ -373,6 +468,7 @@ impl Registry {
                 info,
                 builder,
                 tx.clone(),
+                done,
             );
             tokio::spawn(actor.run(rx));
         }
@@ -390,6 +486,165 @@ impl Registry {
             return Err(ProtocolError::new("internal_error", "Session actor exited"));
         }
         Ok((key, stream, tx))
+    }
+    pub fn timer_capacity(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        !state.stopping
+            && state.entries.len() < 32
+            && state.entries.values().filter(|e| e.active).count() < 8
+            && state
+                .entries
+                .values()
+                .filter(|e| e.active && e.timer)
+                .count()
+                < fae_engine::TIMER_CONCURRENT_LIMIT
+    }
+
+    /// This entry point takes persisted ownership, never configuration defaults.
+    pub async fn open_internal_agent(
+        self: &Arc<Self>,
+        occurrence: fae_agent::TimerOccurrence,
+    ) -> Result<String, ProtocolError> {
+        let binding = &occurrence.execution_binding;
+        if binding.owner != occurrence.owner
+            || !binding.workspace.is_absolute()
+            || !binding.workspace.is_dir()
+        {
+            return Err(ProtocolError::new(
+                "invalid_workspace",
+                "Timer execution binding is invalid",
+            ));
+        }
+        if let fae_agent::SingleAgentSource::Paths { config, prompt } = &binding.source {
+            if !config.is_absolute() || !prompt.is_absolute() {
+                return Err(ProtocolError::new(
+                    "config_not_found",
+                    "Timer source paths must be absolute",
+                ));
+            }
+        }
+        let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
+        builder.add_hook(WorkspaceHookBuilder::new(binding.workspace.clone()));
+        builder.set_timer_workspace(binding.workspace.clone());
+        builder
+            .freeze_source(&binding.source)
+            .await
+            .map_err(|e| ProtocolError::new("config_not_found", e))?;
+        let (config, _) = builder
+            .load_config(&binding.source)
+            .await
+            .map_err(|e| ProtocolError::new("config_not_found", e))?;
+        if config.agent.name != occurrence.owner.agent_id {
+            return Err(ProtocolError::new(
+                "agent_binding_conflict",
+                "Timer agent was renamed",
+            ));
+        }
+        fae_engine::SessionRuntime::with_host_dir(&self.home)
+            .session_path(
+                &occurrence.owner.agent_id,
+                &occurrence.owner.user_id,
+                &occurrence.session_id,
+            )
+            .map_err(|e| ProtocolError::new("invalid_session_id", e))?;
+        let key = Key {
+            kind: "agent".into(),
+            target: occurrence.owner.agent_id.clone(),
+            user: occurrence.owner.user_id.clone(),
+            session: occurrence.session_id.clone(),
+        };
+        let target = SessionTarget::Agent {
+            source: binding.source.clone(),
+        };
+        let open = OpenSession {
+            target: target.clone(),
+            workspace: binding.workspace.clone(),
+            session_id: Some(key.session.clone()),
+            resume: None,
+        };
+        let stream = wd_tools::uuid::v4();
+        let (tx, rx) = mpsc::channel(512);
+        let (done, closed) = tokio::sync::watch::channel(None);
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.stopping
+                || state.entries.len() >= 32
+                || state.entries.values().filter(|e| e.active).count() >= 8
+                || state
+                    .entries
+                    .values()
+                    .filter(|e| e.active && e.timer)
+                    .count()
+                    >= fae_engine::TIMER_CONCURRENT_LIMIT
+                || state
+                    .cleaning
+                    .contains(&(key.target.clone(), key.user.clone()))
+            {
+                return Err(ProtocolError::new(
+                    "resource_exhausted",
+                    "Timer is waiting for service capacity",
+                ));
+            }
+            if state.entries.contains_key(&key) {
+                return Err(ProtocolError::new(
+                    "session_binding_conflict",
+                    "Timer session already exists",
+                ));
+            }
+            state.entries.insert(
+                key.clone(),
+                Entry {
+                    timer: true,
+                    closed,
+                    key: key.clone(),
+                    open,
+                    stream: stream.clone(),
+                    tx: tx.clone(),
+                    leased: false,
+                    lease_id: String::new(),
+                    active: true,
+                    closing: false,
+                    disconnected: None,
+                },
+            );
+        }
+        let info = SessionInfo {
+            target_id: key.target.clone(),
+            name: config.agent.name,
+            user_id: key.user.clone(),
+            model: config.model.model,
+            session_id: key.session.clone(),
+            workspace: binding.workspace.clone(),
+            status: SessionStatus {
+                state: "idle".into(),
+                round_id: None,
+                latest_seq: 0,
+            },
+            resumed: false,
+        };
+        let mut actor = Actor::new(
+            self.clone(),
+            key,
+            stream,
+            target,
+            info,
+            builder,
+            tx.clone(),
+            done,
+        );
+        actor.reserve_internal_round();
+        tokio::spawn(actor.run(rx));
+        let (reply, result) = oneshot::channel();
+        tx.send(Command::InternalStart {
+            input: occurrence.input.clone(),
+            occurrence,
+            reply,
+        })
+        .await
+        .map_err(|e| ProtocolError::new("internal_error", e))?;
+        result
+            .await
+            .map_err(|e| ProtocolError::new("internal_error", e))?
     }
     pub fn begin_clean(&self, key: &Key) -> Result<(), ProtocolError> {
         let mut state = self.state.lock().unwrap();
@@ -449,17 +704,24 @@ impl Registry {
             state
                 .entries
                 .values()
-                .map(|e| e.tx.clone())
+                .map(|e| (e.tx.clone(), e.closed.clone()))
                 .collect::<Vec<_>>()
         };
-        let mut replies = Vec::new();
-        for tx in entries {
-            let (done, rx) = oneshot::channel();
-            tx.send(Command::Stop(Some(done))).await?;
-            replies.push(rx);
+        let mut completions = Vec::new();
+        for (tx, closed) in entries {
+            // A timer actor may already be leaving after its terminal receipt.
+            // Its completion signal also covers Stop queued after the run loop.
+            let _ = tx.send(Command::Stop(None)).await;
+            completions.push(closed);
         }
-        for reply in replies {
-            reply.await??;
+        for mut closed in completions {
+            loop {
+                if let Some(error) = closed.borrow().clone() {
+                    anyhow::ensure!(error.is_empty(), "session cleanup failed: {error}");
+                    break;
+                }
+                closed.changed().await?;
+            }
         }
         Ok(())
     }

@@ -6,6 +6,7 @@ mod model_runtime;
 mod plan_runtime;
 mod session_runtime;
 mod skill_runtime;
+mod timer_runtime;
 mod tools_runtime;
 mod workflow_runtime;
 
@@ -17,5 +18,6 @@ pub use model_runtime::*;
 pub use plan_runtime::*;
 pub use session_runtime::*;
 pub use skill_runtime::*;
+pub use timer_runtime::*;
 pub use tools_runtime::*;
 pub use workflow_runtime::*;
