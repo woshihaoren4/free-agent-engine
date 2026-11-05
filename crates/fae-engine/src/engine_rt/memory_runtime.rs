@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, HashMap},
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
 };
 
 use chrono::Utc;
@@ -18,7 +18,6 @@ use wd_tools::channel::{Channel, Receiver, Sender};
 #[derive(Debug)]
 pub struct UserMemoryRuntime {
     host_dir: PathBuf,
-    mutation_lock: Arc<Mutex<()>>,
     event_sender: Sender<Event>,
     event_receiver: Receiver<Event>,
 }
@@ -40,7 +39,6 @@ impl UserMemoryRuntime {
         let (event_sender, event_receiver) = Channel::new(1024);
         Self {
             host_dir: host_dir.into(),
-            mutation_lock: Arc::new(Mutex::new(())),
             event_sender,
             event_receiver,
         }
@@ -60,6 +58,8 @@ impl UserMemoryRuntime {
 
     pub async fn query(&self, user_id: &str) -> fae_agent::Result<UserMemoryResponse> {
         let path = self.memory_path(user_id)?;
+        let lock = memory_lock(&path);
+        let _guard = lock.lock().await;
         let memories = read_memories(&path).await?;
         Ok(UserMemoryResponse::Memories { path, memories })
     }
@@ -72,8 +72,9 @@ impl UserMemoryRuntime {
         content: String,
         confidence: fae_agent::UserMemoryConfidence,
     ) -> fae_agent::Result<UserMemoryResponse> {
-        let _guard = self.mutation_lock.lock().await;
         let path = self.memory_path(user_id)?;
+        let lock = memory_lock(&path);
+        let _guard = lock.lock().await;
         if content.trim().is_empty() {
             return Err(anyhow::anyhow!("memory content cannot be empty").into());
         }
@@ -122,8 +123,9 @@ impl UserMemoryRuntime {
     }
 
     pub async fn delete(&self, user_id: &str, id: u64) -> fae_agent::Result<UserMemoryResponse> {
-        let _guard = self.mutation_lock.lock().await;
         let path = self.memory_path(user_id)?;
+        let lock = memory_lock(&path);
+        let _guard = lock.lock().await;
         if id == 0 {
             return Err(anyhow::anyhow!("memory id must be positive").into());
         }
@@ -202,7 +204,6 @@ impl RuntimeSelectExec<UserMemoryRequest, UserMemoryResponse, UserMemoryQuery, U
     async fn spawn(&self, task: TaskReq<UserMemoryRequest>) -> fae_agent::Result<()> {
         let runtime = Self {
             host_dir: self.host_dir.clone(),
-            mutation_lock: self.mutation_lock.clone(),
             event_sender: self.event_sender.clone(),
             event_receiver: self.event_receiver.clone(),
         };
@@ -238,6 +239,31 @@ impl RuntimeSelectExec<UserMemoryRequest, UserMemoryResponse, UserMemoryQuery, U
     ) -> fae_agent::Result<TaskResp<UserMemoryResponse>> {
         self.execute(task).await
     }
+}
+
+fn memory_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let key = if path.is_absolute() { path.to_owned() } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    // Canonicalize the nearest existing ancestor to unify aliases before a file exists.
+    let mut ancestor = key.as_path();
+    let mut suffix = Vec::new();
+    let key = loop {
+        if let Ok(base) = ancestor.canonicalize() {
+            break suffix.iter().rev().fold(base, |base, part: &std::ffi::OsString| base.join(part));
+        }
+        let Some(name) = ancestor.file_name() else { break key };
+        suffix.push(name.to_owned());
+        let Some(parent) = ancestor.parent() else { break key };
+        ancestor = parent;
+    };
+    let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { return lock; }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 async fn read_memories(path: &Path) -> fae_agent::Result<Vec<UserMemory>> {

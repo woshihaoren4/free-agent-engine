@@ -278,6 +278,7 @@ fn build_workflow_plan(
         })
         .ok_or_else(|| anyhow::anyhow!("workflow has no start node"))?;
 
+    session.activate_turn()?;
     if requires_dag_execution(&metadata) {
         return Ok(Box::new(DagWorkflowPlan::new(
             metadata, input, session, ctx, current, hook,
@@ -353,6 +354,14 @@ struct DagWorkflowPlan {
     finished: bool,
     hook: Arc<dyn WorkflowHook>,
     active_node: Option<String>,
+}
+
+impl Drop for WorkflowPlan {
+    fn drop(&mut self) { self.session.finish_turn(); }
+}
+
+impl Drop for DagWorkflowPlan {
+    fn drop(&mut self) { self.session.finish_turn(); }
 }
 
 async fn invoke_workflow_hook(

@@ -45,28 +45,6 @@ impl SingleAgentHook for WorkspaceHook {
     }
 }
 
-pub fn resolve_workspace(workspace: PathBuf) -> anyhow::Result<PathBuf> {
-    let workspace = if workspace.is_absolute() {
-        workspace
-    } else {
-        std::env::current_dir()
-            .context("resolve current working directory")?
-            .join(workspace)
-    };
-    let workspace = workspace.canonicalize().with_context(|| {
-        format!(
-            "resolve workspace directory `{}`",
-            workspace.as_path().display()
-        )
-    })?;
-    anyhow::ensure!(
-        workspace.is_dir(),
-        "workspace path `{}` is not a directory",
-        workspace.display()
-    );
-    Ok(workspace)
-}
-
 async fn append_workspace_prompt(workspace: &Path, prompt: String) -> anyhow::Result<String> {
     let fae_dir = workspace.join(".fae");
     let workspace_path = fae_dir.join("workspace.md");

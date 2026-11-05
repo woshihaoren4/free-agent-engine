@@ -4,6 +4,7 @@ use super::*;
 pub struct SingleAgentPlanBuilder {
     home_dir: PathBuf,
     hooks: Vec<Arc<dyn SingleAgentHookBuilder>>,
+    frozen_sources: HashMap<String, (SingleAgentConfig, String)>,
 }
 
 impl std::fmt::Debug for SingleAgentPlanBuilder {
@@ -30,6 +31,7 @@ impl SingleAgentPlanBuilder {
         Self {
             home_dir: home_dir.into(),
             hooks: Vec::new(),
+            frozen_sources: HashMap::new(),
         }
     }
 
@@ -60,6 +62,9 @@ impl SingleAgentPlanBuilder {
         &self,
         source: &SingleAgentSource,
     ) -> anyhow::Result<(SingleAgentConfig, String)> {
+        if let Some(snapshot) = self.frozen_sources.get(&serde_json::to_string(source)?) {
+            return Ok(snapshot.clone());
+        }
         let (config_path, prompt_path, expected_agent_id) = self.source_paths(source)?;
 
         let config_bytes = tokio::fs::read(&config_path).await.map_err(|error| {
@@ -92,6 +97,13 @@ impl SingleAgentPlanBuilder {
                 )
             })?;
         Ok((config, prompt))
+    }
+
+    /// Fix a source's configuration for the lifetime of a session engine.
+    pub async fn freeze_source(&mut self, source: &SingleAgentSource) -> anyhow::Result<()> {
+        let snapshot = self.load_config(source).await?;
+        self.frozen_sources.insert(serde_json::to_string(source)?, snapshot);
+        Ok(())
     }
 
     fn source_paths<'a>(

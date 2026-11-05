@@ -11,8 +11,9 @@ use fae_agent::{
 use fae_engine::DEFAULT_TOOL_NAMES;
 use tokio::io::AsyncWriteExt;
 
-use crate::args::InitArgs;
+use crate::protocol::InitArgsDto as InitArgs;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InitResult {
     pub config_path: PathBuf,
     pub skill_count: usize,

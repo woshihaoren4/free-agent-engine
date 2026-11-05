@@ -29,6 +29,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Manage the background service for this FAE home
+    Server(ServerArgs),
     /// Initialize an agent with all installed tools and skills
     Init(InitArgs),
     /// Remove the currently running fae executable
@@ -37,6 +39,31 @@ pub enum Command {
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
     Workflow(WorkflowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ServerArgs {
+    #[command(subcommand)]
+    pub command: ServerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerCommand {
+    /// Start the service and wait until it is ready
+    Start {
+        #[arg(long, default_value = "127.0.0.1")]
+        address: std::net::IpAddr,
+        #[arg(long, default_value_t = crate::protocol::DEFAULT_PORT, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        #[arg(long, hide = true)]
+        foreground: bool,
+    },
+    /// Stop the service and wait for cleanup
+    Stop,
+    /// Inspect the service without starting it
+    Status,
+    /// Show the service PID, listening address and other connection information
+    Show,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -98,6 +125,16 @@ pub enum ColorChoice {
     Never,
 }
 
+impl ColorChoice {
+    pub fn enabled(self) -> bool {
+        match self {
+            Self::Auto => std::env::var_os("NO_COLOR").is_none(),
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 pub fn parse() -> Cli {
     Cli::parse_from(with_default_agent(std::env::args_os()))
 }
@@ -110,7 +147,7 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "init" | "uninstall" | "agent" | "workflow" => return args,
+            "init" | "uninstall" | "agent" | "workflow" | "server" => return args,
             "--fae-home" | "--workspace" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
@@ -137,6 +174,64 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_server_commands_and_rejects_invalid_bind_parameters() {
+        let cli = Cli::try_parse_from(["fae", "server", "start"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server(ServerArgs {
+                command: ServerCommand::Start {
+                    port: 6666,
+                    foreground: false,
+                    ..
+                }
+            }))
+        ));
+        let cli = Cli::try_parse_from(with_default_agent(
+            [
+                "fae",
+                "server",
+                "start",
+                "--address",
+                "::1",
+                "--port",
+                "1666",
+            ]
+            .map(Into::into),
+        ))
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Server(ServerArgs {
+                command: ServerCommand::Start {
+                    port: 1666,
+                    foreground: false,
+                    ..
+                }
+            }))
+        ));
+        for arguments in [
+            vec!["fae", "server", "start", "--port", "0"],
+            vec!["fae", "server", "start", "--port", "65536"],
+            vec!["fae", "server", "start", "--address", "invalid"],
+        ] {
+            assert!(
+                Cli::try_parse_from(with_default_agent(arguments.into_iter().map(Into::into)))
+                    .is_err()
+            );
+        }
+        for subcommand in ["stop", "status"] {
+            assert!(matches!(
+                Cli::try_parse_from(with_default_agent(
+                    ["fae", "server", subcommand].map(Into::into)
+                ))
+                .unwrap()
+                .command,
+                Some(Command::Server(_))
+            ));
+        }
+    }
 
     #[test]
     fn defaults_to_agent_mode() {

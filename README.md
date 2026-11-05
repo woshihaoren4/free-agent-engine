@@ -28,6 +28,11 @@ fae init
 fae
 ```
 
+CLI 会自动连接当前 FAE home 的后台服务，默认监听 `127.0.0.1:6666`。
+关闭界面后，服务和未取消的任务继续运行。使用 `fae server status` 查看状态，`fae server show` 查看 PID、地址、端口等服务信息，
+`fae server stop` 停止并等待清理；自定义端口可用 `fae server start --port 2666`。
+端口冲突会直接报错。更多服务、会话和重连说明见 [CLI 文档](app/fae/README.md)。
+
 ## 快速开始
 
 完成上面的 `fae init` 后，新建 Rust 项目并添加依赖：

@@ -651,6 +651,15 @@ impl SessionOutputChannel {
     pub(crate) async fn answer(&self) -> Option<SessionOutput> {
         self.inner.receiver.lock().await.recv().await
     }
+
+    pub(crate) async fn drain(&self) -> Vec<SessionOutput> {
+        let mut receiver = self.inner.receiver.lock().await;
+        let mut outputs = Vec::new();
+        while let Ok(output) = receiver.try_recv() {
+            outputs.push(output);
+        }
+        outputs
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

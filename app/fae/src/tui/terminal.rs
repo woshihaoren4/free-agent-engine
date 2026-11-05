@@ -1,14 +1,13 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufRead, BufReader, IsTerminal, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
     time::Duration,
 };
 
 #[cfg(unix)]
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsFd;
 #[cfg(windows)]
 use std::os::windows::io::AsHandle;
 
@@ -26,7 +25,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
-use fae_agent::{Ctx, Session, SessionEventData, SessionOutput};
+use fae_agent::{SessionEventData, SessionOutput};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -40,7 +39,13 @@ use tokio_stream::StreamExt;
 use tui_markdown::{AlertKind, Options as MarkdownOptions, StyleSheet, from_str_with_options};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{args::ColorChoice, file_browser::FileBrowser};
+use super::file_browser::FileBrowser;
+use super::input::{Composer, parse_steer};
+use super::log_capture::{CapturedLog, LogCapture, LogKind};
+#[cfg(test)]
+use super::log_capture::{LogStream, captured_log_kind, strip_ansi};
+use super::render::{message_heading, plain_transcript};
+use super::state::{BufferedMessage, Message, MessageKind, Mode, RunState};
 
 const SPINNER: &[&str] = &["-", "\\", "|", "/"];
 const OUTPUT_STATUS: &str = "Outputting...";
@@ -51,151 +56,6 @@ const LOG_PREVIEW_CHARS: usize = 250;
 const ADD_IMAGE_LABEL: &str = " + Add image";
 const IMAGES_LABEL: &str = "  Images: ";
 const REMOVE_IMAGE_LABEL: &str = " [x]";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogStream {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogKind {
-    Output,
-    Error,
-}
-
-#[derive(Debug)]
-struct CapturedLog {
-    kind: LogKind,
-    content: String,
-}
-
-struct LogCapture {
-    receiver: Receiver<CapturedLog>,
-    #[cfg(unix)]
-    _stdout_writer: OwnedFd,
-    #[cfg(unix)]
-    _stderr_writer: OwnedFd,
-    #[cfg(unix)]
-    original_stdout: Option<OwnedFd>,
-    #[cfg(unix)]
-    original_stderr: Option<OwnedFd>,
-}
-
-impl LogCapture {
-    #[cfg(unix)]
-    fn new() -> io::Result<Self> {
-        io::stdout().flush()?;
-        io::stderr().flush()?;
-
-        let original_stdout = duplicate_fd(libc::STDOUT_FILENO)?;
-        let original_stderr = duplicate_fd(libc::STDERR_FILENO)?;
-        let (stdout_reader, stdout_writer) = create_pipe()?;
-        let (stderr_reader, stderr_writer) = create_pipe()?;
-
-        if unsafe { libc::dup2(stdout_writer.as_raw_fd(), libc::STDOUT_FILENO) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::dup2(stderr_writer.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
-            let error = io::Error::last_os_error();
-            unsafe {
-                libc::dup2(original_stdout.as_raw_fd(), libc::STDOUT_FILENO);
-            }
-            return Err(error);
-        }
-        let (sender, receiver) = mpsc::channel();
-        spawn_log_reader(stdout_reader, sender.clone(), LogStream::Stdout);
-        spawn_log_reader(stderr_reader, sender, LogStream::Stderr);
-
-        Ok(Self {
-            receiver,
-            _stdout_writer: stdout_writer,
-            _stderr_writer: stderr_writer,
-            original_stdout: Some(original_stdout),
-            original_stderr: Some(original_stderr),
-        })
-    }
-
-    #[cfg(not(unix))]
-    fn new() -> io::Result<Self> {
-        let (_sender, receiver) = mpsc::channel();
-        Ok(Self { receiver })
-    }
-}
-
-#[cfg(unix)]
-fn create_pipe() -> io::Result<(File, OwnedFd)> {
-    let mut pipe_fds = [-1; 2];
-    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe {
-        (
-            File::from_raw_fd(pipe_fds[0]),
-            OwnedFd::from_raw_fd(pipe_fds[1]),
-        )
-    })
-}
-
-#[cfg(unix)]
-fn spawn_log_reader(reader: File, sender: mpsc::Sender<CapturedLog>, stream: LogStream) {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let content = String::from_utf8_lossy(&line);
-                    let kind = captured_log_kind(stream, &content);
-                    let content = strip_ansi(&content)
-                        .trim_end_matches(['\r', '\n'])
-                        .to_string();
-                    if !content.is_empty() && sender.send(CapturedLog { kind, content }).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn captured_log_kind(stream: LogStream, content: &str) -> LogKind {
-    if stream == LogStream::Stderr || content.contains("\u{1b}[7;31m") {
-        LogKind::Error
-    } else {
-        LogKind::Output
-    }
-}
-
-#[cfg(unix)]
-impl Drop for LogCapture {
-    fn drop(&mut self) {
-        let _ = io::stdout().flush();
-        let _ = io::stderr().flush();
-        if let Some(original_stdout) = self.original_stdout.take() {
-            unsafe {
-                libc::dup2(original_stdout.as_raw_fd(), libc::STDOUT_FILENO);
-            }
-        }
-        if let Some(original_stderr) = self.original_stderr.take() {
-            unsafe {
-                libc::dup2(original_stderr.as_raw_fd(), libc::STDERR_FILENO);
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn duplicate_fd(fd: libc::c_int) -> io::Result<OwnedFd> {
-    let duplicated = unsafe { libc::dup(fd) };
-    if duplicated == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-    }
-}
 
 fn open_terminal_output() -> io::Result<File> {
     #[cfg(unix)]
@@ -211,216 +71,6 @@ fn open_terminal_output() -> io::Result<File> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Agent,
-    Workflow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunState {
-    Idle,
-    Running,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MessageKind {
-    User,
-    Assistant,
-    Reasoning,
-    Tool,
-    Workflow,
-    Notice,
-    System,
-    LogOutput,
-    LogError,
-    Error,
-}
-
-impl MessageKind {
-    fn folds_by_default(self) -> bool {
-        !matches!(self, Self::User | Self::Assistant | Self::Error)
-    }
-}
-
-#[derive(Debug)]
-struct Message {
-    kind: MessageKind,
-    title: String,
-    content: String,
-    stream_id: Option<String>,
-    expanded: bool,
-    render_markdown: bool,
-}
-
-#[derive(Debug)]
-struct BufferedMessage {
-    kind: MessageKind,
-    title: String,
-    content: String,
-}
-
-impl Message {
-    fn new(
-        kind: MessageKind,
-        title: impl Into<String>,
-        content: impl Into<String>,
-        stream_id: Option<String>,
-    ) -> Self {
-        let content = content.into();
-        Self {
-            kind,
-            title: title.into(),
-            expanded: !kind.folds_by_default() || content.is_empty(),
-            content,
-            stream_id,
-            render_markdown: false,
-        }
-    }
-
-    fn is_collapsible(&self) -> bool {
-        self.kind.folds_by_default() && !self.content.is_empty()
-    }
-
-    fn shows_content(&self) -> bool {
-        !self.is_collapsible() || self.expanded
-    }
-}
-
-#[derive(Debug, Default)]
-struct Composer {
-    text: String,
-    cursor: usize,
-    scroll_back: u16,
-}
-
-impl Composer {
-    fn insert(&mut self, value: &str) {
-        self.text.insert_str(self.cursor, value);
-        self.cursor += value.len();
-        self.follow_cursor();
-    }
-
-    fn backspace(&mut self) {
-        if let Some(previous) = self.text[..self.cursor].char_indices().next_back() {
-            self.text.drain(previous.0..self.cursor);
-            self.cursor = previous.0;
-            self.follow_cursor();
-        }
-    }
-
-    fn delete(&mut self) {
-        if let Some(next) = self.text[self.cursor..].chars().next() {
-            self.text
-                .drain(self.cursor..self.cursor.saturating_add(next.len_utf8()));
-            self.follow_cursor();
-        }
-    }
-
-    fn move_left(&mut self) {
-        if let Some(previous) = self.text[..self.cursor].char_indices().next_back() {
-            self.cursor = previous.0;
-            self.follow_cursor();
-        }
-    }
-
-    fn move_right(&mut self) {
-        if let Some(next) = self.text[self.cursor..].chars().next() {
-            self.cursor += next.len_utf8();
-            self.follow_cursor();
-        }
-    }
-
-    fn move_home(&mut self) {
-        self.cursor = self.text[..self.cursor]
-            .rfind('\n')
-            .map(|position| position + 1)
-            .unwrap_or(0);
-        self.follow_cursor();
-    }
-
-    fn move_end(&mut self) {
-        self.cursor = self.text[self.cursor..]
-            .find('\n')
-            .map(|offset| self.cursor + offset)
-            .unwrap_or(self.text.len());
-        self.follow_cursor();
-    }
-
-    fn take(&mut self) -> Option<String> {
-        let value = self.text.trim().to_string();
-        self.text.clear();
-        self.cursor = 0;
-        self.follow_cursor();
-        (!value.is_empty()).then_some(value)
-    }
-
-    fn visual_cursor(&self, width: usize) -> (u16, u16) {
-        let width = width.max(1);
-        let mut row = 0usize;
-        let mut column = 0usize;
-        for character in self.text[..self.cursor].chars() {
-            if character == '\n' {
-                row += 1;
-                column = 0;
-                continue;
-            }
-            let character_width = character.to_string().width().max(1);
-            if column + character_width > width {
-                row += 1;
-                column = 0;
-            }
-            column += character_width;
-            if column == width {
-                row += 1;
-                column = 0;
-            }
-        }
-        (column as u16, row as u16)
-    }
-
-    fn visual_lines(&self, width: usize) -> usize {
-        let width = width.max(1);
-        self.text
-            .split('\n')
-            .map(|line| line.width().max(1).div_ceil(width))
-            .sum()
-    }
-
-    fn vertical_scroll(&self, width: usize, visible_height: u16) -> u16 {
-        let follow_scroll = self.max_vertical_scroll(width, visible_height);
-        follow_scroll.saturating_sub(self.scroll_back.min(follow_scroll))
-    }
-
-    fn max_vertical_scroll(&self, width: usize, visible_height: u16) -> u16 {
-        let (_, cursor_row) = self.visual_cursor(width);
-        cursor_row.saturating_sub(visible_height.saturating_sub(1))
-    }
-
-    fn scroll_up(&mut self, lines: u16, max_scroll: u16) {
-        self.scroll_back = self.scroll_back.saturating_add(lines).min(max_scroll);
-    }
-
-    fn scroll_down(&mut self, lines: u16) {
-        self.scroll_back = self.scroll_back.saturating_sub(lines);
-    }
-
-    fn follow_cursor(&mut self) {
-        self.scroll_back = 0;
-    }
-}
-
-fn parse_steer(input: &str) -> Option<&str> {
-    let content = input.strip_prefix("/steer")?;
-    if !content.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let content = content.trim();
-    (!content.is_empty()).then_some(content)
-}
-
 #[derive(Debug)]
 pub enum PromptAction {
     Submit { text: String, images: Vec<String> },
@@ -433,6 +83,12 @@ enum RunningAction {
     Interrupt,
     Steer(String),
     InvalidSteer,
+}
+
+pub enum UiAction {
+    Cancel,
+    Steer(String),
+    Exit,
 }
 
 pub struct TerminalUi {
@@ -469,7 +125,7 @@ impl TerminalUi {
         user_id: Option<String>,
         model: impl Into<String>,
         subject: impl Into<String>,
-        color_choice: ColorChoice,
+        color: bool,
         no_alt_screen: bool,
     ) -> anyhow::Result<Self> {
         let mut terminal_output = open_terminal_output()?;
@@ -556,11 +212,6 @@ impl TerminalUi {
             }
         };
 
-        let color = match color_choice {
-            ColorChoice::Auto => std::env::var_os("NO_COLOR").is_none(),
-            ColorChoice::Always => true,
-            ColorChoice::Never => false,
-        };
         Ok(Self {
             terminal,
             events: EventStream::new(),
@@ -600,7 +251,7 @@ impl TerminalUi {
         self.scroll_from_bottom = 0;
     }
 
-    fn push_steer(&mut self, content: impl Into<String>) {
+    pub fn push_steer(&mut self, content: impl Into<String>) {
         self.finish_stream();
         self.messages.push(Message::new(
             MessageKind::User,
@@ -732,63 +383,30 @@ impl TerminalUi {
         }
     }
 
-    pub async fn run_session<In>(
-        &mut self,
-        session: &impl Session<In, SessionOutput>,
-        execution: Option<&Ctx>,
-        supplement: Option<fn(String) -> In>,
-    ) -> anyhow::Result<bool>
-    where
-        In: Send + 'static,
-    {
+    pub async fn running_action(&mut self, can_steer: bool) -> anyhow::Result<UiAction> {
         self.state = RunState::Running;
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         loop {
             self.draw()?;
             tokio::select! {
-                event = session.answer() => {
-                    let Some(event) = event? else {
-                        self.state = RunState::Idle;
-                        return Ok(true);
-                    };
-                    let terminal = self.apply_session_output(event)?;
-                    if terminal {
-                        if self.state != RunState::Failed {
-                            self.state = RunState::Idle;
-                        }
-                        self.draw()?;
-                        return Ok(true);
-                    }
-                }
                 input = self.events.next() => {
                     let Some(input) = input else {
-                        return Ok(false);
+                        return Ok(UiAction::Exit);
                     };
                     match input? {
                         TerminalEvent::Key(key) if key.kind == KeyEventKind::Press => {
                             if self.handle_copy_mode_key(key)? {
                                 continue;
                             }
-                            match self.handle_running_key(key, supplement.is_some()) {
+                            match self.handle_running_key(key, can_steer) {
                                 RunningAction::None => {}
                                 RunningAction::Interrupt => {
-                                    if let Some(execution) = execution {
-                                        let _ = execution.set_state(fae_agent::ContextState::cancelled("context has been aborted"));
-                                    }
                                     self.push_system("Interrupted");
-                                    self.state = RunState::Idle;
                                     self.draw()?;
-                                    return Ok(false);
+                                    return Ok(UiAction::Cancel);
                                 }
                                 RunningAction::Steer(content) => {
-                                    let make_input =
-                                        supplement.expect("steering is enabled for this session");
-                                    match session.call(make_input(content.clone())).await {
-                                        Ok(()) => self.push_steer(content),
-                                        Err(error) => self.push_system(format!(
-                                            "Steer rejected\n{error}"
-                                        )),
-                                    }
+                                    return Ok(UiAction::Steer(content));
                                 }
                                 RunningAction::InvalidSteer => {
                                     self.push_system(
@@ -798,7 +416,7 @@ impl TerminalUi {
                             }
                         }
                         TerminalEvent::Paste(content)
-                            if !self.copy_mode && supplement.is_some() =>
+                            if !self.copy_mode && can_steer =>
                         {
                             self.composer.insert(&content);
                         }
@@ -2020,76 +1638,6 @@ fn wrapped_line_count(line: &str, width: u16) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-fn message_heading(message: &Message, include_output_status: bool) -> String {
-    let marker = match message.kind {
-        MessageKind::User => ">",
-        MessageKind::Assistant => "*",
-        MessageKind::Reasoning => "-",
-        MessageKind::Tool => "$",
-        MessageKind::Workflow => "+",
-        MessageKind::Notice => "-",
-        MessageKind::System => "-",
-        MessageKind::LogOutput => "-",
-        MessageKind::LogError => "!",
-        MessageKind::Error => "!",
-    };
-    let disclosure = if message.is_collapsible() {
-        if message.expanded { "[-] " } else { "[+] " }
-    } else {
-        ""
-    };
-    let title = if message.title.is_empty() {
-        marker.to_string()
-    } else {
-        format!("{marker} {}", message.title)
-    };
-    let output_status = if include_output_status && message.stream_id.is_some() {
-        concat!(" ", "Outputting...")
-    } else {
-        ""
-    };
-    format!("{disclosure}{title}{output_status}")
-}
-
-fn plain_transcript(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .map(|message| {
-            let marker = match message.kind {
-                MessageKind::User => ">",
-                MessageKind::Assistant => "*",
-                MessageKind::Reasoning => "-",
-                MessageKind::Tool => "$",
-                MessageKind::Workflow => "+",
-                MessageKind::Notice => "-",
-                MessageKind::System => "-",
-                MessageKind::LogOutput => "-",
-                MessageKind::LogError => "!",
-                MessageKind::Error => "!",
-            };
-            let heading = if message.title.is_empty() {
-                marker.to_string()
-            } else {
-                format!("{marker} {}", message.title)
-            };
-            if message.content.is_empty() {
-                heading
-            } else {
-                format!(
-                    "{heading}\n{}",
-                    message
-                        .content
-                        .lines()
-                        .map(|line| format!(" {line}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 fn color(enabled: bool, value: Color) -> Color {
     if enabled { value } else { Color::Reset }
 }
@@ -2110,25 +1658,6 @@ fn push_log_message(messages: &mut Vec<Message>, log: CapturedLog) {
         log.content,
         None,
     ));
-}
-
-fn strip_ansi(content: &str) -> String {
-    let mut stripped = String::with_capacity(content.len());
-    let mut characters = content.chars();
-    while let Some(character) = characters.next() {
-        if character != '\u{1b}' {
-            stripped.push(character);
-            continue;
-        }
-        if characters.next() == Some('[') {
-            for character in characters.by_ref() {
-                if ('@'..='~').contains(&character) {
-                    break;
-                }
-            }
-        }
-    }
-    stripped
 }
 
 fn append_stream_message(

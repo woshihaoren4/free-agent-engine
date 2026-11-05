@@ -146,14 +146,14 @@ impl Plan for SingleAgentPlan {
             todo_plan.abort(_code, error).await;
             return;
         }
-        self.session.abort_turn();
-        self.owns_active_turn = false;
         let _ = self
             .emit(
                 self.template.agent.name.clone(),
                 SessionEventData::Failed { error },
             )
             .await;
+        self.session.abort_turn();
+        self.owns_active_turn = false;
     }
 }
 

@@ -4,6 +4,57 @@ Codex-style terminal client for Free Agent Engine. The interface keeps a
 scrollable transcript, a multiline composer, live tool and workflow status,
 and streamed model output in one stable TUI.
 
+## Background service
+
+The terminal UI and direct CLI commands are WebSocket clients. A separate
+`fae` process owns engines, workflows, history, todos and memory. Business
+commands (including `init`) automatically start it at `127.0.0.1:6666` when
+needed. Closing the client leaves the service and its active tasks running.
+
+```bash
+fae server start
+fae server start --address 127.0.0.1 --port 2666
+fae server status
+fae server show
+fae server stop
+```
+
+`start` waits for an authenticated readiness handshake. An occupied port is
+an error; it never chooses another port. A running service is reused from
+`server.config`, including a custom port. Stop it before changing listening
+parameters. `stop` waits for cancellation, engine cleanup and process exit.
+`show` displays the PID, address, port, versions, start time, instance ID,
+executable and config path. `status`, `show`, `stop`, `--help` and `--version`
+do not start a service.
+
+Use `--fae-home` or `FAE_HOST` to isolate service instances. Each home contains
+`server.config`, a private `server.token`, `start.lock`, `server.lock` and
+rotating `log/server.log`. The token authenticates both control and session
+connections; browser Origin requests are rejected. No system service is
+installed, so automatic startup happens on the next business command after
+an OS restart. A stopped service's next implicit startup uses the default
+address and port.
+
+On Unix, start the service as the owner of the FAE home. A `sudo` launch in
+another user's home is rejected because it would create root-owned private
+credentials. The default port 6666 does not require privileged port access.
+Explicit ports below 1024 may require privileges. Later clients reuse the
+running service's configured port. To recover a service previously launched with
+sudo, run `sudo fae --fae-home /absolute/path/to/.fae server stop`, then start
+it as the home owner. Keep `server.token` at mode `0600`.
+
+Each logical session has its own connection and fixed workspace/configuration.
+An active session cannot be opened by a second client. Clients can resume
+within the same service instance using ordered event replay (up to 4096
+events or 16 MiB). A replay gap is reported explicitly. A service restart
+does not rerun interrupted work, and unacknowledged writes are never
+automatically repeated. The service allows 32 retained sessions and 8 active
+rounds; disconnected idle sessions expire after 30 minutes.
+
+The implementation is split into `src/app` (CLI and transport), `src/server`
+(execution and lifecycle), `src/protocol` (shared wire types) and `src/tui`
+(terminal presentation).
+
 ## Single agent
 
 Initialize the default `fae` agent:
@@ -141,7 +192,10 @@ cargo run -p fae -- agent \
 ```
 
 Use `/todo <message>` to run that message in single-agent todo mode. Available
-session commands also include `/help`, `/status`, `/clear`, and `/exit`.
+session commands also include `/help`, `/status`, `/clear`, `/exit`,
+`/session new`, `/session id=<id>` and `/session clean` (also `/clean`).
+Cleaning removes this session's history and the agent/user's shared todos;
+it is rejected while any related session has an active round.
 
 Keyboard controls:
 
@@ -152,7 +206,8 @@ Keyboard controls:
 - `PageUp` / `PageDown`: scroll the transcript
 - `F2`: enter copy mode; drag to select output, then press `F2` or `Esc` to resume
 - `Esc`: interrupt the active run
-- `Ctrl+C`: exit while idle, interrupt while running
+- `Ctrl+C`: exit while idle; cancel the current round, wait for cleanup and
+  exit the client while running
 
 On Linux, the in-app file browser uses `Up`/`Down` to navigate, `Enter` to
 open a directory, `Space` to select images, `Backspace` to move to the parent
@@ -174,7 +229,7 @@ Remove the currently running `fae` executable:
 fae uninstall
 ```
 
-This leaves `FAE_HOST` and all agent configs, prompts, skills, workflows, and
+This first stops the current home's service and leaves `FAE_HOST` and all agent configs, prompts, skills, workflows, and
 session data unchanged.
 
 ## Workflow

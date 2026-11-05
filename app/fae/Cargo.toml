@@ -13,6 +13,11 @@ fae-agent = { path = "../../crates/fae-agent" }
 fae-engine = { path = "../../crates/fae-engine" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }
+serde = { workspace = true }
+futures-util = "0.3"
+tokio-tungstenite = "0.28"
+fs2 = "0.4"
+chrono = "0.4"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tui-markdown = { version = "0.3.9", default-features = false }
@@ -24,3 +29,6 @@ rfd = "0.15"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }

@@ -56,6 +56,53 @@ impl Default for CommonSessionCompletion {
 }
 
 impl CommonSession {
+    /// Cancel the Context belonging to the current round, including later turns.
+    pub async fn cancel_active(&self, reason: &str) -> anyhow::Result<()> {
+        let ctx = self.current_context()?;
+        anyhow::ensure!(!ctx.state().current().is_terminal(), "round_not_active");
+        ctx.set_state(crate::ContextState::cancelled(reason.to_owned()))?;
+        Ok(())
+    }
+
+    /// A state view of the current round without exposing its Context.
+    pub fn active_state(&self) -> anyhow::Result<crate::ContextStateView> {
+        Ok(self.current_context()?.state())
+    }
+
+    fn current_context(&self) -> anyhow::Result<Ctx> {
+        self.completion
+            .context
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(crate::WeakCtx::upgrade)
+            .ok_or_else(|| anyhow::anyhow!("round_not_active"))
+    }
+
+    /// Wait for agent teardown before permitting another round or data cleanup.
+    pub async fn wait_idle(&self) {
+        loop {
+            let idle = self.inner.idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if !self
+                .inner
+                .state
+                .lock()
+                .expect("session state poisoned")
+                .active
+            {
+                return;
+            }
+            idle.await;
+        }
+    }
+
+    /// Drain already queued outputs. Must be used by the sole event consumer.
+    pub async fn drain_outputs(&self) -> Vec<SessionOutput> {
+        self.inner.channel.drain().await
+    }
+
     pub fn same_session(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -257,7 +304,7 @@ impl CommonSession {
         self.activate_turn()
     }
 
-    pub(in crate::plan) fn activate_turn(&self) -> anyhow::Result<u64> {
+    pub(crate) fn activate_turn(&self) -> anyhow::Result<u64> {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         anyhow::ensure!(!state.active, "a turn is already running");
         state.active = true;
@@ -280,7 +327,7 @@ impl CommonSession {
         }
     }
 
-    pub(in crate::plan) fn finish_turn(&self) {
+    pub(crate) fn finish_turn(&self) {
         let mut state = self.inner.state.lock().expect("session state poisoned");
         state.active = false;
         state.accepting_input = false;
