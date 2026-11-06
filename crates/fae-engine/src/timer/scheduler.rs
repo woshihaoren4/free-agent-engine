@@ -12,46 +12,30 @@ pub(crate) fn parse(schedule: &TimerSchedule) -> anyhow::Result<(Schedule, Tz)> 
         _ => anyhow::bail!("invalid_cron: expected 5, 6 or 7 fields"),
     };
     let cron = Schedule::from_str(&text).map_err(|e| anyhow::anyhow!("invalid_cron: {e}"))?;
-    let tz = schedule
-        .timezone()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid_timezone"))?;
-    anyhow::ensure!(
-        schedule.limit() != Some(0),
-        "invalid_schedule: max_fires must be positive"
-    );
+    let tz = schedule.timezone().parse().map_err(|_| anyhow::anyhow!("invalid_timezone"))?;
+    anyhow::ensure!(schedule.limit() != Some(0), "invalid_schedule: max_fires must be positive");
     Ok((cron, tz))
 }
 
 // Iterate civil times in UTC, then resolve them explicitly in the selected zone.
 // This avoids the cron iterator's ambiguous-time behavior at DST transitions.
-pub(crate) fn next(
-    schedule: &TimerSchedule,
-    after: DateTime<Utc>,
-) -> anyhow::Result<Option<DateTime<Utc>>> {
+pub(crate) fn next(schedule: &TimerSchedule, after: DateTime<Utc>) -> anyhow::Result<Option<DateTime<Utc>>> {
     let (cron, tz) = parse(schedule)?;
     let civil = after.with_timezone(&tz).naive_local().and_utc();
     let mut cursor = civil;
     loop {
-        let Some(candidate) = cron.after(&cursor).next() else {
-            return Ok(None);
-        };
+        let Some(candidate) = cron.after(&cursor).next() else { return Ok(None) };
         cursor = candidate;
         let resolved = match tz.from_local_datetime(&candidate.naive_utc()) {
             LocalResult::None => continue,
             LocalResult::Single(t) => t.with_timezone(&Utc),
             LocalResult::Ambiguous(a, b) => a.min(b).with_timezone(&Utc),
         };
-        if resolved > after {
-            return Ok(Some(resolved));
-        }
+        if resolved > after { return Ok(Some(resolved)) }
     }
 }
 
-pub(crate) fn latest(
-    schedule: &TimerSchedule,
-    now: DateTime<Utc>,
-) -> anyhow::Result<Option<DateTime<Utc>>> {
+pub(crate) fn latest(schedule: &TimerSchedule, now: DateTime<Utc>) -> anyhow::Result<Option<DateTime<Utc>>> {
     let (cron, tz) = parse(schedule)?;
     let civil = now.with_timezone(&tz).naive_local();
     // In the second fold, later civil times in the first fold have already
@@ -62,18 +46,14 @@ pub(crate) fn latest(
     };
     let mut cursor = (civil + fold + Duration::seconds(1)).and_utc();
     loop {
-        let Some(candidate) = cron.after(&cursor).next_back() else {
-            return Ok(None);
-        };
+        let Some(candidate) = cron.after(&cursor).next_back() else { return Ok(None) };
         cursor = candidate;
         let resolved = match tz.from_local_datetime(&candidate.naive_utc()) {
             LocalResult::None => continue,
             LocalResult::Single(t) => t.with_timezone(&Utc),
             LocalResult::Ambiguous(a, b) => a.min(b).with_timezone(&Utc),
         };
-        if resolved <= now {
-            return Ok(Some(resolved));
-        }
+        if resolved <= now { return Ok(Some(resolved)) }
     }
 }
 pub(crate) fn timestamp(text: &str) -> anyhow::Result<DateTime<Utc>> {

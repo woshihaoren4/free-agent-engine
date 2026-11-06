@@ -4,8 +4,8 @@ mod file;
 mod http;
 mod memory;
 mod python;
-mod timer;
 mod todo;
+mod timer;
 mod workflow;
 
 use std::path::PathBuf;
@@ -20,8 +20,8 @@ pub use file::{ListDirectoryTool, ReadFileTool, WriteFileTool};
 pub use http::SendHttpRequestTool;
 pub use memory::MemoryUpdateTool;
 pub use python::ExecutePythonTool;
-pub use timer::TimerTool;
 pub use todo::TodoTool;
+pub use timer::TimerTool;
 pub use workflow::WorkflowTool;
 
 pub const DEFAULT_CHANNEL: &str = "default";

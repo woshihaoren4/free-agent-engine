@@ -529,34 +529,17 @@ async fn scoped_subagent_and_task_binding_preserves_user_and_changes_source() {
             .await
             .is_err()
     );
-    let workflow = _engine
-        .ctx_with_scope(ContextScope::root("workflow-user"))
-        .unwrap();
-    let (_, session) = SingleAgentEnv::new_with_user_id(
-        SingleAgentSource::AgentId("workflow-agent".into()),
-        "workflow input",
-        "workflow-user",
-    );
-    let agent = workflow
-        .fork(ContextChildSpec {
-            execution: true,
-            agent_id: Some("workflow-agent".into()),
-            session: Some(ContextSession {
-                session_id: "workflow-child".into(),
-                session,
-            }),
-            timer_source: Some(SingleAgentSource::AgentId("workflow-agent".into())),
-            timer_workspace: Some(home.path().to_path_buf()),
-            ..Default::default()
-        })
-        .unwrap();
-    let timer = runtime
-        .handle()
-        .request(&agent, create("once", "workflow-child"))
-        .await
-        .unwrap()
-        .timers
-        .remove(0);
+    let workflow = _engine.ctx_with_scope(ContextScope::root("workflow-user")).unwrap();
+    let (_, session) = SingleAgentEnv::new_with_user_id(SingleAgentSource::AgentId("workflow-agent".into()), "workflow input", "workflow-user");
+    let agent = workflow.fork(ContextChildSpec {
+        execution: true,
+        agent_id: Some("workflow-agent".into()),
+        session: Some(ContextSession { session_id: "workflow-child".into(), session }),
+        timer_source: Some(SingleAgentSource::AgentId("workflow-agent".into())),
+        timer_workspace: Some(home.path().to_path_buf()),
+        ..Default::default()
+    }).unwrap();
+    let timer = runtime.handle().request(&agent, create("once", "workflow-child")).await.unwrap().timers.remove(0);
     assert_eq!(timer.owner.agent_id, "workflow-agent");
     assert_eq!(timer.owner.user_id, "workflow-user");
 }
