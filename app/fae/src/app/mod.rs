@@ -12,6 +12,75 @@ use args::{Cli, Command, ServerCommand};
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let home = paths::home(cli.fae_home)?;
     match cli.command {
+        Some(Command::Lark(args)) => {
+            use args::LarkCommand;
+            let explicit_workspace = std::env::args_os().any(|arg| {
+                arg == "--workspace" || arg.to_string_lossy().starts_with("--workspace=")
+            });
+            if explicit_workspace
+                && !matches!(
+                    args.command,
+                    LarkCommand::Init { .. } | LarkCommand::Stop | LarkCommand::Status
+                )
+            {
+                let config = crate::lark::config::Config::load(&home)?;
+                anyhow::ensure!(
+                    paths::workspace(cli.workspace.clone())? == config.workspace,
+                    "--workspace conflicts with lark.config workspace"
+                );
+            }
+            match args.command {
+                LarkCommand::Init { force } => {
+                    crate::lark::config::Config::init(
+                        &home,
+                        paths::workspace(cli.workspace)?,
+                        force,
+                    )?;
+                    println!(
+                        "Created {}. Fill in credentials and run fae lark check.",
+                        home.join("lark.config").display()
+                    );
+                }
+                LarkCommand::Check { online } => {
+                    let config = crate::lark::config::Config::load(&home)?;
+                    config.check_agent(&home).await?;
+                    if online {
+                        crate::lark::check_online(config).await?;
+                    }
+                    println!(
+                        "Lark configuration valid{}",
+                        if online {
+                            "; bot authentication verified"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                LarkCommand::Show => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &crate::lark::config::Config::load(&home)?.redacted()
+                    )?
+                ),
+                LarkCommand::Start { foreground: true } => return crate::lark::run(home).await,
+                LarkCommand::Start { foreground: false } => {
+                    println!("{}", crate::lark::lifecycle::start(&home).await?)
+                }
+                LarkCommand::Status => match crate::lark::lifecycle::status(&home).await? {
+                    Some(status) => println!("{}", serde_json::to_string_pretty(&status)?),
+                    None => println!("Lark gateway not running"),
+                },
+                LarkCommand::Stop => println!(
+                    "{}",
+                    if crate::lark::lifecycle::stop(&home).await? {
+                        "Lark gateway stopped"
+                    } else {
+                        "Lark gateway not running"
+                    }
+                ),
+            }
+            Ok(())
+        }
         Some(Command::Server(args)) => match args.command {
             ServerCommand::Start {
                 address,

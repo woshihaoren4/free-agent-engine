@@ -95,7 +95,11 @@ impl Drop for Transport {
     }
 }
 pub async fn connect(home: &Path, config: &ServerConfig, route: &str) -> anyhow::Result<Socket> {
-    let path = home.join("server.token");
+    let path = home.join(if route == "/v2/lark/session" {
+        "lark.token"
+    } else {
+        "server.token"
+    });
     let token = tokio::fs::read_to_string(&path)
         .await
         .map_err(|error| crate::server::lifecycle::runtime_file_error(&path, error))?;
@@ -202,7 +206,16 @@ impl Client {
         config: &ServerConfig,
         open: OpenSession,
     ) -> anyhow::Result<Self> {
-        let mut socket = connect(home, config, "/v1/session").await?;
+        let mut socket = connect(
+            home,
+            config,
+            if open.binding.is_some() {
+                "/v2/lark/session"
+            } else {
+                "/v1/session"
+            },
+        )
+        .await?;
         let request = ClientEnvelope {
             version: VERSION,
             request_id: wd_tools::uuid::v4(),
@@ -225,6 +238,7 @@ impl Client {
         let stream = response
             .stream_id
             .ok_or_else(|| anyhow::anyhow!("Missing stream ID"))?;
+        let seq = open.resume.as_ref().map_or(0, |resume| resume.after_seq);
         Ok(Self {
             socket: Transport::new(socket),
             home: home.into(),
@@ -232,7 +246,7 @@ impl Client {
             open,
             info,
             stream,
-            seq: 0,
+            seq,
             pending: VecDeque::new(),
         })
     }
@@ -331,7 +345,9 @@ impl Client {
                 config.instance_id == self.config.instance_id,
                 "resume_expired: service restarted; task was not rerun"
             );
-            hello(&self.home, &config).await?;
+            if self.open.binding.is_none() {
+                hello(&self.home, &config).await?;
+            }
             let mut open = self.open.clone();
             open.session_id = Some(self.info.session_id.clone());
             open.resume = Some(Resume {

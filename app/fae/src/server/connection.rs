@@ -70,6 +70,7 @@ impl Drop for ConnectionGuard {
 pub async fn upgrade(
     stream: TcpStream,
     token: String,
+    lark_token: String,
 ) -> anyhow::Result<(WebSocketStream<TcpStream>, String)> {
     let route = Arc::new(std::sync::Mutex::new(String::new()));
     let selected = route.clone();
@@ -79,12 +80,21 @@ pub async fn upgrade(
             stream,
             move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
                 let authorization = format!("Bearer {token}");
+                let lark = request.uri().path() == "/v2/lark/session";
+                let authorization = if lark {
+                    format!("Bearer {lark_token}")
+                } else {
+                    authorization
+                };
                 let accepted = request
                     .headers()
                     .get("authorization")
                     .is_some_and(|v| v.as_bytes() == authorization.as_bytes())
                     && !request.headers().contains_key("origin")
-                    && matches!(request.uri().path(), "/v1/control" | "/v1/session");
+                    && matches!(
+                        request.uri().path(),
+                        "/v1/control" | "/v1/session" | "/v2/lark/session"
+                    );
                 if !accepted {
                     return Err(Response::builder()
                         .status(401)
@@ -190,18 +200,45 @@ mod tests {
     fn outbound() -> (Outbound, mpsc::Receiver<Queued>, watch::Receiver<bool>) {
         let (tx, rx) = mpsc::channel(256);
         let (close, closed) = watch::channel(false);
-        (Outbound { id: "test".into(), tx, bytes: Arc::new(Semaphore::new(MAX_FRAME)), close }, rx, closed)
+        (
+            Outbound {
+                id: "test".into(),
+                tx,
+                bytes: Arc::new(Semaphore::new(MAX_FRAME)),
+                close,
+            },
+            rx,
+            closed,
+        )
     }
     #[test]
     fn slow_client_queue_is_bounded_and_signals_disconnect() {
         let (out, _rx, closed) = outbound();
         for _ in 0..256 {
-            assert!(out.send(ServerEnvelope::new("instance", None, None, ServerMessage::Closed)));
+            assert!(out.send(ServerEnvelope::new(
+                "instance",
+                None,
+                None,
+                ServerMessage::Closed
+            )));
         }
-        assert!(!out.send(ServerEnvelope::new("instance", None, None, ServerMessage::Closed)));
+        assert!(!out.send(ServerEnvelope::new(
+            "instance",
+            None,
+            None,
+            ServerMessage::Closed
+        )));
         assert!(*closed.borrow());
         let (out, _rx, closed) = outbound();
-        let envelope = ServerEnvelope::new("instance", None, None, ServerMessage::Error(ProtocolError::new("execution_failed", "x".repeat(MAX_FRAME / 2))));
+        let envelope = ServerEnvelope::new(
+            "instance",
+            None,
+            None,
+            ServerMessage::Error(ProtocolError::new(
+                "execution_failed",
+                "x".repeat(MAX_FRAME / 2),
+            )),
+        );
         assert!(out.send(envelope.clone()));
         assert!(!out.send(envelope));
         assert!(*closed.borrow());

@@ -51,6 +51,7 @@ pub struct Actor {
     out: Option<Outbound>,
     lease: String,
     round: Option<String>,
+    external_request_id: Option<String>,
     cancel_pending: bool,
     stop: bool,
     stop_reply: Option<oneshot::Sender<anyhow::Result<()>>>,
@@ -87,6 +88,7 @@ impl Actor {
             out: None,
             lease: String::new(),
             round: None,
+            external_request_id: None,
             cancel_pending: false,
             stop: false,
             stop_reply: None,
@@ -282,6 +284,76 @@ impl Actor {
     }
     async fn request(&mut self, body: ClientMessage) -> Result<ServerMessage, ProtocolError> {
         match body {
+            ClientMessage::Acceptance {
+                external_request_id,
+            } => {
+                let receipt = super::acceptance::read(
+                    &self.registry.home,
+                    &external_request_id,
+                    &self.key,
+                    None,
+                )?;
+                Ok(ServerMessage::Acceptance {
+                    round_id: receipt.as_ref().and_then(|r| r.round_id.clone()),
+                    outcome: receipt.as_ref().and_then(|r| r.outcome.clone()),
+                    uncertain: receipt.is_some_and(|r| r.uncertain),
+                })
+            }
+            ClientMessage::ExternalInput {
+                external_request_id,
+                input,
+            } => {
+                if !matches!(self.target, SessionTarget::Agent { .. }) {
+                    return Err(ProtocolError::new(
+                        "unsupported_operation",
+                        "Only agents accept external input",
+                    ));
+                }
+                let SessionInput::NewChat(data) = input else {
+                    return Err(ProtocolError::new(
+                        "invalid_message",
+                        "External input must start a new round",
+                    ));
+                };
+                validate_input(&data).await?;
+                let _lock =
+                    super::acceptance::lock(&self.registry.home, &external_request_id).await?;
+                let digest = crate::lark::identity::hash(&[&serde_json::to_string(&data).unwrap()]);
+                if let Some(receipt) = super::acceptance::read(
+                    &self.registry.home,
+                    &external_request_id,
+                    &self.key,
+                    Some(&digest),
+                )? {
+                    return Ok(ServerMessage::Acceptance {
+                        round_id: receipt.round_id,
+                        uncertain: receipt.uncertain,
+                        outcome: receipt.outcome,
+                    });
+                }
+                // Persist intent before launching work. A crash here must never cause a replay.
+                super::acceptance::write(
+                    &self.registry.home,
+                    &external_request_id,
+                    &self.key,
+                    digest.clone(),
+                    None,
+                    true,
+                )?;
+                let round = self.start(Some((data, None))).await?;
+                self.external_request_id = Some(external_request_id.clone());
+                super::acceptance::write(
+                    &self.registry.home,
+                    &external_request_id,
+                    &self.key,
+                    digest,
+                    Some(round.clone()),
+                    false,
+                )?;
+                Ok(ServerMessage::Ack {
+                    round_id: Some(round),
+                })
+            }
             ClientMessage::Input { input, mode } => {
                 if !matches!(self.target, SessionTarget::Agent { .. }) {
                     return Err(ProtocolError::new(
@@ -583,6 +655,16 @@ impl Actor {
                         self.timer_occurrence = None;
                     }
                     if let Some(round) = self.round.take() {
+                        if let Some(id) = self.external_request_id.take() {
+                            if let Err(error) = super::acceptance::finish(
+                                &self.registry.home,
+                                &id,
+                                &self.key,
+                                outcome.clone(),
+                            ) {
+                                eprintln!("external terminal receipt: {error}");
+                            }
+                        }
                         self.stop |= self.registry.finish_round(&self.key);
                         self.cancel_pending = false;
                         self.context = None;

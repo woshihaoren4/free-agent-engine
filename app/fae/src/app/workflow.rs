@@ -27,6 +27,7 @@ pub async fn run(
     no_alt_screen: bool,
 ) -> anyhow::Result<()> {
     let open = OpenSession {
+        binding: None,
         target: SessionTarget::Workflow {
             workflow_id: args.id.clone(),
             input: input(&args.input).await?,

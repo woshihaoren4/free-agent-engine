@@ -77,6 +77,7 @@ pub(in crate::plan) struct SingleAgentPlan {
     additional_history: Vec<SessionMessage>,
     unsaved_messages: Vec<SessionMessage>,
     final_output: String,
+    response_id: String,
     tool_iterations: usize,
     empty_model_retries: usize,
     task_sequence: u64,
@@ -255,6 +256,7 @@ impl SingleAgentPlan {
             additional_history,
             unsaved_messages: vec![initial_message],
             final_output: String::new(),
+            response_id: String::new(),
             tool_iterations: 0,
             empty_model_retries: 0,
             task_sequence: 0,
@@ -409,6 +411,14 @@ impl SingleAgentPlan {
             .on_model_req(&self.hook_context(None), request)
             .await?;
         self.stage = SingleAgentStage::Model;
+        self.response_id = wd_tools::uuid::v4();
+        self.emit(
+            self.template.model.model.clone(),
+            SessionEventData::ModelResponseStarted {
+                response_id: self.response_id.clone(),
+            },
+        )
+        .await?;
         Ok(self.task(TaskType::Model, request))
     }
 

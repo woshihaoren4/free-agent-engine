@@ -16,7 +16,7 @@ impl AgentOutputStream {
     ) -> anyhow::Result<()> {
         let nested = event.parament_plan_id.is_some();
         match event.event_data()? {
-            SessionEventData::ModelOutput { content } => {
+            SessionEventData::ModelOutput { content, .. } => {
                 writer.write_all(content.as_bytes())?;
                 writer.flush()?;
                 self.line_open = true;
@@ -74,9 +74,34 @@ mod tests {
         let mut writer = Vec::new();
         let mut output = AgentOutputStream::default();
         for event in [
-            fae_agent::SessionEvent::nested_agent("coordinator","worker",1,"model",SessionEventData::ModelOutput { content: "planned".into() }),
-            fae_agent::SessionEvent::nested_agent("coordinator","worker",1,"worker",SessionEventData::Completed { content: "planned".into() }),
-            fae_agent::SessionEvent::single_agent_for("coordinator",1,"model",SessionEventData::ModelOutput { content: "finished".into() }),
+            fae_agent::SessionEvent::nested_agent(
+                "coordinator",
+                "worker",
+                1,
+                "model",
+                SessionEventData::ModelOutput {
+                    response_id: None,
+                    content: "planned".into(),
+                },
+            ),
+            fae_agent::SessionEvent::nested_agent(
+                "coordinator",
+                "worker",
+                1,
+                "worker",
+                SessionEventData::Completed {
+                    content: "planned".into(),
+                },
+            ),
+            fae_agent::SessionEvent::single_agent_for(
+                "coordinator",
+                1,
+                "model",
+                SessionEventData::ModelOutput {
+                    response_id: None,
+                    content: "finished".into(),
+                },
+            ),
         ] {
             output.write_event(&mut writer, &event.into()).unwrap();
         }

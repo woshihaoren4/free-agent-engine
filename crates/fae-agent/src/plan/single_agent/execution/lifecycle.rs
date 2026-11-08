@@ -146,6 +146,17 @@ impl Plan for SingleAgentPlan {
             todo_plan.abort(_code, error).await;
             return;
         }
+        if matches!(self.stage, SingleAgentStage::Model) && !self.response_id.is_empty() {
+            let _ = self
+                .emit(
+                    self.template.model.model.clone(),
+                    SessionEventData::ModelResponseEnded {
+                        response_id: self.response_id.clone(),
+                        disposition: crate::session::ModelResponseDisposition::Failed,
+                    },
+                )
+                .await;
+        }
         let _ = self
             .emit(
                 self.template.agent.name.clone(),

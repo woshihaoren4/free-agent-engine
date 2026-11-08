@@ -5,7 +5,7 @@ pub use control::*;
 pub use error::*;
 pub use session::*;
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const DEFAULT_PORT: u16 = 6666;
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 

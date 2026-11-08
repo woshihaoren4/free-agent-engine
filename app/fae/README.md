@@ -55,6 +55,89 @@ The implementation is split into `src/app` (CLI and transport), `src/server`
 (execution and lifecycle), `src/protocol` (shared wire types) and `src/tui`
 (terminal presentation).
 
+## Feishu gateway
+
+`fae lark` runs an independent gateway using `larksuite-oapi-sdk-rs` 0.3.13
+(Rust 1.95+). It receives enterprise self-built bot messages over a long
+connection and executes the configured Agent through the local FAE service.
+Creating a configuration never starts the gateway; normal TUI, workflow and
+server commands never start it.
+
+```bash
+fae lark init
+# Edit ~/.fae/lark.config: app_id, app_secret, tenant_key, agent_id, workspace.
+fae lark check
+fae lark check --online  # Checks bot credentials without sending a message
+fae lark show           # Redacts the app secret
+fae lark start
+fae lark start --foreground
+fae lark status
+fae lark stop           # Leaves the shared Agent service running
+```
+
+The JSON configuration is private (0600 on Unix). `app_key` is accepted as
+an alias for `app_id`. `workspace` must resolve to an existing absolute
+directory. Use `--fae-home`/`FAE_HOST` to change the home. Edit the configuration
+and restart the gateway to apply changes. A conflicting explicit `--workspace`
+is rejected. The init template contains placeholders and cannot be started
+until credentials are filled in.
+
+Enable bot capability, publish the application, select long-connection delivery
+and subscribe to `im.message.receive_v1`. Grant
+`im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly`,
+`im:message:send_as_bot`, `im:message.reactions:write_only`,
+`cardkit:card:write` and `contact:user.employee_id:readonly`.
+The last permission supplies the raw Feishu user ID used as Agent identity.
+Missing user IDs produce an error instead of falling back to open ID or master.
+Add the bot to the group and @ it; messages from other tenants and bots are ignored.
+Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
+
+Accepted messages receive a `Typing` reaction immediately on a separate task.
+Each top-level model response gets its own streaming card; tool execution,
+reasoning and child-Agent internals are hidden. Cards are updated with the
+accumulated text, normally every 300 ms, and long replies are paginated on
+Unicode boundaries. Final success waits for the complete Agent round, including
+history saving. Failures are sent with `ERROR`; CardKit failures fall back to
+text with an explicit degradation notice. Outbound failures remain in the
+receipt store and appear in status.
+
+Histories and round queues use a stable application/tenant/user/chat hash.
+The same user's private chat and different groups have separate histories;
+user memory and the configured workspace remain shared. The current gateway
+requires Agents and configured sub-Agents without a `todo` route because that
+tool still stores shared agent/user state. Remove `todo` from their `tools`
+arrays before starting. This check follows typed workflow references, including
+Agents loaded by ID or explicit config/prompt paths and nested workflows.
+Dynamic session/custom actions and raw delegating or unverified tool routes
+are rejected because their Todo access cannot be checked before execution.
+This is an enforced startup limitation, not a filesystem sandbox.
+
+`<home>/lark/records` contains private durable receipt and delivery records.
+Completed receipts are kept for seven days by default. The server persists
+external request acceptance separately under `<home>/requests`; these records
+are retained conservatively to prevent accidental repeated execution.
+Reconnect uses the original service instance, stream and sequence.
+Resuming an existing actor keeps its frozen Agent configuration even if the
+source files have changed or disappeared. Available replay is consumed through
+the round's `Finished` event before the outcome is recorded.
+An uncertain submission or a restarted service is reported without blindly
+rerunning tools. Replay gaps use the final result as a text fallback.
+There is no transaction guarantee for external tool side effects.
+Shutdown confirms the router and outbox have exited before final delivery.
+Its delivery budget is shared across all records within a 25-second shutdown
+deadline; records that remain undelivered are retried on the next start.
+
+The gateway has a private loopback control socket and instance handshake.
+Its service credential (`lark.token`) only opens `/v2/lark/session` and cannot
+initialize agents, clean user data or stop the service. Wire protocol v2
+requires restarting any previously running v1 service after upgrading.
+
+For live acceptance, test private chat and @bot group chat, a response containing
+both text and tool calls, a failed Agent round, duplicate message delivery,
+concurrent users and gateway/service restarts. The repository checks use local
+mocks; real Feishu permissions, streaming behavior and network recovery require
+deployment verification.
+
 ## Single agent
 
 Initialize the default `fae` agent:

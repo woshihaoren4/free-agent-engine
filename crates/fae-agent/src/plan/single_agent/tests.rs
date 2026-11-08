@@ -984,7 +984,10 @@ user-defined rules, and other long-term facts."
         session.activate_turn()?;
         let mut scope = crate::ContextScope::root("alice");
         scope.agent_id = Some("test-agent".into());
-        scope.session = Some(crate::ContextSession { session_id: "test".into(), session: session.clone() });
+        scope.session = Some(crate::ContextSession {
+            session_id: "test".into(),
+            session: session.clone(),
+        });
         let ctx = crate::context::test_context(Some(scope));
         ctx.set_state(crate::ContextState::Running)?;
         let mut template = test_template();
@@ -1041,7 +1044,8 @@ user-defined rules, and other long-term facts."
                                 {"id":1,"content":"implement","completed":false},
                                 {"id":2,"content":"verify","completed":false}
                             ]
-                        }).to_string(),
+                        })
+                        .to_string(),
                     ),
                 }
                 .into_response(),
@@ -1053,7 +1057,10 @@ user-defined rules, and other long-term facts."
 
         assert!(plan.todo_plan.is_some());
         assert_eq!(plan.todo_plan.as_ref().unwrap().id(), plan_id);
-        assert_eq!(tasks[0].ctx.scope()?.todo.as_ref().unwrap().plan_id, plan_id);
+        assert_eq!(
+            tasks[0].ctx.scope()?.todo.as_ref().unwrap().plan_id,
+            plan_id
+        );
         assert!(!plan.owns_active_turn);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].meta.ty, TaskType::Memory);
@@ -1404,6 +1411,7 @@ user-defined rules, and other long-term facts."
             "researcher",
             "model",
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "partial".to_string(),
             },
         )?;
@@ -1415,6 +1423,7 @@ user-defined rules, and other long-term facts."
         assert_eq!(
             output.event_data()?,
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "partial".to_string()
             }
         );
@@ -1924,14 +1933,30 @@ user-defined rules, and other long-term facts."
         ));
 
         let mut kinds = Vec::new();
+        let mut response_ids = Vec::new();
         loop {
             let event = session.answer().await.unwrap().unwrap();
+            if let Some(id) = event.output["response_id"].as_str() {
+                response_ids.push(id.to_owned());
+            }
             kinds.push(event.kind().to_string());
             if event.is_terminal() {
                 break;
             }
         }
-        assert_eq!(kinds, vec!["turn_started", "model_output", "completed"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "turn_started",
+                "model_response_started",
+                "model_output",
+                "model_response_ended",
+                "completed"
+            ]
+        );
+        assert_eq!(response_ids.len(), 3);
+        assert!(!response_ids[0].is_empty());
+        assert!(response_ids.iter().all(|id| id == &response_ids[0]));
     }
 
     #[tokio::test]

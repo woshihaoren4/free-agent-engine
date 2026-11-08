@@ -50,6 +50,7 @@ mod shutdown_tests {
                     workspace: PathBuf::from("."),
                     session_id: Some("timer-session".into()),
                     resume: None,
+                    binding: None,
                 },
                 stream: "stream".into(),
                 tx,
@@ -225,18 +226,25 @@ impl Registry {
                 ));
             }
             let candidate = state.entries.values_mut().find(|entry| {
-                open.resume
-                    .as_ref()
-                    .is_some_and(|resume| resume.stream_id == entry.stream)
-                    || (serde_json::to_value(&entry.open.target).unwrap()
-                        == serde_json::to_value(&open.target).unwrap()
-                        && match &open.session_id {
-                            Some(id) => id == &entry.key.session,
-                            None => {
-                                matches!(open.target, SessionTarget::Agent { .. })
-                                    && entry.open.session_id.is_none()
-                            }
-                        })
+                open.resume.is_some()
+                    && entry.open.binding == open.binding
+                    && open
+                        .binding
+                        .as_ref()
+                        .is_none_or(|b| b.user_id == entry.key.user)
+                    && (open
+                        .resume
+                        .as_ref()
+                        .is_some_and(|resume| resume.stream_id == entry.stream)
+                        || (serde_json::to_value(&entry.open.target).unwrap()
+                            == serde_json::to_value(&open.target).unwrap()
+                            && match &open.session_id {
+                                Some(id) => id == &entry.key.session,
+                                None => {
+                                    matches!(open.target, SessionTarget::Agent { .. })
+                                        && entry.open.session_id.is_none()
+                                }
+                            }))
             });
             if let Some(entry) = candidate {
                 if open
@@ -331,7 +339,10 @@ impl Registry {
                 (
                     config.agent.name.clone(),
                     config.agent.name,
-                    config.agent.user_id,
+                    open.binding
+                        .as_ref()
+                        .map(|b| b.user_id.clone())
+                        .unwrap_or(config.agent.user_id),
                     config.model.model,
                     open.session_id.clone().unwrap_or(config.agent.session_id),
                     "agent",
@@ -382,6 +393,7 @@ impl Registry {
                     ));
                 }
                 if entry.open.workspace != open.workspace
+                    || entry.open.binding != open.binding
                     || serde_json::to_value(&entry.open.target).unwrap()
                         != serde_json::to_value(&open.target).unwrap()
                 {
@@ -561,6 +573,7 @@ impl Registry {
             workspace: binding.workspace.clone(),
             session_id: Some(key.session.clone()),
             resume: None,
+            binding: None,
         };
         let stream = wd_tools::uuid::v4();
         let (tx, rx) = mpsc::channel(512);

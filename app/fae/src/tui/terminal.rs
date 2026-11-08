@@ -460,7 +460,7 @@ impl TerminalUi {
                     self.append_stream(MessageKind::Reasoning, &title, stream_id, content);
                 }
             }
-            SessionEventData::ModelOutput { content } => {
+            SessionEventData::ModelOutput { content, .. } => {
                 let title = title("Assistant");
                 if nested {
                     self.buffer_child_stream(run_id, MessageKind::Assistant, title, content);
@@ -565,7 +565,10 @@ impl TerminalUi {
                     finalize_assistant_message(&mut self.messages, &assistant_title, content);
                 }
             }
-            SessionEventData::TurnStarted { .. } | SessionEventData::UserInput { .. } => {}
+            SessionEventData::TurnStarted { .. }
+            | SessionEventData::UserInput { .. }
+            | SessionEventData::ModelResponseStarted { .. }
+            | SessionEventData::ModelResponseEnded { .. } => {}
         }
         self.scroll_from_bottom = 0;
         Ok(terminal)

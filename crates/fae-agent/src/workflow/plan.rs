@@ -357,11 +357,15 @@ struct DagWorkflowPlan {
 }
 
 impl Drop for WorkflowPlan {
-    fn drop(&mut self) { self.session.finish_turn(); }
+    fn drop(&mut self) {
+        self.session.finish_turn();
+    }
 }
 
 impl Drop for DagWorkflowPlan {
-    fn drop(&mut self) { self.session.finish_turn(); }
+    fn drop(&mut self) {
+        self.session.finish_turn();
+    }
 }
 
 async fn invoke_workflow_hook(
@@ -2315,6 +2319,7 @@ mod tests {
                 "agent",
                 "model",
                 SessionEventData::ModelOutput {
+                    response_id: None,
                     content: "hel".to_string(),
                 },
             )
@@ -2329,6 +2334,7 @@ mod tests {
         assert_eq!(
             chunk.event_data().unwrap(),
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "hel".to_string()
             }
         );
@@ -2360,6 +2366,7 @@ mod tests {
                 .event_data()
                 .unwrap(),
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "hel".to_string()
             }
         );

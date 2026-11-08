@@ -1334,7 +1334,7 @@ mod tests {
         while let Some(event) = session.answer().await.unwrap() {
             let terminal = event.is_terminal();
             if event.parament_plan_id.is_none()
-                && let SessionEventData::ModelOutput { content } = event.event_data().unwrap()
+                && let SessionEventData::ModelOutput { content, .. } = event.event_data().unwrap()
             {
                 top_level_output.push_str(&content);
             }

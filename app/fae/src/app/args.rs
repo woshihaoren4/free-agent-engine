@@ -29,6 +29,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Manage the Feishu agent gateway (never started by default)
+    Lark(LarkArgs),
     /// Manage the background service for this FAE home
     Server(ServerArgs),
     /// Initialize an agent with all installed tools and skills
@@ -39,6 +41,30 @@ pub enum Command {
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
     Workflow(WorkflowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LarkArgs {
+    #[command(subcommand)]
+    pub command: LarkCommand,
+}
+#[derive(Debug, Subcommand)]
+pub enum LarkCommand {
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+    Check {
+        #[arg(long)]
+        online: bool,
+    },
+    Show,
+    Start {
+        #[arg(long)]
+        foreground: bool,
+    },
+    Status,
+    Stop,
 }
 
 #[derive(Debug, Args)]
@@ -147,7 +173,7 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "init" | "uninstall" | "agent" | "workflow" | "server" => return args,
+            "init" | "uninstall" | "agent" | "workflow" | "server" | "lark" => return args,
             "--fae-home" | "--workspace" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
@@ -174,6 +200,23 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lark_commands_are_explicit_root_commands() {
+        for command in ["init", "check", "show", "start", "status", "stop"] {
+            let cli =
+                Cli::try_parse_from(with_default_agent(["fae", "lark", command].map(Into::into)))
+                    .unwrap();
+            assert!(matches!(cli.command, Some(Command::Lark(_))));
+        }
+        let cli = Cli::try_parse_from(["fae", "lark", "check", "--online"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Lark(LarkArgs {
+                command: LarkCommand::Check { online: true }
+            }))
+        ));
+    }
 
     #[test]
     fn parses_server_commands_and_rejects_invalid_bind_parameters() {

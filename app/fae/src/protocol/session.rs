@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use super::{HelloInfo, ProtocolError};
 use fae_agent::{SessionInput, SessionMessage, SessionOutput, SingleAgentSource};
 use serde_json::Value;
-use super::{HelloInfo, ProtocolError};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -22,6 +22,19 @@ pub struct OpenSession {
     pub session_id: Option<String>,
     pub workspace: PathBuf,
     pub resume: Option<Resume>,
+    #[serde(default)]
+    pub binding: Option<SessionBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionBinding {
+    pub channel: String,
+    pub user_id: String,
+    pub app_id: String,
+    pub tenant_key: String,
+    pub chat_type: String,
+    pub chat_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -47,26 +60,67 @@ pub struct SessionStatus {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ClientMessage {
     Open(OpenSession),
-    Input { input: SessionInput, mode: Option<String> },
-    Cancel { round_id: String },
-    History { limit: usize, offset: usize },
+    Input {
+        input: SessionInput,
+        mode: Option<String>,
+    },
+    ExternalInput {
+        external_request_id: String,
+        input: SessionInput,
+    },
+    Acceptance {
+        external_request_id: String,
+    },
+    Cancel {
+        round_id: String,
+    },
+    History {
+        limit: usize,
+        offset: usize,
+    },
     Clean,
     Status,
-    Close { cancel_active: bool },
+    Close {
+        cancel_active: bool,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
     Hello(HelloInfo),
-    Initialized { config_path: PathBuf, skill_count: usize },
-    ServiceStatus { sessions: usize, active_rounds: usize },
+    Initialized {
+        config_path: PathBuf,
+        skill_count: usize,
+    },
+    ServiceStatus {
+        sessions: usize,
+        active_rounds: usize,
+    },
     Shutdown,
     Opened(SessionInfo),
-    Ack { round_id: Option<String> },
-    Event { seq: u64, round_id: String, output: SessionOutput },
-    Finished { seq: u64, round_id: String, outcome: RoundOutcome },
-    History { messages: Vec<SessionMessage> },
+    Ack {
+        round_id: Option<String>,
+    },
+    Acceptance {
+        round_id: Option<String>,
+        uncertain: bool,
+        #[serde(default)]
+        outcome: Option<RoundOutcome>,
+    },
+    Event {
+        seq: u64,
+        round_id: String,
+        output: SessionOutput,
+    },
+    Finished {
+        seq: u64,
+        round_id: String,
+        outcome: RoundOutcome,
+    },
+    History {
+        messages: Vec<SessionMessage>,
+    },
     Status(SessionStatus),
     Cleaned,
     Closed,

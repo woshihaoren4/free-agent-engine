@@ -22,6 +22,7 @@ impl SingleAgentPlan {
                     self.emit(
                         self.template.model.model.clone(),
                         SessionEventData::ModelOutput {
+                            response_id: Some(self.response_id.clone()),
                             content: content.clone(),
                         },
                     )
@@ -48,7 +49,10 @@ impl SingleAgentPlan {
                             content.push_str(&delta);
                             self.emit(
                                 self.template.model.model.clone(),
-                                SessionEventData::ModelOutput { content: delta },
+                                SessionEventData::ModelOutput {
+                                    content: delta,
+                                    response_id: Some(self.response_id.clone()),
+                                },
                             )
                             .await?;
                         }
@@ -81,7 +85,51 @@ impl SingleAgentPlan {
         &mut self,
         response: ModelResponse,
     ) -> anyhow::Result<PlanNext> {
-        let (content, tool_calls, finish_reason) = self.consume_model(response).await?;
+        let response_id = self.response_id.clone();
+        let consumed = self.consume_model(response).await;
+        let (content, tool_calls, finish_reason) = match consumed {
+            Ok(value) => value,
+            Err(error) => {
+                self.emit(
+                    self.template.model.model.clone(),
+                    SessionEventData::ModelResponseEnded {
+                        response_id,
+                        disposition: crate::session::ModelResponseDisposition::Failed,
+                    },
+                )
+                .await?;
+                self.response_id.clear();
+                return Err(error);
+            }
+        };
+        let pending = if tool_calls.is_empty() && !content.trim().is_empty() {
+            self.session.take_pending_inputs()
+        } else {
+            Vec::new()
+        };
+        let disposition = if matches!(
+            finish_reason,
+            Some(FinishReason::Length | FinishReason::ContentFilter | FinishReason::FunctionCall)
+        ) {
+            crate::session::ModelResponseDisposition::Failed
+        } else if !tool_calls.is_empty() {
+            crate::session::ModelResponseDisposition::ToolCalls
+        } else if content.trim().is_empty() {
+            crate::session::ModelResponseDisposition::Discarded
+        } else if !pending.is_empty() || !self.persist_session {
+            crate::session::ModelResponseDisposition::Continue
+        } else {
+            crate::session::ModelResponseDisposition::Final
+        };
+        self.emit(
+            self.template.model.model.clone(),
+            SessionEventData::ModelResponseEnded {
+                response_id,
+                disposition,
+            },
+        )
+        .await?;
+        self.response_id.clear();
         match finish_reason {
             Some(FinishReason::Length) => anyhow::bail!(
                 "model output reached max_completion_tokens before producing a complete answer; \
@@ -127,7 +175,6 @@ impl SingleAgentPlan {
             self.unsaved_messages
                 .push(SessionMessage::assistant(content));
 
-            let pending = self.session.take_pending_inputs();
             if !pending.is_empty() {
                 self.append_user_inputs(pending).await?;
                 return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));

@@ -163,7 +163,7 @@ pub fn remove_owned(home: &Path, instance: &str) -> anyhow::Result<()> {
     Ok(())
 }
 pub fn clear_discovery(home: &Path) -> anyhow::Result<()> {
-    for name in ["server.config", "server.token"] {
+    for name in ["server.config", "server.token", "lark.token"] {
         match std::fs::remove_file(home.join(name)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

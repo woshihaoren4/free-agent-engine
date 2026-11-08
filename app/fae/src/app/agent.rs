@@ -44,6 +44,7 @@ pub async fn run(
         _ => unreachable!("clap requires both paths"),
     };
     let mut open = OpenSession {
+        binding: None,
         target: SessionTarget::Agent { source },
         session_id: args.session_id,
         workspace,

@@ -310,6 +310,13 @@ impl SessionEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEventData {
+    ModelResponseStarted {
+        response_id: String,
+    },
+    ModelResponseEnded {
+        response_id: String,
+        disposition: ModelResponseDisposition,
+    },
     NodeCompleted {
         output: Value,
         finished: bool,
@@ -321,6 +328,7 @@ pub enum SessionEventData {
         content: String,
     },
     ModelOutput {
+        response_id: Option<String>,
         content: String,
     },
     ModelReasoning {
@@ -357,6 +365,8 @@ pub enum SessionEventData {
 impl SessionEventData {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ModelResponseStarted { .. } => "model_response_started",
+            Self::ModelResponseEnded { .. } => "model_response_ended",
             SessionEventData::NodeCompleted { .. } => "node_completed",
             SessionEventData::TurnStarted { .. } => "turn_started",
             SessionEventData::UserInput { .. } => "user_input",
@@ -381,12 +391,28 @@ impl SessionEventData {
 
     fn content(&self) -> Value {
         match self {
+            Self::ModelResponseStarted { response_id } => {
+                serde_json::json!({ "response_id": response_id })
+            }
+            Self::ModelResponseEnded {
+                response_id,
+                disposition,
+            } => serde_json::json!({ "response_id": response_id, "disposition": disposition }),
             Self::NodeCompleted { output, finished } => {
                 serde_json::json!({ "output": output, "finished": finished })
             }
             Self::TurnStarted { input } => serde_json::json!({ "input": input }),
+            Self::ModelOutput {
+                content,
+                response_id,
+            } => {
+                let mut value = serde_json::json!({ "content": content });
+                if let Some(id) = response_id {
+                    value["response_id"] = id.clone().into();
+                }
+                value
+            }
             Self::UserInput { content }
-            | Self::ModelOutput { content }
             | Self::ModelReasoning { content }
             | Self::CompressionCompleted { content }
             | Self::Completed { content } => serde_json::json!({ "content": content }),
@@ -472,6 +498,13 @@ impl<'de> serde::Deserialize<'de> for SessionEventData {
 #[derive(serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum KnownSessionEventData {
+    ModelResponseStarted {
+        response_id: String,
+    },
+    ModelResponseEnded {
+        response_id: String,
+        disposition: ModelResponseDisposition,
+    },
     NodeCompleted {
         output: Value,
         #[serde(default)]
@@ -484,6 +517,8 @@ enum KnownSessionEventData {
         content: String,
     },
     ModelOutput {
+        #[serde(default)]
+        response_id: Option<String>,
         content: String,
     },
     ModelReasoning {
@@ -516,12 +551,28 @@ enum KnownSessionEventData {
 impl From<KnownSessionEventData> for SessionEventData {
     fn from(data: KnownSessionEventData) -> Self {
         match data {
+            KnownSessionEventData::ModelResponseStarted { response_id } => {
+                Self::ModelResponseStarted { response_id }
+            }
+            KnownSessionEventData::ModelResponseEnded {
+                response_id,
+                disposition,
+            } => Self::ModelResponseEnded {
+                response_id,
+                disposition,
+            },
             KnownSessionEventData::NodeCompleted { output, finished } => {
                 Self::NodeCompleted { output, finished }
             }
             KnownSessionEventData::TurnStarted { input } => Self::TurnStarted { input },
             KnownSessionEventData::UserInput { content } => Self::UserInput { content },
-            KnownSessionEventData::ModelOutput { content } => Self::ModelOutput { content },
+            KnownSessionEventData::ModelOutput {
+                content,
+                response_id,
+            } => Self::ModelOutput {
+                content,
+                response_id,
+            },
             KnownSessionEventData::ModelReasoning { content } => Self::ModelReasoning { content },
             KnownSessionEventData::CompressionStarted {
                 estimated_tokens,
@@ -565,6 +616,8 @@ fn deserialize_event_data(value: Value) -> serde_json::Result<SessionEventData> 
     let is_known = matches!(
         event_type.as_str(),
         "node_completed"
+            | "model_response_started"
+            | "model_response_ended"
             | "turn_started"
             | "user_input"
             | "model_output"
@@ -617,6 +670,16 @@ fn deserialize_event_data(value: Value) -> serde_json::Result<SessionEventData> 
 
     event.insert("type".to_string(), Value::String(event_type));
     serde_json::from_value::<KnownSessionEventData>(Value::Object(event)).map(Into::into)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResponseDisposition {
+    ToolCalls,
+    Final,
+    Continue,
+    Discarded,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -886,6 +949,7 @@ mod tests {
             7,
             "model",
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "hello".to_string(),
             },
         ));
@@ -898,6 +962,7 @@ mod tests {
         assert_eq!(
             output.event_data().unwrap(),
             SessionEventData::ModelOutput {
+                response_id: None,
                 content: "hello".to_string()
             }
         );
