@@ -33,7 +33,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 LarkCommand::Init { force } => {
                     crate::lark::config::Config::init(
                         &home,
-                        paths::workspace(cli.workspace)?,
+                        paths::workspace(if explicit_workspace {
+                            cli.workspace
+                        } else {
+                            crate::lark::config::default_workspace()
+                        })?,
                         force,
                     )?;
                     println!(

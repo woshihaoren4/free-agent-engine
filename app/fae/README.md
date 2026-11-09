@@ -66,6 +66,7 @@ server commands never start it.
 ```bash
 fae lark init
 # Edit ~/.fae/lark.config: app_id, app_secret, tenant_key, agent_id, workspace.
+# Lark workspace defaults to your home directory (~); override with --workspace when initializing or edit workspace in lark.config.
 fae lark check
 fae lark check --online  # Checks bot credentials without sending a message
 fae lark show           # Redacts the app secret

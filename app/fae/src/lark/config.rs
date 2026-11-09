@@ -10,6 +10,7 @@ pub struct Config {
     pub app_secret: String,
     pub tenant_key: String,
     pub agent_id: String,
+    #[serde(default = "default_workspace")]
     pub workspace: PathBuf,
     #[serde(default)]
     pub group: Group,
@@ -20,6 +21,11 @@ pub struct Config {
     #[serde(default)]
     pub storage: Storage,
 }
+
+pub fn default_workspace() -> PathBuf {
+    PathBuf::from("~")
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Group {
