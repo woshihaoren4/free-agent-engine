@@ -155,7 +155,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         },
         Some(Command::Uninstall) => {
-            daemon::ensure(&home).await?;
             daemon::stop(&home).await?;
             let executable = std::env::current_exe()?;
             tokio::fs::remove_file(&executable).await?;

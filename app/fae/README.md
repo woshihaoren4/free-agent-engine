@@ -378,7 +378,14 @@ fae uninstall
 ```
 
 This first stops the current home's service and leaves `FAE_HOST` and all agent configs, prompts, skills, workflows, and
-session data unchanged.
+session data unchanged. It does not start a service if none is running.
+
+If removing the executable requires administrator privileges, use `sudo` with
+an explicit FAE home so it stops the correct user's service:
+
+```bash
+sudo fae --fae-home /path/to/your/.fae uninstall
+```
 
 ## Workflow
 
