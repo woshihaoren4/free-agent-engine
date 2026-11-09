@@ -17,7 +17,11 @@ impl Fixture {
             }),
         );
         for id in ["parent", "worker"] {
-            std::fs::write(fixture.0.join(format!("agents/{id}_prompt.txt")), "Test Agent").unwrap();
+            std::fs::write(
+                fixture.0.join(format!("agents/{id}_prompt.txt")),
+                "Test Agent",
+            )
+            .unwrap();
         }
         fixture
     }
@@ -39,17 +43,34 @@ impl Fixture {
         nodes.insert("start".into(), json!({"type":"start","next":"n0"}));
         let count = actions.len();
         for (index, action) in actions.into_iter().enumerate() {
-            let next = if index + 1 == count { "end".into() } else { format!("n{}", index + 1) };
-            nodes.insert(format!("n{index}"), json!({"type":"execute","action":action,"next":next}));
+            let next = if index + 1 == count {
+                "end".into()
+            } else {
+                format!("n{}", index + 1)
+            };
+            nodes.insert(
+                format!("n{index}"),
+                json!({"type":"execute","action":action,"next":next}),
+            );
         }
         nodes.insert("end".into(), json!({"type":"end"}));
-        self.write(&format!("workflows/{id}.json"), json!({"id":id,"desc":"CLI fixture","nodes":nodes}));
+        self.write(
+            &format!("workflows/{id}.json"),
+            json!({"id":id,"desc":"CLI fixture","nodes":nodes}),
+        );
     }
     fn check(&self, expected_error: Option<&str>) {
         let output = Command::new(env!("CARGO_BIN_EXE_fae"))
-            .arg("--fae-home").arg(&self.0).args(["lark", "check"])
-            .output().unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            .arg("--fae-home")
+            .arg(&self.0)
+            .args(["lark", "check"])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         match expected_error {
             Some(error) => {
                 assert!(!output.status.success(), "{text}");
@@ -70,45 +91,90 @@ fn cli_checks_transitive_agent_and_workflow_sources_without_looping() {
     let f = Fixture::new();
     f.agent("parent", json!([]), json!(["root"]), json!([]));
     f.agent("worker", json!(["todo"]), json!([]), json!([]));
-    f.workflow("root", vec![json!({"type":"workflow","workflow_id":"child"})]);
-    f.workflow("child", vec![json!({"type":"single_agent","source":{"agent_id":"worker"},"input":"q"})]);
-    f.check(Some("shared todo"));
+    f.workflow(
+        "root",
+        vec![json!({"type":"workflow","workflow_id":"child"})],
+    );
+    f.workflow(
+        "child",
+        vec![json!({"type":"single_agent","source":{"agent_id":"worker"},"input":"q"})],
+    );
+    f.check(None);
 
-    f.workflow("child", vec![json!({
-        "type":"single_agent","source":{"paths":{
-            "config":f.0.join("agents/worker_config.json"),
-            "prompt":f.0.join("agents/worker_prompt.txt")
-        }},"input":"q"
-    })]);
-    f.check(Some("shared todo"));
+    f.workflow(
+        "child",
+        vec![json!({
+            "type":"single_agent","source":{"paths":{
+                "config":f.0.join("agents/worker_config.json"),
+                "prompt":f.0.join("agents/worker_prompt.txt")
+            }},"input":"q"
+        })],
+    );
+    f.check(None);
     f.agent("worker", json!(["default__todo"]), json!([]), json!([]));
-    f.check(Some("shared todo"));
+    f.check(None);
 
     // Both Agent and workflow references cycle. Checking must terminate, and
     // a harmless literal "todo" in a tool argument must not trigger rejection.
-    f.agent("worker", json!(["read_file"]), json!(["child"]), json!(["parent"]));
-    f.workflow("child", vec![
-        json!({"type":"single_agent","source":{"agent_id":"worker"},"input":"todo"}),
-        json!({"type":"workflow","workflow_id":"root"}),
-        json!({"type":"tool","tool_name":"read_file","arguments":{"path":"todo"}}),
-    ]);
+    f.agent(
+        "worker",
+        json!(["read_file"]),
+        json!(["child"]),
+        json!(["parent"]),
+    );
+    f.workflow(
+        "child",
+        vec![
+            json!({"type":"single_agent","source":{"agent_id":"worker"},"input":"todo"}),
+            json!({"type":"workflow","workflow_id":"root"}),
+            json!({"type":"tool","tool_name":"read_file","arguments":{"path":"todo"}}),
+        ],
+    );
     f.check(None);
 }
 
 #[test]
-fn cli_rejects_dynamic_execution_routes_that_could_bypass_todo_check() {
+fn cli_accepts_todo_and_dynamic_execution_routes() {
     let f = Fixture::new();
-    f.agent("parent", json!([]), json!(["root"]), json!([]));
+    f.agent(
+        "parent",
+        json!([
+            "todo",
+            "default__todo",
+            "custom__read_file",
+            "default__agent"
+        ]),
+        json!(["root"]),
+        json!(["worker"]),
+    );
+    f.agent("worker", json!(["todo"]), json!([]), json!([]));
     for action in [
         json!({"type":"custom","task_type":"plan"}),
         json!({"type":"session","request":{"Query":{"agent_id":"worker","user_id":"alice","session_id":"{$input.session}"}}}),
         json!({"type":"tool","tool_name":"default__agent","arguments":{"agent_id":"{$input.agent}","input":"q"}}),
         json!({"type":"tool","tool_name":"workflow","arguments":{"workflow_id":"{$input.workflow}"}}),
         json!({"type":"tool","tool_name":"custom__read_file"}),
+        json!({"type":"tool","tool_name":"todo"}),
+        json!({"type":"tool","tool_name":"default__todo"}),
     ] {
         f.workflow("root", vec![action]);
-        f.check(Some("isolation cannot be verified"));
+        f.check(None);
     }
-    f.workflow("root", vec![json!({"type":"tool","tool_name":"todo"})]);
-    f.check(Some("shared todo"));
+}
+
+#[test]
+fn cli_still_checks_static_dependencies() {
+    let f = Fixture::new();
+    f.agent("parent", json!(["todo"]), json!([]), json!(["worker"]));
+    f.check(Some("load single-agent config"));
+
+    f.agent("worker", json!(["todo"]), json!(["missing"]), json!([]));
+    f.check(Some("No such file or directory"));
+
+    f.workflow(
+        "root",
+        vec![json!({"type":"workflow","workflow_id":"../outside"})],
+    );
+    f.agent("worker", json!(["todo"]), json!(["root"]), json!([]));
+    f.check(Some("must be a static workflow ID"));
 }

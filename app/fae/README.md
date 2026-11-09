@@ -104,14 +104,14 @@ receipt store and appear in status.
 
 Histories and round queues use a stable application/tenant/user/chat hash.
 The same user's private chat and different groups have separate histories;
-user memory and the configured workspace remain shared. The current gateway
-requires Agents and configured sub-Agents without a `todo` route because that
-tool still stores shared agent/user state. Remove `todo` from their `tools`
-arrays before starting. This check follows typed workflow references, including
-Agents loaded by ID or explicit config/prompt paths and nested workflows.
-Dynamic session/custom actions and raw delegating or unverified tool routes
-are rejected because their Todo access cannot be checked before execution.
-This is an enforced startup limitation, not a filesystem sandbox.
+user memory and the configured workspace remain shared. Todo routes are allowed:
+todo state is isolated by plan ID under
+`<home>/session/<agent>/<user>/todo/<plan_id>.json`, and mutations require
+matching plan ownership in the runtime Context. Startup checks still load
+configured Agents, sub-Agents and typed workflow dependencies, including Agents
+loaded by explicit config/prompt paths and nested workflows. Dynamic
+session/custom actions and delegating or custom tool routes are also allowed;
+their dependencies are resolved at runtime. This is not a filesystem sandbox.
 
 `<home>/lark/records` contains private durable receipt and delivery records.
 Completed receipts are kept for seven days by default. The server persists

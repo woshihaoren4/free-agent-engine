@@ -148,14 +148,6 @@ impl Config {
                         continue;
                     }
                     let (config, _) = builder.load_config(&source).await?;
-                    for tool in config.tools {
-                        // These exact names are bounded by sub_agents/workflows
-                        // in SingleAgentPlanBuilder, rather than raw tool routes.
-                        if matches!(tool.as_str(), "agent" | "workflow") {
-                            continue;
-                        }
-                        check_tool(&tool, &format!("Agent `{}`", config.agent.name))?;
-                    }
                     pending.extend(
                         config
                             .sub_agents
@@ -179,7 +171,7 @@ impl Config {
                         home.join("workflows").join(format!("{id}.json")),
                     )
                     .await?;
-                    for (node_id, node) in metadata.nodes {
+                    for node in metadata.nodes.into_values() {
                         let WorkflowNode::Execute { action, .. } = node else {
                             continue;
                         };
@@ -190,18 +182,12 @@ impl Config {
                             WorkflowAction::Workflow { workflow_id, .. } => {
                                 pending.push(Dependency::Workflow(workflow_id));
                             }
-                            WorkflowAction::Tool { tool_name, .. } => {
-                                check_tool(
-                                    &tool_name,
-                                    &format!("workflow `{id}` node `{node_id}`"),
-                                )?;
-                            }
-                            WorkflowAction::Session { .. } | WorkflowAction::Custom { .. } => {
-                                anyhow::bail!(
-                                    "Lark workflow `{id}` node `{node_id}` has a dynamic execution route; todo isolation cannot be verified"
-                                );
-                            }
-                            WorkflowAction::Python { .. } => {}
+                            // Todo isolation is enforced by runtime Context plan
+                            // ownership, including dynamically selected routes.
+                            WorkflowAction::Tool { .. }
+                            | WorkflowAction::Session { .. }
+                            | WorkflowAction::Custom { .. }
+                            | WorkflowAction::Python { .. } => {}
                         }
                     }
                 }
@@ -234,31 +220,4 @@ impl Config {
         };
         crate::server::lifecycle::atomic_write(&path, &serde_json::to_vec_pretty(&config)?, true)
     }
-}
-
-fn check_tool(tool: &str, owner: &str) -> anyhow::Result<()> {
-    let (channel, name) = tool.split_once("__").unwrap_or(("default", tool));
-    anyhow::ensure!(
-        name != "todo",
-        "Lark {owner} exposes shared todo state; remove the todo route before starting"
-    );
-    // Raw agent/workflow/timer tools and custom channels can choose another
-    // execution source at runtime. Only built-in non-delegating routes have a
-    // statically known boundary; typed agent/workflow dependencies are walked above.
-    anyhow::ensure!(
-        channel == "default"
-            && matches!(
-                name,
-                "execute_command"
-                    | "read_file"
-                    | "write_file"
-                    | "list_directory"
-                    | "apply_patch"
-                    | "send_http_request"
-                    | "execute_python"
-                    | "memory_update"
-            ),
-        "Lark {owner} tool `{tool}` has an unverified execution route; todo isolation cannot be verified"
-    );
-    Ok(())
 }
