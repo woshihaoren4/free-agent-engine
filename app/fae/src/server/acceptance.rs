@@ -10,6 +10,8 @@ pub struct Receipt {
     pub round_id: Option<String>,
     pub uncertain: bool,
     #[serde(default)]
+    pub supplemented: bool,
+    #[serde(default)]
     pub outcome: Option<crate::protocol::RoundOutcome>,
 }
 fn path(home: &Path, id: &str) -> Result<PathBuf, ProtocolError> {
@@ -58,6 +60,7 @@ pub fn write(
     digest: String,
     round_id: Option<String>,
     uncertain: bool,
+    supplemented: bool,
 ) -> Result<(), ProtocolError> {
     let path = path(home, id)?;
     std::fs::create_dir_all(path.parent().unwrap())
@@ -69,6 +72,7 @@ pub fn write(
             digest,
             round_id,
             uncertain,
+            supplemented,
             outcome: None,
         })
         .unwrap(),

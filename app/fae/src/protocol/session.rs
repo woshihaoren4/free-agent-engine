@@ -67,6 +67,10 @@ pub enum ClientMessage {
     ExternalInput {
         external_request_id: String,
         input: SessionInput,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        auto_steer: bool,
     },
     Acceptance {
         external_request_id: String,
@@ -105,6 +109,8 @@ pub enum ServerMessage {
     Acceptance {
         round_id: Option<String>,
         uncertain: bool,
+        #[serde(default)]
+        supplemented: bool,
         #[serde(default)]
         outcome: Option<RoundOutcome>,
     },

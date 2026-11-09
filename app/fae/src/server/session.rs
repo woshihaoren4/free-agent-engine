@@ -296,12 +296,15 @@ impl Actor {
                 Ok(ServerMessage::Acceptance {
                     round_id: receipt.as_ref().and_then(|r| r.round_id.clone()),
                     outcome: receipt.as_ref().and_then(|r| r.outcome.clone()),
+                    supplemented: receipt.as_ref().is_some_and(|r| r.supplemented),
                     uncertain: receipt.is_some_and(|r| r.uncertain),
                 })
             }
             ClientMessage::ExternalInput {
                 external_request_id,
                 input,
+                mode,
+                auto_steer,
             } => {
                 if !matches!(self.target, SessionTarget::Agent { .. }) {
                     return Err(ProtocolError::new(
@@ -309,16 +312,30 @@ impl Actor {
                         "Only agents accept external input",
                     ));
                 }
-                let SessionInput::NewChat(data) = input else {
-                    return Err(ProtocolError::new(
-                        "invalid_message",
-                        "External input must start a new round",
-                    ));
+                let explicit_steer = matches!(&input, SessionInput::Supplement(_));
+                let data = match input {
+                    SessionInput::NewChat(data) | SessionInput::Supplement(data) => data,
                 };
+                if mode.as_deref().is_some_and(|m| m != "todo" && m != "chat")
+                    || (explicit_steer && mode.is_some())
+                {
+                    return Err(ProtocolError::new("invalid_message", "Invalid agent mode"));
+                }
                 validate_input(&data).await?;
                 let _lock =
                     super::acceptance::lock(&self.registry.home, &external_request_id).await?;
-                let digest = crate::lark::identity::hash(&[&serde_json::to_string(&data).unwrap()]);
+                // Preserve the digest of legacy new-chat requests.
+                let digest = if mode.is_none() && !auto_steer && !explicit_steer {
+                    crate::lark::identity::hash(&[&serde_json::to_string(&data).unwrap()])
+                } else {
+                    crate::lark::identity::hash(&[&serde_json::to_string(&(
+                        &data,
+                        &mode,
+                        auto_steer,
+                        explicit_steer,
+                    ))
+                    .unwrap()])
+                };
                 if let Some(receipt) = super::acceptance::read(
                     &self.registry.home,
                     &external_request_id,
@@ -329,7 +346,17 @@ impl Actor {
                         round_id: receipt.round_id,
                         uncertain: receipt.uncertain,
                         outcome: receipt.outcome,
+                        supplemented: receipt.supplemented,
                     });
+                }
+                let supplemented = explicit_steer || (auto_steer && self.round.is_some());
+                if supplemented
+                    && (self.round.is_none() || self.cancel_pending || self.session.is_none())
+                {
+                    return Err(ProtocolError::new(
+                        "round_not_active",
+                        "No round accepts steering; it may still be starting",
+                    ));
                 }
                 // Persist intent before launching work. A crash here must never cause a replay.
                 super::acceptance::write(
@@ -339,9 +366,21 @@ impl Actor {
                     digest.clone(),
                     None,
                     true,
+                    supplemented,
                 )?;
-                let round = self.start(Some((data, None))).await?;
-                self.external_request_id = Some(external_request_id.clone());
+                let round = if supplemented {
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .call(SessionInput::Supplement(data))
+                        .await
+                        .map_err(|e| ProtocolError::new("round_not_active", e))?;
+                    self.round.clone().unwrap()
+                } else {
+                    let round = self.start(Some((data, mode))).await?;
+                    self.external_request_id = Some(external_request_id.clone());
+                    round
+                };
                 super::acceptance::write(
                     &self.registry.home,
                     &external_request_id,
@@ -349,7 +388,25 @@ impl Actor {
                     digest,
                     Some(round.clone()),
                     false,
+                    supplemented,
                 )?;
+                if supplemented {
+                    let outcome = RoundOutcome::Succeeded {
+                        result: serde_json::json!("steered"),
+                    };
+                    super::acceptance::finish(
+                        &self.registry.home,
+                        &external_request_id,
+                        &self.key,
+                        outcome.clone(),
+                    )?;
+                    return Ok(ServerMessage::Acceptance {
+                        round_id: Some(round),
+                        uncertain: false,
+                        supplemented: true,
+                        outcome: Some(outcome),
+                    });
+                }
                 Ok(ServerMessage::Ack {
                     round_id: Some(round),
                 })

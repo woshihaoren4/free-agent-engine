@@ -11,7 +11,7 @@ mod store;
 use crate::server::lifecycle::{FileLock, atomic_write};
 use larksuite_oapi_sdk_rs::{EventDispatcher, LarkError};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, watch};
 
 pub async fn check_online(config: config::Config) -> anyhow::Result<()> {
     sdk::Sdk::new(config)?.bot_id().await?;
@@ -31,7 +31,6 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
         &home,
         config.storage.completed_record_retention_days,
     )?);
-    let (incoming, receiver) = mpsc::channel::<String>(1024);
     let (shutdown, stopping) = watch::channel(false);
     let gateway = Arc::new(session::Gateway {
         home: home.clone(),
@@ -40,11 +39,13 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
         sdk: sdk.clone(),
         stopping: stopping.clone(),
         slots: Arc::new(Semaphore::new(config.execution.max_concurrent_rounds)),
+        sessions: Mutex::new(Default::default()),
+        tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
     });
-    let mut router = tokio::spawn(gateway.clone().route(receiver));
     for record in store.pending() {
         if record.outcome.is_none() {
-            incoming.send(record.id).await?;
+            // Restore acceptance before live traffic, without a pending-message queue.
+            gateway.clone().recover(record.id).await;
         }
     }
     let outbox_store = store.clone();
@@ -103,8 +104,9 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let event_store = store.clone();
     let event_config = gateway.config.clone();
     let event_shutdown = stopping.clone();
+    let event_gateway = gateway.clone();
     let dispatcher = EventDispatcher::new("", "").on_p2_im_message_receive_v1(move |event| {
-        let incoming = incoming.clone();
+        let gateway = event_gateway.clone();
         let store = event_store.clone();
         let config = event_config.clone();
         let bot = bot.clone();
@@ -116,16 +118,14 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
             let record = inbound::parse(&config, &bot, event)
                 .map_err(|e| LarkError::Event(e.to_string()))?;
             if let Some(record) = record {
-                let permit = incoming
-                    .clone()
-                    .try_reserve_owned()
-                    .map_err(|_| LarkError::Event("Gateway ingress queue full".into()))?;
                 let id = record.id.clone();
                 // A slow filesystem must not hold the SDK callback past its ACK window.
-                // The reserved queue slot stays with the persistence task even on timeout.
+                // Persistence and dispatch continue even if the SDK's ACK window expires.
+                let handle = tokio::runtime::Handle::current();
                 let persistence = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     if store.insert(record)? {
-                        permit.send(id);
+                        let _guard = handle.enter();
+                        gateway.dispatch(id);
                     }
                     Ok(())
                 });
@@ -176,6 +176,10 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let _ = shutdown.send(true);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     ws_task.abort();
+    let shutdown_gateway = gateway.clone();
+    let mut router = tokio::spawn(async move {
+        shutdown_gateway.shutdown().await;
+    });
     stop_task(&mut router, deadline).await;
     stop_task(&mut outbox, deadline).await;
     // The outbox has exited before this writer takes ownership. One deadline

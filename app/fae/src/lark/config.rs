@@ -44,14 +44,16 @@ impl Default for Group {
 #[serde(default, deny_unknown_fields)]
 pub struct Execution {
     pub max_concurrent_rounds: usize,
-    pub session_queue_capacity: usize,
+    // Accept old config files without publishing a queue setting.
+    #[serde(rename = "session_queue_capacity", skip_serializing)]
+    pub legacy_queue_capacity: Option<usize>,
     pub session_idle_secs: u64,
 }
 impl Default for Execution {
     fn default() -> Self {
         Self {
             max_concurrent_rounds: 4,
-            session_queue_capacity: 16,
+            legacy_queue_capacity: None,
             session_idle_secs: 1800,
         }
     }
@@ -104,10 +106,6 @@ impl Config {
         anyhow::ensure!(
             (1..=8).contains(&config.execution.max_concurrent_rounds),
             "max_concurrent_rounds must be 1..8"
-        );
-        anyhow::ensure!(
-            (1..=256).contains(&config.execution.session_queue_capacity),
-            "session_queue_capacity must be 1..256"
         );
         anyhow::ensure!(
             (1..=86400).contains(&config.execution.session_idle_secs),

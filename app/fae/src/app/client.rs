@@ -300,6 +300,12 @@ impl Client {
         Ok(envelope)
     }
     pub async fn next(&mut self) -> anyhow::Result<ServerMessage> {
+        self.next_message(true).await
+    }
+    pub(crate) async fn next_connected(&mut self) -> anyhow::Result<ServerMessage> {
+        self.next_message(false).await
+    }
+    async fn next_message(&mut self, reconnect: bool) -> anyhow::Result<ServerMessage> {
         loop {
             let envelope = if let Some(envelope) = self.pending.pop_front() {
                 envelope
@@ -307,6 +313,9 @@ impl Client {
                 match self.network_receive().await {
                     Ok(envelope) => envelope,
                     Err(error) => {
+                        if !reconnect {
+                            return Err(error);
+                        }
                         self.reconnect()
                             .await
                             .map_err(|e| anyhow::anyhow!("{error}; reconnect failed: {e}"))?;
@@ -334,7 +343,7 @@ impl Client {
             return Ok(envelope.body);
         }
     }
-    async fn reconnect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn reconnect(&mut self) -> anyhow::Result<()> {
         let mut last = None;
         for delay in [100, 200, 400, 800, 1600] {
             tokio::time::sleep(Duration::from_millis(delay)).await;

@@ -141,7 +141,7 @@ impl Store {
                         &record.binding.tenant_key,
                         &record.message_id
                     )
-                    && record.session_id == super::identity::session_id(&record.binding),
+                    && super::identity::owns_session(&record.binding, &record.session_id),
                 "Corrupt Lark record identity"
             );
             if record

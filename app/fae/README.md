@@ -63,6 +63,20 @@ connection and executes the configured Agent through the local FAE service.
 Creating a configuration never starts the gateway; normal TUI, workflow and
 server commands never start it.
 
+Idle chat sessions accept `/help`, `/status`, `/session`, `/session new`,
+`/session id=<id>`, `/session clean` (or `/clean`), and `/todo <message>`.
+Cleanup removes the current session history and its Agent/user todo state.
+New session IDs are scoped to the current application, tenant, sender `open_id`
+and chat; switching to another binding's session is rejected. The selected
+session survives gateway restarts in `lark/sessions/<binding-session-id>.json`.
+
+While the current session runs, every incoming message is immediately treated
+as steering input, including slash-command text. `/steer <message>` explicitly
+supplements that round and fails when the session is idle. There is no ingress
+or per-session pending-round queue: at the concurrency limit, new rounds are
+rejected with a retry notice; steering an active round bypasses that limit.
+Legacy `session_queue_capacity` settings are accepted and ignored.
+
 ```bash
 fae lark init
 # Edit ~/.fae/lark.config: app_id, app_secret, tenant_key, agent_id, workspace.
@@ -87,9 +101,12 @@ Enable bot capability, publish the application, select long-connection delivery
 and subscribe to `im.message.receive_v1`. Grant
 `im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly`,
 `im:message:send_as_bot`, `im:message.reactions:write_only`,
-`cardkit:card:write` and `contact:user.employee_id:readonly`.
-The last permission supplies the raw Feishu user ID used as Agent identity.
-Missing user IDs produce an error instead of falling back to open ID or master.
+`cardkit:card:write`.
+The sender's Feishu `open_id` is used as the Agent `user_id`; the user ID
+permission `contact:user.employee_id:readonly` is not required for this identity.
+Missing open IDs produce an error instead of falling back to user ID, union ID
+or master. Switching from the previous user ID identity creates separate
+session histories, todo state and user memory; existing data is not migrated.
 Add the bot to the group and @ it; messages from other tenants and bots are ignored.
 Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
 
@@ -102,7 +119,7 @@ history saving. Failures are sent with `ERROR`; CardKit failures fall back to
 text with an explicit degradation notice. Outbound failures remain in the
 receipt store and appear in status.
 
-Histories and round queues use a stable application/tenant/user/chat hash.
+History partitions use a stable application/tenant/user/chat hash.
 The same user's private chat and different groups have separate histories;
 user memory and the configured workspace remain shared. Todo routes are allowed:
 todo state is isolated by plan ID under

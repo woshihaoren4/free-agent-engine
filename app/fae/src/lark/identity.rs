@@ -24,6 +24,20 @@ pub fn session_id(binding: &SessionBinding) -> String {
 pub fn receipt_id(app: &str, tenant: &str, message: &str) -> String {
     hash(&["fae-lark-message-v1", app, tenant, message])
 }
+pub fn owns_session(binding: &SessionBinding, id: &str) -> bool {
+    let base = session_id(binding);
+    id == base
+        || id.strip_prefix(&format!("{base}--")).is_some_and(|suffix| {
+            suffix.len() == 36
+                && suffix.bytes().enumerate().all(|(i, b)| {
+                    if matches!(i, 8 | 13 | 18 | 23) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                })
+        })
+}
 pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
     let binding = open
         .binding
@@ -42,7 +56,9 @@ pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
         "Invalid Lark identity"
     );
     anyhow::ensure!(
-        open.session_id.as_deref() == Some(session_id(binding).as_str()),
+        open.session_id
+            .as_deref()
+            .is_some_and(|id| owns_session(binding, id)),
         "Lark session identity mismatch"
     );
     anyhow::ensure!(

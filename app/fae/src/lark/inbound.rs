@@ -29,7 +29,7 @@ pub fn parse(
         !message.message_id.is_empty() && !message.chat_id.is_empty(),
         "Missing message identity"
     );
-    let user = event.sender.user_id().unwrap_or_default();
+    let user = event.sender.open_id().unwrap_or_default();
     let binding = SessionBinding {
         channel: "lark".into(),
         app_id: config.app_id.clone(),
@@ -41,7 +41,7 @@ pub fn parse(
     let mut rejection = None;
     let mut text = String::new();
     if user.is_empty() {
-        rejection = Some("无法识别飞书用户，请管理员检查 user ID 权限".into());
+        rejection = Some("无法识别飞书用户，消息缺少发送者 open_id".into());
     } else if message.message_type != "text" {
         rejection = Some("目前只支持文本消息".into());
     } else {
@@ -76,4 +76,64 @@ pub fn parse(
         text,
         rejection,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn agent_identity_uses_only_sender_open_id() {
+        let config: Config = serde_json::from_value(json!({
+            "version": 1,
+            "app_id": "app",
+            "app_secret": "secret",
+            "tenant_key": "tenant",
+            "agent_id": "fae"
+        }))
+        .unwrap();
+        for (sender_id, expected_user, accepted) in [
+            (json!({"open_id": "ou_alice"}), "ou_alice", true),
+            (
+                json!({"open_id": "ou_alice", "user_id": "alice", "union_id": "on_alice"}),
+                "ou_alice",
+                true,
+            ),
+            (
+                json!({"user_id": "alice", "union_id": "on_alice"}),
+                "",
+                false,
+            ),
+            (json!({"open_id": "", "user_id": "alice"}), "", false),
+        ] {
+            let event = serde_json::from_value(json!({
+                "sender": {
+                    "sender_id": sender_id,
+                    "sender_type": "user",
+                    "tenant_key": "tenant"
+                },
+                "message": {
+                    "message_id": "message",
+                    "chat_id": "chat",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }))
+            .unwrap();
+            let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+            assert_eq!(record.binding.user_id, expected_user);
+            assert_eq!(record.session_id, session_id(&record.binding));
+            assert_eq!(record.rejection.is_none(), accepted);
+            if accepted {
+                assert_eq!(record.text, "hello");
+            } else {
+                assert_eq!(
+                    record.rejection.as_deref(),
+                    Some("无法识别飞书用户，消息缺少发送者 open_id")
+                );
+            }
+        }
+    }
 }

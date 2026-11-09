@@ -234,6 +234,8 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
     let body = ClientMessage::ExternalInput {
         external_request_id: request_id.clone(),
         input: SessionInput::NewChat("hello".into()),
+        mode: None,
+        auto_steer: false,
     };
     let round = match alice.request(body.clone()).await.unwrap() {
         ServerMessage::Ack { round_id: Some(id) } => id,
@@ -251,7 +253,9 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
         alice
             .request(ClientMessage::ExternalInput {
                 external_request_id: request_id,
-                input: SessionInput::NewChat("different".into())
+                input: SessionInput::NewChat("different".into()),
+                mode: None,
+                auto_steer: false,
             })
             .await
             .is_err()
@@ -292,13 +296,12 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
         .await
         .unwrap();
     assert_eq!(bob.info.user_id, "bob");
-    // The restricted credential cannot perform cleanup.
-    assert!(bob.request(ClientMessage::Clean).await.is_err());
-    bob.request(ClientMessage::Close {
-        cancel_active: false,
-    })
-    .await
-    .unwrap();
+    // Cleanup is allowed only for the bound conversation.
+    assert!(matches!(
+        bob.request(ClientMessage::Clean).await.unwrap(),
+        ServerMessage::Cleaned
+    ));
+    drop(bob);
     alice
         .request(ClientMessage::Close {
             cancel_active: false,
@@ -343,9 +346,10 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
         };
         let mut open = service.agent(&fae::lark::identity::session_id(&binding));
         open.binding = Some(binding);
-        let history = service
-            .home
-            .join(format!("session/fae/alice/{}.jsonl", open.session_id.as_ref().unwrap()));
+        let history = service.home.join(format!(
+            "session/fae/alice/{}.jsonl",
+            open.session_id.as_ref().unwrap()
+        ));
         let mut client = Client::open(&service.home, &service.config, open.clone())
             .await
             .unwrap();
@@ -359,11 +363,15 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
             .request(ClientMessage::ExternalInput {
                 external_request_id: receipt.clone(),
                 input: SessionInput::NewChat(input.into()),
+                mode: None,
+                auto_steer: false,
             })
             .await
             .unwrap()
         {
-            ServerMessage::Ack { round_id: Some(round) } => round,
+            ServerMessage::Ack {
+                round_id: Some(round),
+            } => round,
             other => panic!("{other:?}"),
         };
         assert_eq!(requests.recv().await.unwrap(), input);
@@ -381,7 +389,12 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
             .await
             .unwrap();
             if expected == "cancelled" {
-                client.request(ClientMessage::Cancel { round_id: round.clone() }).await.unwrap();
+                client
+                    .request(ClientMessage::Cancel {
+                        round_id: round.clone(),
+                    })
+                    .await
+                    .unwrap();
             } else {
                 // Saving history fails after model text has already been emitted.
                 std::fs::create_dir_all(&history).unwrap();
@@ -395,11 +408,19 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
                 | ("cancelled", RoundOutcome::Cancelled { .. })
         ));
         let stream = client.stream.clone();
-        client.request(ClientMessage::Close { cancel_active: false }).await.unwrap();
+        client
+            .request(ClientMessage::Close {
+                cancel_active: false,
+            })
+            .await
+            .unwrap();
         drop(client);
         std::fs::remove_file(&config_path).unwrap();
         std::fs::remove_file(&prompt_path).unwrap();
-        open.resume = Some(Resume { stream_id: stream, after_seq: 0 });
+        open.resume = Some(Resume {
+            stream_id: stream,
+            after_seq: 0,
+        });
         let mut resumed = Client::open(&service.home, &service.config, open)
             .await
             .unwrap();
@@ -407,8 +428,16 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
         // The response query buffers earlier replay. A terminal receipt must
         // not make the consumer drop that buffered model text.
         assert!(matches!(
-            resumed.request(ClientMessage::Acceptance { external_request_id: receipt }).await.unwrap(),
-            ServerMessage::Acceptance { outcome: Some(_), .. }
+            resumed
+                .request(ClientMessage::Acceptance {
+                    external_request_id: receipt
+                })
+                .await
+                .unwrap(),
+            ServerMessage::Acceptance {
+                outcome: Some(_),
+                ..
+            }
         ));
         let text = tokio::time::timeout(Duration::from_secs(10), async {
             let mut text = String::new();
@@ -420,15 +449,24 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
                     last_seq = seq;
                 }
                 match message {
-                    ServerMessage::Event { round_id, output, .. } => {
+                    ServerMessage::Event {
+                        round_id, output, ..
+                    } => {
                         assert_eq!(round_id, round);
                         if output.input_type == "model_output" {
                             text.push_str(output.output["content"].as_str().unwrap());
                         }
                     }
-                    ServerMessage::Finished { round_id, outcome: replayed, .. } => {
+                    ServerMessage::Finished {
+                        round_id,
+                        outcome: replayed,
+                        ..
+                    } => {
                         assert_eq!(round_id, round);
-                        assert_eq!(serde_json::to_value(replayed).unwrap(), serde_json::to_value(&outcome).unwrap());
+                        assert_eq!(
+                            serde_json::to_value(replayed).unwrap(),
+                            serde_json::to_value(&outcome).unwrap()
+                        );
                         break text;
                     }
                     ServerMessage::Error(error) => panic!("{error}"),
@@ -440,8 +478,157 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
         .unwrap();
         assert_eq!(text, "mock answer");
         assert!(requests.try_recv().is_err(), "resume reran the model");
-        resumed.request(ClientMessage::Close { cancel_active: false }).await.unwrap();
+        resumed
+            .request(ClientMessage::Close {
+                cancel_active: false,
+            })
+            .await
+            .unwrap();
     }
+    service.stop().await;
+    model_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lark_steers_active_round_without_queue_and_isolates_session_commands() {
+    let (base, mut requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    let path = service.home.join("agents/fae_config.json");
+    let mut agent: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    agent["tools"] = json!([]);
+    agent["skills"] = json!([]);
+    std::fs::write(&path, serde_json::to_vec(&agent).unwrap()).unwrap();
+    std::fs::write(
+        service.home.join("lark.config"),
+        serde_json::to_vec(&json!({
+            "version":1, "app_id":"cli_test", "app_secret":"test-secret",
+            "tenant_key":"tenant", "agent_id":"fae", "workspace":service.home
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let binding = SessionBinding {
+        channel: "lark".into(),
+        user_id: "ou_alice".into(),
+        app_id: "cli_test".into(),
+        tenant_key: "tenant".into(),
+        chat_type: "p2p".into(),
+        chat_id: "chat".into(),
+    };
+    let original = fae::lark::identity::session_id(&binding);
+    let mut open = service.agent(&original);
+    open.binding = Some(binding.clone());
+    let mut client = Client::open(&service.home, &service.config, open.clone())
+        .await
+        .unwrap();
+    let explicit = ClientMessage::ExternalInput {
+        external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "idle-steer"),
+        input: SessionInput::Supplement("idle".into()),
+        mode: None,
+        auto_steer: true,
+    };
+    assert!(client.request(explicit).await.is_err());
+    assert!(requests.try_recv().is_err());
+    let round = match client
+        .request(ClientMessage::ExternalInput {
+            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "initial"),
+            input: SessionInput::NewChat("stream then wait".into()),
+            mode: None,
+            auto_steer: true,
+        })
+        .await
+        .unwrap()
+    {
+        ServerMessage::Ack {
+            round_id: Some(round),
+        } => round,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(requests.recv().await.unwrap(), "stream then wait");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerMessage::Event { output, .. } = client.next().await.unwrap() {
+                if output.input_type == "model_output" {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(client.request(ClientMessage::Clean).await.is_err());
+    // Ordinary input and command text both steer the existing round.
+    for (message_id, text) in [("supplement", "new instructions"), ("command", "/clean")] {
+        let body = ClientMessage::ExternalInput {
+            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", message_id),
+            input: SessionInput::NewChat(text.into()),
+            mode: None,
+            auto_steer: true,
+        };
+        for _ in 0..2 {
+            match client.request(body.clone()).await.unwrap() {
+                ServerMessage::Acceptance {
+                    round_id: Some(id),
+                    supplemented: true,
+                    uncertain: false,
+                    ..
+                } => assert_eq!(id, round),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    assert!(
+        matches!(client.request(ClientMessage::Status).await.unwrap(),
+        ServerMessage::Status(SessionStatus { round_id: Some(id), .. }) if id == round)
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "a supplemental input started a queued model round"
+    );
+    client
+        .request(ClientMessage::Cancel {
+            round_id: round.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&mut client).await.1,
+        RoundOutcome::Cancelled { .. }
+    ));
+    assert!(
+        requests.try_recv().is_err(),
+        "supplements ran after cancellation"
+    );
+    client.request(ClientMessage::Clean).await.unwrap();
+    drop(client);
+    let selected = format!("{original}--{}", wd_tools::uuid::v4());
+    open.session_id = Some(selected.clone());
+    let mut replacement = Client::open(&service.home, &service.config, open.clone())
+        .await
+        .unwrap();
+    assert_eq!(replacement.info.session_id, selected);
+    replacement
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    drop(replacement);
+    let mut other = binding.clone();
+    other.chat_id = "another-chat".into();
+    open.session_id = Some(fae::lark::identity::session_id(&other));
+    assert!(
+        Client::open(&service.home, &service.config, open.clone())
+            .await
+            .is_err()
+    );
+    open.session_id = Some(format!("{original}--../../escape"));
+    assert!(
+        Client::open(&service.home, &service.config, open)
+            .await
+            .is_err()
+    );
     service.stop().await;
     model_task.abort();
 }

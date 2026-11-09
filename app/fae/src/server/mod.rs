@@ -111,7 +111,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                         if let Some((_, _, tx)) = &binding {
                             if route == "/v2/lark/session" && !matches!(request.body,
                                 ClientMessage::ExternalInput { .. } | ClientMessage::Acceptance { .. } |
-                                ClientMessage::Status | ClientMessage::Cancel { .. } | ClientMessage::Close { .. }) {
+                                ClientMessage::Clean | ClientMessage::Status | ClientMessage::Cancel { .. } | ClientMessage::Close { .. }) {
                                 out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
                                     ServerMessage::Error(ProtocolError::new("forbidden", "Lark route does not allow this operation"))));
                                 continue;
