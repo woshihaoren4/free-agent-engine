@@ -328,13 +328,9 @@ impl Actor {
                 let digest = if mode.is_none() && !auto_steer && !explicit_steer {
                     crate::lark::identity::hash(&[&serde_json::to_string(&data).unwrap()])
                 } else {
-                    crate::lark::identity::hash(&[&serde_json::to_string(&(
-                        &data,
-                        &mode,
-                        auto_steer,
-                        explicit_steer,
-                    ))
-                    .unwrap()])
+                    crate::lark::identity::hash(&[&serde_json::to_string(
+                        &(&data, &mode, auto_steer, explicit_steer),
+                    ).unwrap()])
                 };
                 if let Some(receipt) = super::acceptance::read(
                     &self.registry.home,
@@ -350,13 +346,8 @@ impl Actor {
                     });
                 }
                 let supplemented = explicit_steer || (auto_steer && self.round.is_some());
-                if supplemented
-                    && (self.round.is_none() || self.cancel_pending || self.session.is_none())
-                {
-                    return Err(ProtocolError::new(
-                        "round_not_active",
-                        "No round accepts steering; it may still be starting",
-                    ));
+                if supplemented && (self.round.is_none() || self.cancel_pending || self.session.is_none()) {
+                    return Err(ProtocolError::new("round_not_active", "No round accepts steering; it may still be starting"));
                 }
                 // Persist intent before launching work. A crash here must never cause a replay.
                 super::acceptance::write(
@@ -369,11 +360,8 @@ impl Actor {
                     supplemented,
                 )?;
                 let round = if supplemented {
-                    self.session
-                        .as_ref()
-                        .unwrap()
-                        .call(SessionInput::Supplement(data))
-                        .await
+                    self.session.as_ref().unwrap()
+                        .call(SessionInput::Supplement(data)).await
                         .map_err(|e| ProtocolError::new("round_not_active", e))?;
                     self.round.clone().unwrap()
                 } else {
@@ -391,15 +379,8 @@ impl Actor {
                     supplemented,
                 )?;
                 if supplemented {
-                    let outcome = RoundOutcome::Succeeded {
-                        result: serde_json::json!("steered"),
-                    };
-                    super::acceptance::finish(
-                        &self.registry.home,
-                        &external_request_id,
-                        &self.key,
-                        outcome.clone(),
-                    )?;
+                    let outcome = RoundOutcome::Succeeded { result: serde_json::json!("steered") };
+                    super::acceptance::finish(&self.registry.home, &external_request_id, &self.key, outcome.clone())?;
                     return Ok(ServerMessage::Acceptance {
                         round_id: Some(round),
                         uncertain: false,

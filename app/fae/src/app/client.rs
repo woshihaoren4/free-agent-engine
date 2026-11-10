@@ -95,7 +95,7 @@ impl Drop for Transport {
     }
 }
 pub async fn connect(home: &Path, config: &ServerConfig, route: &str) -> anyhow::Result<Socket> {
-    let path = home.join(if route == "/v2/lark/session" {
+    let path = home.join(if route == "/v3/lark/session" {
         "lark.token"
     } else {
         "server.token"
@@ -210,7 +210,7 @@ impl Client {
             home,
             config,
             if open.binding.is_some() {
-                "/v2/lark/session"
+                "/v3/lark/session"
             } else {
                 "/v1/session"
             },

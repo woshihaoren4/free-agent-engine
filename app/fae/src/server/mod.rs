@@ -86,7 +86,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                 let shutdown = shutdown.clone();
                 connections.spawn(async move {
                     let Ok((ws, route)) = connection::upgrade(stream, token, lark_token).await else { return };
-                    if route == "/v2/lark/session" && !peer.ip().is_loopback() { return; }
+                    if route == "/v3/lark/session" && !peer.ip().is_loopback() { return; }
                     let (out, mut input, transport) = connection::transport(ws);
                     let _guard = connection::ConnectionGuard(out.clone());
                     let mut binding = None;
@@ -105,11 +105,11 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                         };
                         if request.version != VERSION {
                             out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
-                                ServerMessage::Error(ProtocolError::new("unsupported_version", "Protocol version must be 2"))));
+                                ServerMessage::Error(ProtocolError::new("unsupported_version", "Protocol version must be 3"))));
                             break;
                         }
                         if let Some((_, _, tx)) = &binding {
-                            if route == "/v2/lark/session" && !matches!(request.body,
+                            if route == "/v3/lark/session" && !matches!(request.body,
                                 ClientMessage::ExternalInput { .. } | ClientMessage::Acceptance { .. } |
                                 ClientMessage::Clean | ClientMessage::Status | ClientMessage::Cancel { .. } | ClientMessage::Close { .. }) {
                                 out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
@@ -121,7 +121,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                             if tx.send(session::Command::Request(request)).await.is_err() { break; }
                             if close { break; }
                         } else if let ClientMessage::Open(open) = request.body {
-                            let validation = if route == "/v2/lark/session" {
+                            let validation = if route == "/v3/lark/session" {
                                 match crate::lark::config::Config::load(&registry.home) {
                                     Ok(config) => {
                                         // Registry::open verifies the complete immutable binding

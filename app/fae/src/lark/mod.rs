@@ -7,6 +7,7 @@ mod output;
 mod sdk;
 mod session;
 mod store;
+mod thread;
 
 use crate::server::lifecycle::{FileLock, atomic_write};
 use larksuite_oapi_sdk_rs::{EventDispatcher, LarkError};
@@ -177,9 +178,7 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     ws_task.abort();
     let shutdown_gateway = gateway.clone();
-    let mut router = tokio::spawn(async move {
-        shutdown_gateway.shutdown().await;
-    });
+    let mut router = tokio::spawn(async move { shutdown_gateway.shutdown().await; });
     stop_task(&mut router, deadline).await;
     stop_task(&mut outbox, deadline).await;
     // The outbox has exited before this writer takes ownership. One deadline

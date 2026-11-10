@@ -20,10 +20,42 @@ pub struct Key {
     pub user: String,
     pub session: String,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredLarkBinding {
+    open: OpenSession,
+    target_id: String,
+}
 
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
+    #[test]
+    fn thread_binding_survives_registry_restart_and_preserves_actual_agent() {
+        let home = std::env::temp_dir().join(format!("fae-binding-{}", wd_tools::uuid::v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let binding: SessionBinding = serde_json::from_value(serde_json::json!({
+            "session_mapping_version":2,"thread_id":"omt_T1","channel":"lark","user_id":"ou_a",
+            "app_id":"app","tenant_key":"tenant","chat_type":"group","chat_id":"chat"
+        })).unwrap();
+        let open = OpenSession {
+            target: SessionTarget::Agent { source: fae_agent::SingleAgentSource::AgentId("source".into()) },
+            session_id: Some("omt_T1".into()), workspace: home.clone(), resume: None, binding: Some(binding),
+        };
+        let key = Key { kind: "agent".into(), target: "actual-agent".into(), user: "ou_a".into(), session: "omt_T1".into() };
+        Registry::new(home.clone(), "first".into()).persist_lark_binding(&open, &key).unwrap();
+        let restarted = Registry::new(home.clone(), "second".into());
+        restarted.persist_lark_binding(&open, &key).unwrap();
+        let mut conflicting = open.clone();
+        conflicting.binding.as_mut().unwrap().chat_id = "other-chat".into();
+        assert!(restarted.persist_lark_binding(&conflicting, &key).is_err());
+        let mut renamed = key.clone();
+        renamed.target = "renamed-agent".into();
+        assert!(restarted.persist_lark_binding(&open, &renamed).is_err());
+        conflicting = open.clone();
+        conflicting.workspace = home.join("other-workspace");
+        assert!(restarted.persist_lark_binding(&conflicting, &key).is_err());
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[tokio::test]
     async fn shutdown_waits_for_cleanup_after_command_receiver_closes() {
@@ -110,6 +142,56 @@ pub struct Registry {
     pub timer: Option<fae_engine::TimerHandle>,
 }
 impl Registry {
+    fn persist_lark_binding(&self, open: &OpenSession, key: &Key) -> Result<(), ProtocolError> {
+        let Some(binding) = &open.binding else {
+            return Ok(());
+        };
+        if binding.session_mapping_version != 2 {
+            return Ok(());
+        }
+        let check = || -> anyhow::Result<()> {
+            anyhow::ensure!(
+                crate::lark::identity::owns_session(binding, &key.session),
+                "Thread/session mismatch"
+            );
+            let dir = self.home.join("lark/service-bindings");
+            std::fs::create_dir_all(&dir)?;
+            // Agent, application and chat are immutable properties, not part of
+            // the lookup key: changing any must conflict even after actor eviction.
+            let id = crate::lark::identity::hash(&[
+                "fae-lark-service-binding-v2",
+                &key.user,
+                &key.session,
+            ]);
+            let path = dir.join(format!("{id}.json"));
+            let mut proposed = open.clone();
+            proposed.resume = None;
+            proposed.session_id = Some(key.session.clone());
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let saved: StoredLarkBinding = serde_json::from_slice(&bytes)?;
+                    anyhow::ensure!(
+                        saved.open.binding == proposed.binding
+                            && saved.target_id == key.target
+                            && saved.open.workspace == proposed.workspace
+                            && serde_json::to_value(&saved.open.target)?
+                                == serde_json::to_value(&proposed.target)?,
+                        "Session binding cannot change"
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let saved = StoredLarkBinding {
+                        open: proposed,
+                        target_id: key.target.clone(),
+                    };
+                    super::lifecycle::atomic_write(&path, &serde_json::to_vec(&saved)?, true)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            Ok(())
+        };
+        check().map_err(|e| ProtocolError::new("session_binding_conflict", e))
+    }
     pub fn new(home: PathBuf, instance: String) -> Arc<Self> {
         Arc::new(Self {
             home,
@@ -385,6 +467,7 @@ impl Registry {
                     "Service is stopping",
                 ));
             }
+            self.persist_lark_binding(&open, &key)?;
             if let Some(entry) = state.entries.get_mut(&key) {
                 if entry.closing {
                     return Err(ProtocolError::new(

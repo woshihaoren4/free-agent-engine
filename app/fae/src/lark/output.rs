@@ -151,6 +151,8 @@ mod tests {
     #[test]
     fn hides_tools_and_waits_for_round_success() {
         let binding = SessionBinding {
+            session_mapping_version: 1,
+            thread_id: String::new(),
             channel: "lark".into(),
             app_id: "a".into(),
             tenant_key: "t".into(),

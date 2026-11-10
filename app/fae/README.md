@@ -63,15 +63,22 @@ connection and executes the configured Agent through the local FAE service.
 Creating a configuration never starts the gateway; normal TUI, workflow and
 server commands never start it.
 
-Idle chat sessions accept `/help`, `/status`, `/session`, `/session new`,
-`/session id=<id>`, `/session clean` (or `/clean`), and `/todo <message>`.
-Cleanup removes the current session history and its Agent/user todo state.
-New session IDs are scoped to the current application, tenant, sender `open_id`
-and chat; switching to another binding's session is rejected. The selected
-session survives gateway restarts in `lark/sessions/<binding-session-id>.json`.
+Each ordinary message outside a thread creates a thread with a short acceptance
+reply before Agent execution. The real Feishu `thread_id` is the session ID;
+messages inside that thread continue its session, isolated by sender `open_id`.
+Group messages always require @bot, including thread replies and commands.
+Chats that cannot return a real thread ID do not execute the Agent.
+
+Idle thread sessions accept `/help`, `/status`, `/session`, `/session clean`
+(or `/clean`), and `/todo <message>`. Cleanup keeps the thread binding.
+`/session new` asks users to send a message outside the thread; `/session id=<id>`
+asks them to reply in the corresponding thread. Management commands outside
+threads do not operate on a previous session. Durable bindings survive receipt
+retention and actor eviction. Old chat histories and selection files are retained
+but are not used for newly received messages.
 
 While the current session runs, every incoming message is immediately treated
-as steering input, including slash-command text. `/steer <message>` explicitly
+as steering input, including slash-command text except session switching. `/steer <message>` explicitly
 supplements that round and fails when the session is idle. There is no ingress
 or per-session pending-round queue: at the concurrency limit, new rounds are
 rejected with a retry notice; steering an active round bypasses that limit.
@@ -96,6 +103,8 @@ directory. Use `--fae-home`/`FAE_HOST` to change the home. Edit the configuratio
 and restart the gateway to apply changes. A conflicting explicit `--workspace`
 is rejected. The init template contains placeholders and cannot be started
 until credentials are filled in.
+Thread replies are mandatory. Old `group.reply_in_thread=false` settings are
+accepted with a notice and normalized to `true`.
 
 Enable bot capability, publish the application, select long-connection delivery
 and subscribe to `im.message.receive_v1`. Grant
@@ -111,6 +120,8 @@ Add the bot to the group and @ it; messages from other tenants and bots are igno
 Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
 
 Accepted messages receive a `Typing` reaction immediately on a separate task.
+New threads are created with a `Typing` emoji reply. Once all final output has
+been delivered, the gateway withdraws that reply and removes the reaction.
 Each top-level model response gets its own streaming card; tool execution,
 reasoning and child-Agent internals are hidden. Cards are updated with the
 accumulated text, normally every 300 ms, and long replies are paginated on
@@ -146,9 +157,9 @@ Its delivery budget is shared across all records within a 25-second shutdown
 deadline; records that remain undelivered are retried on the next start.
 
 The gateway has a private loopback control socket and instance handshake.
-Its service credential (`lark.token`) only opens `/v2/lark/session` and cannot
-initialize agents, clean user data or stop the service. Wire protocol v2
-requires restarting any previously running v1 service after upgrading.
+Its service credential (`lark.token`) only opens `/v3/lark/session` and cannot
+initialize agents, clean user data or stop the service. Wire protocol v3
+requires restarting previously running services after upgrading.
 
 For live acceptance, test private chat and @bot group chat, a response containing
 both text and tool calls, a failed Agent round, duplicate message delivery,

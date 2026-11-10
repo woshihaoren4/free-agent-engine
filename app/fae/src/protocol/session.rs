@@ -29,12 +29,20 @@ pub struct OpenSession {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBinding {
+    #[serde(default = "legacy_mapping_version")]
+    pub session_mapping_version: u16,
+    #[serde(default)]
+    pub thread_id: String,
     pub channel: String,
     pub user_id: String,
     pub app_id: String,
     pub tenant_key: String,
     pub chat_type: String,
     pub chat_id: String,
+}
+
+pub fn legacy_mapping_version() -> u16 {
+    1
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

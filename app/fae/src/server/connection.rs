@@ -80,7 +80,7 @@ pub async fn upgrade(
             stream,
             move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
                 let authorization = format!("Bearer {token}");
-                let lark = request.uri().path() == "/v2/lark/session";
+                let lark = request.uri().path() == "/v3/lark/session";
                 let authorization = if lark {
                     format!("Bearer {lark_token}")
                 } else {
@@ -93,7 +93,7 @@ pub async fn upgrade(
                     && !request.headers().contains_key("origin")
                     && matches!(
                         request.uri().path(),
-                        "/v1/control" | "/v1/session" | "/v2/lark/session"
+                        "/v1/control" | "/v1/session" | "/v3/lark/session"
                     );
                 if !accepted {
                     return Err(Response::builder()

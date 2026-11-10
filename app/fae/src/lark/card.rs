@@ -112,6 +112,10 @@ impl Writer {
                 http::Method::PUT,
                 format!("/open-apis/cardkit/v1/cards/{card_id}/elements/status/content"),
             ),
+            "finish" => (
+                http::Method::DELETE,
+                format!("/open-apis/cardkit/v1/cards/{card_id}/elements/status"),
+            ),
             _ => (
                 http::Method::PATCH,
                 format!("/open-apis/cardkit/v1/cards/{card_id}/settings"),
@@ -148,7 +152,7 @@ impl Writer {
             if mutation.kind == "content" {
                 c.sent_text = mutation.body["content"].as_str().unwrap_or_default().into();
             }
-            if mutation.kind == "close" {
+            if matches!(mutation.kind.as_str(), "close" | "finish") {
                 c.closed = true;
             }
             if mutation.kind == "reopen" {
@@ -177,12 +181,7 @@ impl Writer {
                     let text = format!("流式回复失败，以下为完整结果：\n{}", card.text);
                     let reply = self
                         .sdk
-                        .text(
-                            &record.message_id,
-                            &record.binding.chat_id,
-                            &text,
-                            &card.reply_uuid,
-                        )
+                        .text_record(&self.store, id, &text, &card.reply_uuid)
                         .await?;
                     self.change(id, index, |c| {
                         c.reply_id = Some(reply);
@@ -220,9 +219,9 @@ impl Writer {
                 })?;
                 let reply = self
                     .sdk
-                    .reply(
-                        &record.message_id,
-                        &record.binding.chat_id,
+                    .reply_record(
+                        &self.store,
+                        id,
                         "interactive",
                         json!({
                             "type":"card","data":{"card_id":card.card_id}
@@ -249,16 +248,38 @@ impl Writer {
                     "未完成"
                 } else if record.outcome.as_deref() == Some("cancelled") {
                     "已取消"
-                } else if card.ended {
-                    "中间回复"
                 } else {
-                    "已完成"
+                    ""
                 };
-                self.mutation(id, index, "status", json!({"content":status}))
-                    .await?;
-                self.mutation(id, index, "close", json!({
-                    "settings":json!({"streaming_mode":false,"summary":{"content":status}}).to_string()
+                if !status.is_empty() {
+                    self.mutation(id, index, "status", json!({"content":status}))
+                        .await?;
+                }
+                let summary = if status.is_empty() {
+                    self.store.get(id).responses[index]
+                        .text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(100)
+                        .collect::<String>()
+                } else {
+                    status.to_owned()
+                };
+                // Structural edits follow streaming shutdown. Successful replies
+                // remove the status element rather than submitting empty content.
+                let close_kind = if status.is_empty() {
+                    "stop_stream"
+                } else {
+                    "close"
+                };
+                self.mutation(id, index, close_kind, json!({
+                    "settings":json!({"streaming_mode":false,"summary":{"content":summary}}).to_string()
                 })).await?;
+                if status.is_empty() {
+                    self.mutation(id, index, "finish", json!({})).await?;
+                }
             }
         }
         let record = self.store.get(id);
@@ -273,12 +294,7 @@ impl Writer {
                     r.notice_attempt.get_or_insert(now);
                 })?;
                 self.sdk
-                    .text(
-                        &record.message_id,
-                        &record.binding.chat_id,
-                        notice,
-                        &record.notice_uuid,
-                    )
+                    .text_record(&self.store, id, notice, &record.notice_uuid)
                     .await?;
                 self.store.update(id, |r| r.notice_sent = true)?;
             }
@@ -290,6 +306,11 @@ impl Writer {
                 .all(|c| c.closed || c.text.trim().is_empty())
             && (record.notice.is_none() || self.store.get(id).notice_sent)
         {
+            if record.thread_reply_pending_removal && !record.thread_reply_message_id.is_empty() {
+                self.sdk.withdraw(&record.thread_reply_message_id).await?;
+                self.store
+                    .update(id, |r| r.thread_reply_pending_removal = false)?;
+            }
             if let Some(reaction) = &record.reaction_id {
                 self.sdk.untype(&record.message_id, reaction).await?;
             }
@@ -426,7 +447,7 @@ mod tests {
                 } else if path == "/open-apis/cardkit/v1/cards" {
                     json!({"code":0,"data":{"card_id":"card-1"}})
                 } else if path.ends_with("/reply") {
-                    json!({"code":0,"data":{"message_id":"reply-1"}})
+                    json!({"code":0,"data":{"message_id":"reply-1","thread_id":"omt_card","chat_id":"chat","root_id":"message"}})
                 } else if path.ends_with("/answer/content") && !failed_once {
                     failed_once = true;
                     json!({"code":99991400,"msg":"temporary failure"})
@@ -443,6 +464,8 @@ mod tests {
         let sdk = Sdk::for_test(config, base);
         let store = Arc::new(Store::open(&home, 7).unwrap());
         let binding = crate::protocol::SessionBinding {
+            session_mapping_version: 2,
+            thread_id: "omt_card".into(),
             channel: "lark".into(),
             app_id: "app".into(),
             tenant_key: "tenant".into(),
@@ -497,6 +520,12 @@ mod tests {
                 .filter(|(p, _)| p.ends_with("/reply"))
                 .count(),
             1
+        );
+        assert!(
+            observed
+                .iter()
+                .filter(|(p, _)| p.ends_with("/reply"))
+                .all(|(_, b)| b["reply_in_thread"] == true)
         );
         let sequences: Vec<_> = observed
             .iter()

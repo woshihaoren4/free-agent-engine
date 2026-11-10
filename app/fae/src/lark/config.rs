@@ -22,6 +22,24 @@ pub struct Config {
     pub storage: Storage,
 }
 
+#[cfg(test)]
+mod thread_config_tests {
+    use super::*;
+    #[test]
+    fn old_false_setting_is_normalized_to_mandatory_thread_replies() {
+        let home = std::env::temp_dir().join(format!("fae-thread-config-{}", wd_tools::uuid::v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let value = serde_json::json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae",
+            "workspace":home,"group":{"require_mention":true,"reply_in_thread":false}
+        });
+        std::fs::write(home.join("lark.config"), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(Config::load(&home).unwrap().group.reply_in_thread);
+        assert!(Group::default().reply_in_thread);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
 pub fn default_workspace() -> PathBuf {
     PathBuf::from("~")
 }
@@ -36,7 +54,7 @@ impl Default for Group {
     fn default() -> Self {
         Self {
             require_mention: true,
-            reply_in_thread: false,
+            reply_in_thread: true,
         }
     }
 }
@@ -103,6 +121,10 @@ impl Config {
             config.group.require_mention,
             "Group messages must require @bot"
         );
+        if !config.group.reply_in_thread {
+            eprintln!("group.reply_in_thread=false is obsolete; thread replies are required");
+            config.group.reply_in_thread = true;
+        }
         anyhow::ensure!(
             (1..=8).contains(&config.execution.max_concurrent_rounds),
             "max_concurrent_rounds must be 1..8"

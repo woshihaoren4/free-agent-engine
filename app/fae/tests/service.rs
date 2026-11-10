@@ -217,6 +217,8 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
     )
     .unwrap();
     let binding = SessionBinding {
+        session_mapping_version: 2,
+        thread_id: "omt_group".into(),
         channel: "lark".into(),
         user_id: "alice".into(),
         app_id: "cli_test".into(),
@@ -230,6 +232,7 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
         .await
         .unwrap();
     assert_eq!(alice.info.user_id, "alice");
+    assert_eq!(alice.info.session_id, "omt_group");
     let request_id = fae::lark::identity::receipt_id("cli_test", "tenant", "message");
     let body = ClientMessage::ExternalInput {
         external_request_id: request_id.clone(),
@@ -278,7 +281,7 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
             .contains("mock answer")
     );
     // A different user's canonical session cannot resume another user's stream.
-    let mut bob = binding;
+    let mut bob = binding.clone();
     bob.user_id = "bob".into();
     open.binding = Some(bob.clone());
     open.session_id = Some(fae::lark::identity::session_id(&bob));
@@ -308,6 +311,13 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
         })
         .await
         .unwrap();
+    // Closing releases the actor. The durable binding must still reject
+    // reopening the same user/thread under another chat.
+    let mut conflict = service.agent("omt_group");
+    let mut other_chat = binding;
+    other_chat.chat_id = "another-chat".into();
+    conflict.binding = Some(other_chat);
+    assert!(Client::open(&service.home, &service.config, conflict).await.is_err());
     service.stop().await;
     model_task.abort();
 }
@@ -337,6 +347,8 @@ async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
         std::fs::write(&config_path, &config_bytes).unwrap();
         std::fs::write(&prompt_path, &prompt_bytes).unwrap();
         let binding = SessionBinding {
+            session_mapping_version: 2,
+            thread_id: format!("omt_{expected}"),
             channel: "lark".into(),
             app_id: "cli_test".into(),
             tenant_key: "tenant".into(),
@@ -509,6 +521,8 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     )
     .unwrap();
     let binding = SessionBinding {
+        session_mapping_version: 2,
+        thread_id: "omt_steer".into(),
         channel: "lark".into(),
         user_id: "ou_alice".into(),
         app_id: "cli_test".into(),
@@ -557,6 +571,22 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     })
     .await
     .unwrap();
+    // A different thread opens an independent round while T1 is still busy.
+    let mut second_open = open.clone();
+    second_open.session_id = Some("omt_parallel".into());
+    second_open.binding.as_mut().unwrap().thread_id = "omt_parallel".into();
+    let mut second = Client::open(&service.home, &service.config, second_open).await.unwrap();
+    assert!(matches!(second.request(ClientMessage::Status).await.unwrap(),
+        ServerMessage::Status(SessionStatus { round_id: None, .. })));
+    let accepted = second.request(ClientMessage::ExternalInput {
+        external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "parallel"),
+        input: SessionInput::NewChat("hello from T2".into()), mode: None, auto_steer: true,
+    }).await.unwrap();
+    assert!(matches!(accepted, ServerMessage::Ack { round_id: Some(_)}));
+    assert!(matches!(finish(&mut second).await.1, RoundOutcome::Succeeded { .. }));
+    assert_eq!(requests.recv().await.unwrap(), "hello from T2");
+    second.request(ClientMessage::Close { cancel_active: false }).await.unwrap();
+    drop(second);
     assert!(client.request(ClientMessage::Clean).await.is_err());
     // Ordinary input and command text both steer the existing round.
     for (message_id, text) in [("supplement", "new instructions"), ("command", "/clean")] {
@@ -602,8 +632,9 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     );
     client.request(ClientMessage::Clean).await.unwrap();
     drop(client);
-    let selected = format!("{original}--{}", wd_tools::uuid::v4());
+    let selected = "omt_another".to_owned();
     open.session_id = Some(selected.clone());
+    open.binding.as_mut().unwrap().thread_id = selected.clone();
     let mut replacement = Client::open(&service.home, &service.config, open.clone())
         .await
         .unwrap();
@@ -617,12 +648,14 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     drop(replacement);
     let mut other = binding.clone();
     other.chat_id = "another-chat".into();
-    open.session_id = Some(fae::lark::identity::session_id(&other));
+    open.session_id = Some(original.clone());
+    open.binding = Some(other);
     assert!(
         Client::open(&service.home, &service.config, open.clone())
             .await
             .is_err()
     );
+    open.binding = Some(binding);
     open.session_id = Some(format!("{original}--../../escape"));
     assert!(
         Client::open(&service.home, &service.config, open)

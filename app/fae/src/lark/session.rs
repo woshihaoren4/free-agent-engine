@@ -15,7 +15,6 @@ struct Owner {
 }
 #[derive(Default)]
 pub struct LiveSession {
-    selected: String,
     client: Option<Client>,
     owners: HashMap<String, Owner>,
     monitoring: bool,
@@ -29,6 +28,9 @@ pub struct Gateway {
     pub slots: Arc<Semaphore>,
     pub sessions: Mutex<HashMap<String, Arc<Mutex<LiveSession>>>>,
     pub tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+fn thread_help() -> &'static str {
+    "话题外发送普通消息开始新会话；话题内发送消息继续当前会话。\n群聊话题内外均需 @智能体。\n/status, /session  查看当前话题状态\n/todo <message>  规划并执行\n/session clean, /clean  清理当前话题历史和 todos\n/steer <message>  补充当前话题执行\n执行中所有输入自动作为 /steer"
 }
 impl Gateway {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
@@ -59,7 +61,14 @@ impl Gateway {
     }
     pub fn fail(&self, id: &str, error: &str) {
         let safe = self.sdk.sanitize(error);
+        eprintln!("Lark input {id} failed: {safe}");
         let _ = self.store.update(id, |r| {
+            if r.session_mapping_version == 2
+                && r.thread_state == super::store::ThreadState::AcceptanceUnknown
+            {
+                r.last_error = Some(safe.clone());
+                return;
+            }
             r.state = State::Delivering;
             r.outcome = Some("failed".into());
             r.notice = Some(format!("ERROR：{safe}\n追踪：{}", &r.id[..12]));
@@ -73,29 +82,9 @@ impl Gateway {
         })?;
         Ok(())
     }
-    fn selection_path(&self, binding: &SessionBinding) -> PathBuf {
-        self.home
-            .join("lark/sessions")
-            .join(format!("{}.json", identity::session_id(binding)))
-    }
-    fn select(
-        &self,
-        live: &mut LiveSession,
-        binding: &SessionBinding,
-        id: String,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            identity::owns_session(binding, &id),
-            "只能切换到当前用户和聊天所属的 session"
-        );
-        let path = self.selection_path(binding);
-        std::fs::create_dir_all(path.parent().unwrap())?;
-        crate::server::lifecycle::atomic_write(&path, &serde_json::to_vec(&id)?, true)?;
-        live.selected = id;
-        Ok(())
-    }
     async fn process(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
-        let record = self.store.get(id);
+        let _admission = self.store.admission(id).await;
+        let mut record = self.store.get(id);
         if record.outcome.is_some() {
             return Ok(());
         }
@@ -103,7 +92,57 @@ impl Gateway {
         if let Some(error) = &record.rejection {
             anyhow::bail!("{error}");
         }
-        let key = identity::session_id(&record.binding);
+        let thread_mode = record.session_mapping_version == 2;
+        if thread_mode {
+            let command = record.text.trim().to_owned();
+            if record.inbound_thread_id.is_empty() && record.thread_create_attempt.is_none() {
+                if matches!(
+                    command.as_str(),
+                    "/help" | "/session -h" | "/session --help"
+                ) {
+                    return self.notice(id, thread_help().into());
+                }
+                if command.starts_with('/') && !command.starts_with("/todo ") {
+                    return self.notice(id, "请在对应话题中发送命令；在话题外发送普通消息会开始新会话。使用 /help 查看帮助。".into());
+                }
+            }
+            // Only admission is ordered; each predecessor returns once input has
+            // been accepted, rather than waiting for its agent round to finish.
+            for predecessor in self.store.predecessors(&record) {
+                if predecessor.message_id == record.root_id && !record.binding.thread_id.is_empty() {
+                    let _root_admission = self.store.admission(&predecessor.id).await;
+                    super::thread::confirm_root_event(self, &predecessor.id, &record)?;
+                }
+                if let Err(error) = Box::pin(self.process(&predecessor.id)).await {
+                    self.fail(&predecessor.id, &format!("{error:#}"));
+                }
+                if self.store.get(&predecessor.id).outcome.is_none()
+                    && self.store.get(&predecessor.id).state == State::Received
+                {
+                    self.store.update(id, |r| {
+                        r.last_error = Some("话题首条消息仍待确认；本次暂不提交".into())
+                    })?;
+                    return Ok(());
+                }
+            }
+            record = super::thread::resolve(self, id).await?;
+            if command == "/session new" {
+                return self.notice(id, "请在话题外发送消息以开始新会话".into());
+            }
+            if command.starts_with("/session id=") {
+                return self.notice(id, "请在对应话题中发送消息以继续会话".into());
+            }
+        } else {
+            anyhow::ensure!(
+                record.state != State::Received,
+                "旧聊天记录尚未提交；升级后不会自动执行，请发送新的普通消息"
+            );
+        }
+        let key = if thread_mode {
+            identity::worker_key(&record.binding, &self.config.agent_id)
+        } else {
+            identity::session_id(&record.binding)
+        };
         let shared = self
             .sessions
             .lock()
@@ -114,17 +153,13 @@ impl Gateway {
         // Serialize admission only. No lock or queue waits for an agent round to finish.
         let mut live = shared.lock().await;
         anyhow::ensure!(!*self.stopping.borrow(), "网关已停止");
-        if live.selected.is_empty() {
-            live.selected = match std::fs::read(self.selection_path(&record.binding)) {
-                Ok(bytes) => serde_json::from_slice(&bytes)?,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => key,
-                Err(e) => return Err(e.into()),
-            };
-            anyhow::ensure!(
-                identity::owns_session(&record.binding, &live.selected),
-                "Invalid saved Lark session"
-            );
+        if live.owners.values().any(|owner| owner.receipt == id) {
+            return Ok(());
         }
+        anyhow::ensure!(
+            identity::owns_session(&record.binding, &record.session_id),
+            "Invalid saved Lark session"
+        );
         let recovering = record.state != State::Received;
         let server = crate::app::daemon::discover(&self.home)
             .await?
@@ -136,11 +171,6 @@ impl Gateway {
             );
         }
         if live.client.is_none() {
-            let selected = if recovering {
-                record.session_id.clone()
-            } else {
-                live.selected.clone()
-            };
             let client = Client::open(
                 &self.home,
                 &server,
@@ -148,7 +178,7 @@ impl Gateway {
                     target: SessionTarget::Agent {
                         source: fae_agent::SingleAgentSource::AgentId(self.config.agent_id.clone()),
                     },
-                    session_id: Some(selected),
+                    session_id: Some(record.session_id.clone()),
                     workspace: self.config.workspace.clone(),
                     binding: Some(record.binding.clone()),
                     resume: if recovering {
@@ -176,12 +206,10 @@ impl Gateway {
         }
         let client = live.client.as_mut().unwrap();
         let selected = client.info.session_id.clone();
-        if recovering {
-            anyhow::ensure!(
-                selected == record.session_id,
-                "恢复会话不匹配；本次不会自动重跑"
-            );
-        }
+        anyhow::ensure!(
+            selected == record.session_id,
+            "会话不匹配；本次不会自动重跑"
+        );
         let ServerMessage::Status(status) = request(client, ClientMessage::Status).await? else {
             anyhow::bail!("Invalid session status");
         };
@@ -210,33 +238,36 @@ impl Gateway {
         let command = record.text.trim();
         if !recovering && !busy {
             match command {
-                "/help" | "/session -h" | "/session --help" => return self.notice(id,
-                    "/status  查看状态\n/todo <message>  规划并执行\n/session new  新建会话\n/session id=<id>  切换会话\n/session clean, /clean  清理历史和 todos\n/steer <message>  补充执行中的指令\n执行中所有输入自动作为 /steer".into()),
-                "/status" | "/session" => return self.notice(id, format!("session: {selected}\nmodel: {}\nstate: {}", client.info.model, status.state)),
+                "/help" | "/session -h" | "/session --help" => {
+                    return self.notice(id, thread_help().into());
+                }
+                "/status" | "/session" => {
+                    return self.notice(
+                        id,
+                        format!(
+                            "session: {selected}\nmodel: {}\nstate: {}",
+                            client.info.model, status.state
+                        ),
+                    );
+                }
                 "/clean" | "/session clean" => {
                     // Save command intent before the destructive operation; never replay it after a crash.
-                    self.store.update(id, |r| { r.state = State::Submitting; r.session_id = selected.clone(); })?;
+                    self.store.update(id, |r| {
+                        r.state = State::Submitting;
+                        r.session_id = selected.clone();
+                    })?;
                     request(client, ClientMessage::Clean).await?;
                     live.client = None;
-                    return self.notice(id, format!("已清理当前 session 的历史和 todos\nsession: {selected}"));
+                    return self.notice(
+                        id,
+                        format!("已清理当前 session 的历史和 todos\nsession: {selected}"),
+                    );
                 }
-                "/session new" => {
-                    self.store.update(id, |r| r.state = State::Submitting)?;
-                    request(client, ClientMessage::Close { cancel_active: false }).await?;
-                    live.client = None;
-                    self.select(&mut live, &record.binding, format!("{}--{}", identity::session_id(&record.binding), wd_tools::uuid::v4()))?;
-                    return self.notice(id, format!("session: {}", live.selected));
-                }
-                value if value.starts_with("/session id=") => {
-                    let target = value.trim_start_matches("/session id=");
-                    anyhow::ensure!(identity::owns_session(&record.binding, target), "只能切换到当前用户和聊天所属的 session");
-                    self.store.update(id, |r| r.state = State::Submitting)?;
-                    request(client, ClientMessage::Close { cancel_active: false }).await?;
-                    live.client = None;
-                    self.select(&mut live, &record.binding, target.into())?;
-                    return self.notice(id, format!("session: {}", live.selected));
-                }
-                value if value.starts_with('/') && !value.starts_with("/todo ") && !value.starts_with("/steer ") => {
+                value
+                    if value.starts_with('/')
+                        && !value.starts_with("/todo ")
+                        && !value.starts_with("/steer ") =>
+                {
                     anyhow::bail!("未知命令或缺少参数，请使用 /help");
                 }
                 _ => {}
@@ -369,8 +400,9 @@ impl Gateway {
                 incomplete: false,
             },
         );
+        // Thread creation already shows Typing; react only to inputs received inside a thread.
         // Feedback never delays admission or steering.
-        if !recovering && record.reaction_id.is_none() {
+        if !recovering && !record.inbound_thread_id.is_empty() && record.reaction_id.is_none() {
             let gateway = self.clone();
             let receipt = id.to_owned();
             self.spawn(async move {
@@ -553,7 +585,7 @@ mod tests {
     use super::super::store::Record;
     use super::*;
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn idle_gateway_commands_reuse_and_replace_connections() {
+    async fn idle_thread_commands_preserve_binding_and_clean_connections() {
         let home = std::env::temp_dir().join(format!("fae-lark-commands-{}", wd_tools::uuid::v4()));
         std::fs::create_dir_all(&home).unwrap();
         let home = home.canonicalize().unwrap();
@@ -608,6 +640,8 @@ mod tests {
             tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
         });
         let binding = SessionBinding {
+            session_mapping_version: 2,
+            thread_id: "omt_commands".into(),
             channel: "lark".into(),
             app_id: "test".into(),
             tenant_key: "tenant".into(),
@@ -641,24 +675,27 @@ mod tests {
         };
         assert!(submit("help", "/help".into()).await.contains("/steer"));
         assert!(submit("status", "/status".into()).await.contains(&original));
-        let next = submit("new", "/session new".into())
-            .await
-            .trim_start_matches("session: ")
-            .to_owned();
-        assert_ne!(next, original);
-        assert!(identity::owns_session(&binding, &next));
-        assert!(submit("selected", "/session".into()).await.contains(&next));
-        assert!(submit("clean", "/clean".into()).await.contains(&next));
+        assert!(
+            submit("new", "/session new".into())
+                .await
+                .contains("话题外")
+        );
+        assert!(
+            submit("selected", "/session".into())
+                .await
+                .contains(&original)
+        );
+        assert!(submit("clean", "/clean".into()).await.contains(&original));
         // Clean terminates the actor; the following status must open a fresh connection.
         assert!(
             submit("after-clean", "/status".into())
                 .await
-                .contains(&next)
+                .contains(&original)
         );
         assert!(
             submit("switch", format!("/session id={original}"))
                 .await
-                .contains(&original)
+                .contains("对应话题")
         );
         assert!(
             submit("after-switch", "/status".into())
@@ -716,60 +753,6 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        drop(gateway);
-        std::fs::remove_dir_all(home).unwrap();
-    }
-    #[tokio::test]
-    async fn session_selection_survives_restart_and_rejects_other_bindings() {
-        let home =
-            std::env::temp_dir().join(format!("fae-lark-selection-{}", wd_tools::uuid::v4()));
-        std::fs::create_dir_all(&home).unwrap();
-        Config::init(&home, home.clone(), false).unwrap();
-        let config: Config =
-            serde_json::from_slice(&std::fs::read(home.join("lark.config")).unwrap()).unwrap();
-        let (_, stopping) = watch::channel(false);
-        let gateway = Gateway {
-            home: home.clone(),
-            config: config.clone(),
-            store: Arc::new(Store::open(&home, 7).unwrap()),
-            sdk: Sdk::for_test(config, "http://127.0.0.1:1".into()),
-            stopping,
-            slots: Arc::new(Semaphore::new(1)),
-            sessions: Mutex::new(HashMap::new()),
-            tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
-        };
-        let binding = SessionBinding {
-            channel: "lark".into(),
-            user_id: "ou_alice".into(),
-            app_id: "app".into(),
-            tenant_key: "tenant".into(),
-            chat_type: "p2p".into(),
-            chat_id: "chat".into(),
-        };
-        let selected = format!(
-            "{}--{}",
-            identity::session_id(&binding),
-            wd_tools::uuid::v4()
-        );
-        let mut live = LiveSession::default();
-        gateway
-            .select(&mut live, &binding, selected.clone())
-            .unwrap();
-        assert_eq!(live.selected, selected);
-        let saved: String =
-            serde_json::from_slice(&std::fs::read(gateway.selection_path(&binding)).unwrap())
-                .unwrap();
-        assert_eq!(saved, selected);
-        let mut other = binding.clone();
-        other.user_id = "ou_bob".into();
-        assert!(gateway.select(&mut live, &other, selected.clone()).is_err());
-        assert!(!gateway.selection_path(&other).exists());
-        assert_eq!(live.selected, selected);
-        assert!(
-            gateway
-                .select(&mut live, &binding, "../escape".into())
-                .is_err()
-        );
         drop(gateway);
         std::fs::remove_dir_all(home).unwrap();
     }
