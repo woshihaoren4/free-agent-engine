@@ -106,6 +106,12 @@ until credentials are filled in.
 Thread replies are mandatory. Old `group.reply_in_thread=false` settings are
 accepted with a notice and normalized to `true`.
 
+Set `"user_id_whitelist": ["ou_alice", "ou_bob"]` in `lark.config` to restrict
+Agent interactions to those senders' Feishu `open_id` values. Omit the field
+or set it to `null` to allow all users; an explicit empty list `[]` denies
+everyone. Users outside the whitelist receive the text `权限不足` without
+opening an Agent session or executing commands. Restart the gateway after editing.
+
 Enable bot capability, publish the application, select long-connection delivery
 and subscribe to `im.message.receive_v1`. Grant
 `im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly`,
@@ -119,14 +125,19 @@ session histories, todo state and user memory; existing data is not migrated.
 Add the bot to the group and @ it; messages from other tenants and bots are ignored.
 Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
 
-Accepted messages receive a `Typing` reaction immediately on a separate task.
-New threads are created with a `Typing` emoji reply. Once all final output has
+Accepted messages inside a thread receive a `Typing` reaction on a separate task.
+Steering inputs receive the same reaction and keep it until the original round's
+final answer has been delivered, even if the gateway restarts after confirmation.
+New threads are created with a `Typing` emoji reply without an extra reaction.
+Once all final output has
 been delivered, the gateway withdraws that reply and removes the reaction.
-Each top-level model response gets its own streaming card; tool execution,
-reasoning and child-Agent internals are hidden. Cards are updated with the
-accumulated text, normally every 300 ms, and long replies are paginated on
-Unicode boundaries. Final success waits for the complete Agent round, including
-history saving. Failures are sent with `ERROR`; CardKit failures fall back to
+Only the final answer is delivered after the complete Agent round, including
+history saving. Intermediate model messages, tool execution, reasoning and
+child-Agent internals are hidden. Long final replies are paginated on Unicode
+boundaries. Completed cards show only the answer without a generating status.
+Final cards are created with their full answer and summary, without a placeholder
+or follow-up streaming updates. Failures discard unsent intermediate answers.
+Failures are sent with `ERROR`; CardKit failures fall back to
 text with an explicit degradation notice. Outbound failures remain in the
 receipt store and appear in status.
 
@@ -150,7 +161,7 @@ Resuming an existing actor keeps its frozen Agent configuration even if the
 source files have changed or disappeared. Available replay is consumed through
 the round's `Finished` event before the outcome is recorded.
 An uncertain submission or a restarted service is reported without blindly
-rerunning tools. Replay gaps use the final result as a text fallback.
+rerunning tools. Replay gaps use the final result to replace the buffered answer.
 There is no transaction guarantee for external tool side effects.
 Shutdown confirms the router and outbox have exited before final delivery.
 Its delivery budget is shared across all records within a 25-second shutdown

@@ -114,6 +114,8 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 允许 Agent 维护当前用户长期记忆：在 `tools` 中保留 `memory_update`。
 - 允许 Agent 跟踪当前运行中的任务进度：在 `tools` 中保留 `todo`。
+- 允许 Agent 联网搜索：在 `tools` 中保留 `volcengine_search`，主服务需设置环境变量
+  `ARK_WEB_SEARCH_APIKEY`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子

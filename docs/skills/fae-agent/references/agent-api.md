@@ -216,7 +216,8 @@ Keep the final summary concise.
   "execute_python",
   "memory_update",
   "todo",
-  "timer"
+  "timer",
+  "volcengine_search"
 ]
 ```
 
@@ -279,6 +280,20 @@ CLI 会话清理删除当前 agent/user 的全部计划及旧文件；活跃计�
 `SingleAgentEnv.mode` 为空时使用普通 single-agent 流程；设为 `"todo"` 时启用 todo 模式。
 该模式要求 Agent 配置挂载 `todo` 工具，会先生成计划，再按 ID 顺序逐项执行并更新完成状态，
 同时将原始用户输入和各步骤的 Assistant 输出写入 todo 文件，最后生成总结回复。
+
+### 火山搜索 `volcengine_search`
+
+使用豆包搜索 Custom 版搜索网页。在 `tools` 中加入 `volcengine_search`，并为主服务
+设置环境变量 `ARK_WEB_SEARCH_APIKEY`。已有主服务需重启以读取新环境变量。
+必填参数 `query` 为 1–100 个字符；`count` 为 1–50，默认 10。支持时间范围、站点过滤
+等可选参数，具体以工具描述为准。
+
+```json
+{"query":"火山引擎最新动态","count":5,"time_range":"OneWeek"}
+```
+
+返回完整搜索 JSON，网页结果位于 `Result.WebResults`。回答优先使用 `Summary` 或
+`Content`，并引用来源 `Url`。
 
 ## 6. Skill
 

@@ -13,12 +13,9 @@ pub fn ingest(record: &mut Record, message: &ServerMessage) {
             if output.parament_plan_id.is_none() && output.node_id.is_none() {
                 match output.input_type.as_str() {
                     "model_response_started" => {
-                        // A previous Final response can become intermediate if steering continued.
-                        for card in &mut record.responses {
-                            if !card.closed {
-                                card.ended = true;
-                            }
-                        }
+                        // A response can become intermediate when tools or steering continue.
+                        // Nothing is delivered before the round finishes, so keep only the latest.
+                        record.responses.clear();
                         if let Some(id) = output.output["response_id"].as_str() {
                             record.responses.push(Card::new(id.into()));
                         }
@@ -41,10 +38,11 @@ pub fn ingest(record: &mut Record, message: &ServerMessage) {
                     }
                     "model_response_ended" => {
                         let disposition = output.output["disposition"].as_str().unwrap_or_default();
-                        if matches!(disposition, "tool_calls" | "continue" | "discarded") {
-                            if let Some(card) = record.responses.last_mut() {
-                                card.ended = true;
-                            }
+                        if matches!(
+                            disposition,
+                            "tool_calls" | "continue" | "discarded" | "failed"
+                        ) {
+                            record.responses.clear();
                         }
                     }
                     _ => {}
@@ -60,21 +58,23 @@ pub fn ingest(record: &mut Record, message: &ServerMessage) {
             match outcome {
                 RoundOutcome::Succeeded { result } => {
                     record.outcome = Some("succeeded".into());
-                    if record.responses.iter().all(|c| c.text.trim().is_empty()) {
-                        if let Some(text) = result.as_str().filter(|t| !t.trim().is_empty()) {
-                            for page in pages(text) {
-                                let mut card = Card::new("final-result".into());
-                                card.text = page;
-                                record.responses.push(card);
-                            }
+                    // The terminal result is authoritative, including after a replay gap.
+                    if let Some(text) = result.as_str() {
+                        record.responses.clear();
+                        for page in pages(text) {
+                            let mut card = Card::new("final-result".into());
+                            card.text = page;
+                            record.responses.push(card);
                         }
                     }
                 }
                 RoundOutcome::Failed { message } => {
+                    record.discard_unsent_responses();
                     record.outcome = Some("failed".into());
                     record.notice = Some(format!("ERROR：{message}"));
                 }
                 RoundOutcome::Cancelled { .. } => {
+                    record.discard_unsent_responses();
                     record.outcome = Some("cancelled".into());
                     record.notice = Some("本次执行已取消".into());
                 }
@@ -86,45 +86,14 @@ pub fn ingest(record: &mut Record, message: &ServerMessage) {
 }
 
 pub fn recover_terminal(record: &mut Record, round_id: &str, outcome: RoundOutcome) {
-    let mut fallback = None;
-    if let RoundOutcome::Succeeded { result } = &outcome {
-        if let Some(text) = result.as_str() {
-            let last_id = record.responses.last().map(|c| c.response_id.as_str());
-            let observed = record
-                .responses
-                .iter()
-                .filter(|c| Some(c.response_id.as_str()) == last_id)
-                .map(|c| c.text.as_str())
-                .collect::<String>();
-            if observed != text {
-                fallback = Some(text.to_owned());
-            }
-        }
-    }
-    if fallback.is_some() {
-        for card in &mut record.responses {
-            card.ended = true;
-        }
-        record.outcome = Some("succeeded".into());
-        record.state = State::Delivering;
-        record.notice = Some("流式内容恢复不完整，以下为最终结果".into());
-        for page in pages(&fallback.unwrap()) {
-            let mut card = Card::new("recovered-final".into());
-            card.text = page;
-            card.degraded = true;
-            record.responses.push(card);
-        }
-        record.seq += 1;
-    } else {
-        ingest(
-            record,
-            &ServerMessage::Finished {
-                seq: record.seq + 1,
-                round_id: round_id.into(),
-                outcome,
-            },
-        );
-    }
+    ingest(
+        record,
+        &ServerMessage::Finished {
+            seq: record.seq + 1,
+            round_id: round_id.into(),
+            outcome,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -183,10 +152,9 @@ mod tests {
         ] {
             ingest(&mut record, &message);
         }
-        assert_eq!(record.responses.len(), 2);
-        assert_eq!(record.responses[0].text, "中间");
-        assert!(record.responses[0].ended);
-        assert!(!record.responses[1].ended);
+        assert_eq!(record.responses.len(), 1);
+        assert_eq!(record.responses[0].text, "最终");
+        assert!(!record.responses[0].ended);
         assert!(record.outcome.is_none());
         ingest(
             &mut record,
@@ -199,5 +167,41 @@ mod tests {
             },
         );
         assert_eq!(record.outcome.as_deref(), Some("failed"));
+        assert!(record.responses.is_empty());
+        assert_eq!(record.notice.as_deref(), Some("ERROR：save failed"));
+
+        record.notice = None;
+        ingest(
+            &mut record,
+            &event(
+                9,
+                "model_response_started",
+                json!({"response_id":"partial"}),
+            ),
+        );
+        ingest(
+            &mut record,
+            &event(10, "model_output", json!({"content":"最终的一部分"})),
+        );
+        let final_text = "最终答复\n".repeat(5000);
+        recover_terminal(
+            &mut record,
+            "r",
+            RoundOutcome::Succeeded {
+                result: json!(final_text),
+            },
+        );
+        assert_eq!(record.outcome.as_deref(), Some("succeeded"));
+        assert_eq!(
+            record
+                .responses
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<String>(),
+            final_text
+        );
+        assert!(record.responses.len() > 1);
+        assert!(record.responses.iter().all(|c| !c.degraded));
+        assert!(record.notice.is_none());
     }
 }

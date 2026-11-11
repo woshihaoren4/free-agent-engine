@@ -69,6 +69,7 @@ impl Gateway {
                 r.last_error = Some(safe.clone());
                 return;
             }
+            r.discard_unsent_responses();
             r.state = State::Delivering;
             r.outcome = Some("failed".into());
             r.notice = Some(format!("ERROR：{safe}\n追踪：{}", &r.id[..12]));
@@ -82,6 +83,56 @@ impl Gateway {
         })?;
         Ok(())
     }
+    fn typing(self: &Arc<Self>, id: &str) {
+        let record = self.store.get(id);
+        if record.inbound_thread_id.is_empty()
+            || record.reaction_id.is_some()
+            || record.state == State::Delivered
+        {
+            return;
+        }
+        let gateway = self.clone();
+        let receipt = id.to_owned();
+        self.spawn(async move {
+            if let Ok(reaction) = gateway.sdk.typing(&record.message_id).await {
+                let saved = gateway.store.update(&receipt, |r| {
+                    r.reaction_id = Some(reaction.clone());
+                    // A late API response must re-enter durable cleanup rather than
+                    // leave an untracked reaction on an already delivered message.
+                    if r.state == State::Delivered {
+                        r.state = State::Delivering;
+                        r.delivered_at = None;
+                    }
+                });
+                if saved.is_err() {
+                    let _ = gateway.sdk.untype(&record.message_id, &reaction).await;
+                }
+            }
+        });
+    }
+    fn supplement(
+        self: &Arc<Self>,
+        id: &str,
+        round: &str,
+        live: &LiveSession,
+        recovering: bool,
+    ) -> anyhow::Result<()> {
+        let owner = live
+            .owners
+            .get(round)
+            .map(|owner| owner.receipt.clone())
+            .or_else(|| self.store.round_receipt(&self.store.get(id), round))
+            .ok_or_else(|| anyhow::anyhow!("补充已接受，但找不到原执行记录"))?;
+        self.store.update(id, |r| {
+            r.round_id = Some(round.into());
+            r.completion_receipt = Some(owner);
+        })?;
+        self.notice(id, "已补充到当前执行中".into())?;
+        if !recovering {
+            self.typing(id);
+        }
+        Ok(())
+    }
     async fn process(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
         let _admission = self.store.admission(id).await;
         let mut record = self.store.get(id);
@@ -89,6 +140,11 @@ impl Gateway {
             return Ok(());
         }
         anyhow::ensure!(!*self.stopping.borrow(), "网关已停止");
+        // Apply the current policy to both live input and recovered receipts,
+        // before creating a thread, opening a session, or executing commands.
+        if !self.config.allows_user(&record.binding.user_id) {
+            return self.notice(id, "权限不足".into());
+        }
         if let Some(error) = &record.rejection {
             anyhow::bail!("{error}");
         }
@@ -109,7 +165,8 @@ impl Gateway {
             // Only admission is ordered; each predecessor returns once input has
             // been accepted, rather than waiting for its agent round to finish.
             for predecessor in self.store.predecessors(&record) {
-                if predecessor.message_id == record.root_id && !record.binding.thread_id.is_empty() {
+                if predecessor.message_id == record.root_id && !record.binding.thread_id.is_empty()
+                {
                     let _root_admission = self.store.admission(&predecessor.id).await;
                     super::thread::confirm_root_event(self, &predecessor.id, &record)?;
                 }
@@ -363,8 +420,10 @@ impl Gateway {
             ..
         } = &accepted
         {
-            self.store.update(id, |r| r.round_id = round_id.clone())?;
-            return self.notice(id, "已补充到当前执行中".into());
+            let round = round_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("补充已接受，但未返回原执行 ID"))?;
+            return self.supplement(id, round, &live, recovering);
         }
         let round = match accepted {
             ServerMessage::Ack {
@@ -402,23 +461,8 @@ impl Gateway {
         );
         // Thread creation already shows Typing; react only to inputs received inside a thread.
         // Feedback never delays admission or steering.
-        if !recovering && !record.inbound_thread_id.is_empty() && record.reaction_id.is_none() {
-            let gateway = self.clone();
-            let receipt = id.to_owned();
-            self.spawn(async move {
-                if let Ok(reaction) = gateway.sdk.typing(&record.message_id).await {
-                    let mut finished = false;
-                    let saved = gateway.store.update(&receipt, |r| {
-                        finished = r.outcome.is_some();
-                        if !finished {
-                            r.reaction_id = Some(reaction.clone());
-                        }
-                    });
-                    if finished || saved.is_err() {
-                        let _ = gateway.sdk.untype(&record.message_id, &reaction).await;
-                    }
-                }
-            });
+        if !recovering {
+            self.typing(id);
         }
         Ok(())
     }
@@ -584,6 +628,282 @@ async fn request(client: &mut Client, message: ClientMessage) -> anyhow::Result<
 mod tests {
     use super::super::store::Record;
     use super::*;
+    use serde_json::json;
+
+    fn feedback_gateway(base: String) -> Arc<Gateway> {
+        let home = std::env::temp_dir().join(format!("fae-feedback-{}", wd_tools::uuid::v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let config: Config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant",
+            "agent_id":"fae","workspace":home
+        }))
+        .unwrap();
+        let (_, stopping) = watch::channel(false);
+        Arc::new(Gateway {
+            home: home.clone(),
+            config: config.clone(),
+            store: Arc::new(Store::open(&home, 7).unwrap()),
+            sdk: Sdk::for_test(config, base),
+            stopping,
+            slots: Arc::new(Semaphore::new(1)),
+            sessions: Mutex::new(HashMap::new()),
+            tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+        })
+    }
+
+    fn feedback_record(message: &str) -> Record {
+        let binding: SessionBinding = serde_json::from_value(json!({
+            "session_mapping_version":2,"thread_id":"omt_feedback","channel":"lark",
+            "app_id":"app","tenant_key":"tenant","user_id":"ou_user",
+            "chat_type":"p2p","chat_id":"chat"
+        }))
+        .unwrap();
+        let mut record = Record::new(
+            identity::receipt_id("app", "tenant", message),
+            "omt_feedback".into(),
+            binding,
+            message.into(),
+            "input".into(),
+            None,
+        );
+        record.service_instance = Some("service".into());
+        record.stream_id = Some("stream".into());
+        record
+    }
+
+    #[test]
+    fn failure_discards_partial_answer_and_preserves_existing_delivery_metadata() {
+        let gateway = feedback_gateway("http://127.0.0.1:1".into());
+        let mut record = feedback_record("om_failed");
+        let mut partial = super::super::card::Card::new("partial".into());
+        partial.text = "未完成正文".into();
+        record.responses.push(partial.clone());
+        let mut delivered = partial.clone();
+        delivered.reply_id = Some("om_existing".into());
+        delivered.closed = true;
+        record.responses.push(delivered);
+        let id = record.id.clone();
+        gateway.store.insert(record).unwrap();
+        gateway.fail(&id, "service disconnected");
+        let saved = gateway.store.get(&id);
+        assert_eq!(saved.outcome.as_deref(), Some("failed"));
+        assert!(saved.notice.unwrap().contains("service disconnected"));
+        assert_eq!(saved.responses.len(), 1);
+        assert_eq!(saved.responses[0].reply_id.as_deref(), Some("om_existing"));
+        let mut uncertain = partial;
+        uncertain.reply_attempt = Some(1);
+        gateway
+            .store
+            .update(&id, |r| r.responses = vec![uncertain])
+            .unwrap();
+        gateway.fail(&id, "again");
+        assert_eq!(gateway.store.get(&id).responses.len(), 1);
+        std::fs::remove_dir_all(&gateway.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn whitelist_denial_replies_without_thread_or_agent_admission() {
+        let (base, requests, task) = super::super::sdk::tests::mock(|path, body| {
+            assert!(path.ends_with("/reply"));
+            assert_eq!(body["msg_type"], "text");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body["content"].as_str().unwrap())
+                    .unwrap()["text"],
+                "权限不足"
+            );
+            json!({"code":0,"data":{"message_id":"om_denied_reply",
+                "chat_id":"chat","thread_id":"omt_feedback","root_id":"om_root"}})
+        })
+        .await;
+        let mut gateway = feedback_gateway(base);
+        Arc::get_mut(&mut gateway).unwrap().config.user_id_whitelist =
+            Some(vec!["ou_other".into()]);
+        // These receipts have no saved rejection: recovery must enforce the
+        // current whitelist before accepting input under an older policy.
+        for (index, text, in_thread) in [
+            (0, "hello", false),
+            (1, "/help", false),
+            (2, "/clean", true),
+            (3, "/steer update", true),
+        ] {
+            let mut record = feedback_record(&format!("om_denied_{index}"));
+            record.text = text.into();
+            if !in_thread {
+                record.binding.thread_id.clear();
+                record.session_id.clear();
+                record.inbound_thread_id.clear();
+                record.thread_state = super::super::store::ThreadState::Unresolved;
+            }
+            let id = record.id.clone();
+            gateway.store.insert(record).unwrap();
+            gateway.recover(id.clone()).await;
+            let saved = gateway.store.get(&id);
+            assert_eq!(saved.notice.as_deref(), Some("权限不足"));
+            assert!(saved.round_id.is_none());
+            assert!(saved.thread_create_attempt.is_none());
+            assert!(saved.reaction_id.is_none());
+            assert!(gateway.sessions.lock().await.is_empty());
+            super::super::card::Writer {
+                sdk: gateway.sdk.clone(),
+                store: gateway.store.clone(),
+            }
+            .flush(&id)
+            .await
+            .unwrap();
+            assert!(gateway.store.get(&id).state == State::Delivered);
+        }
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/reply"))
+                .count(),
+            4
+        );
+        task.abort();
+        std::fs::remove_dir_all(&gateway.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_typing_response_reenters_durable_cleanup() {
+        let receipt = Arc::new(std::sync::Mutex::new(None::<(Arc<Store>, String)>));
+        let callback = receipt.clone();
+        let (base, _, task) = super::super::sdk::tests::mock(move |path, _| {
+            if path.ends_with("/reactions") {
+                let saved = callback.lock().unwrap();
+                let (store, id) = saved.as_ref().unwrap();
+                store
+                    .update(id, |r| {
+                        r.state = State::Delivered;
+                        r.delivered_at = Some(1);
+                    })
+                    .unwrap();
+                json!({"code":0,"data":{"reaction_id":"late"}})
+            } else {
+                assert!(path.ends_with("/reactions/late"));
+                json!({"code":0})
+            }
+        })
+        .await;
+        let gateway = feedback_gateway(base);
+        let mut record = feedback_record("om_late");
+        record.outcome = Some("succeeded".into());
+        record.state = State::Delivering;
+        let id = record.id.clone();
+        gateway.store.insert(record).unwrap();
+        *receipt.lock().unwrap() = Some((gateway.store.clone(), id.clone()));
+        gateway.typing(&id);
+        gateway.shutdown().await;
+        let saved = gateway.store.get(&id);
+        assert!(saved.state == State::Delivering);
+        assert_eq!(saved.reaction_id.as_deref(), Some("late"));
+        let writer = super::super::card::Writer {
+            sdk: gateway.sdk.clone(),
+            store: gateway.store.clone(),
+        };
+        writer.flush(&id).await.unwrap();
+        assert!(gateway.store.get(&id).state == State::Delivered);
+        assert!(gateway.store.get(&id).reaction_id.is_none());
+        task.abort();
+        std::fs::remove_dir_all(&gateway.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn supplement_reaction_waits_for_final_delivery_and_survives_restart() {
+        let mut deletion_failed = false;
+        let (base, requests, task) = super::super::sdk::tests::mock(move |path, body| {
+            if path.ends_with("/om_follow/reactions") {
+                assert_eq!(body["reaction_type"]["emoji_type"], "Typing");
+                json!({"code":0,"data":{"reaction_id":"reaction"}})
+            } else if path.ends_with("/reactions/reaction") {
+                if !deletion_failed {
+                    deletion_failed = true;
+                    json!({"code":99991400,"msg":"temporary failure"})
+                } else {
+                    json!({"code":0})
+                }
+            } else if path.ends_with("/reply") {
+                assert_eq!(body["reply_in_thread"], true);
+                json!({"code":0,"data":{"message_id":"om_reply","thread_id":"omt_feedback","chat_id":"chat","root_id":"om_parent"}})
+            } else {
+                panic!("Unexpected feedback request: {path}");
+            }
+        }).await;
+        let gateway = feedback_gateway(base);
+        let mut parent = feedback_record("om_parent");
+        parent.round_id = Some("round".into());
+        parent.state = State::Running;
+        let parent_id = parent.id.clone();
+        gateway.store.insert(parent).unwrap();
+        let follow = feedback_record("om_follow");
+        let id = follow.id.clone();
+        gateway.store.insert(follow).unwrap();
+        gateway
+            .supplement(&id, "round", &LiveSession::default(), false)
+            .unwrap();
+        gateway.shutdown().await;
+        assert_eq!(
+            gateway.store.get(&id).reaction_id.as_deref(),
+            Some("reaction")
+        );
+        let writer = super::super::card::Writer {
+            sdk: gateway.sdk.clone(),
+            store: gateway.store.clone(),
+        };
+        writer.flush(&id).await.unwrap();
+        let saved = gateway.store.get(&id);
+        assert!(saved.notice_sent);
+        assert!(saved.state == State::Delivering);
+        assert_eq!(
+            saved.completion_receipt.as_deref(),
+            Some(parent_id.as_str())
+        );
+        assert_eq!(saved.reaction_id.as_deref(), Some("reaction"));
+        let restarted = super::super::card::Writer {
+            sdk: gateway.sdk.clone(),
+            store: Arc::new(Store::open(&gateway.home, 7).unwrap()),
+        };
+        restarted.flush(&id).await.unwrap();
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/reactions/reaction"))
+                .count(),
+            0
+        );
+        restarted
+            .store
+            .update(&parent_id, |r| {
+                r.state = State::Delivering;
+                r.outcome = Some("succeeded".into());
+                r.notice = Some("最终答复".into());
+            })
+            .unwrap();
+        restarted.flush(&parent_id).await.unwrap();
+        assert!(restarted.flush(&id).await.is_err());
+        assert_eq!(
+            restarted.store.get(&id).reaction_id.as_deref(),
+            Some("reaction")
+        );
+        restarted.flush(&id).await.unwrap();
+        assert!(restarted.store.get(&id).state == State::Delivered);
+        assert!(restarted.store.get(&id).reaction_id.is_none());
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/om_follow/reply"))
+                .count(),
+            1
+        );
+        task.abort();
+        std::fs::remove_dir_all(&gateway.home).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn idle_thread_commands_preserve_binding_and_clean_connections() {
         let home = std::env::temp_dir().join(format!("fae-lark-commands-{}", wd_tools::uuid::v4()));

@@ -44,6 +44,8 @@ pub struct Record {
     pub service_instance: Option<String>,
     pub stream_id: Option<String>,
     pub round_id: Option<String>,
+    #[serde(default)]
+    pub completion_receipt: Option<String>,
     pub seq: u64,
     pub responses: Vec<Card>,
     pub outcome: Option<String>,
@@ -171,6 +173,12 @@ pub enum State {
     AcceptanceUnknown,
 }
 impl Record {
+    pub fn discard_unsent_responses(&mut self) {
+        // Keep delivery metadata for replies that may already exist remotely.
+        self.responses
+            .retain(|card| card.reply_id.is_some() || card.reply_attempt.is_some());
+    }
+
     pub fn new(
         id: String,
         session_id: String,
@@ -207,6 +215,7 @@ impl Record {
             service_instance: None,
             stream_id: None,
             round_id: None,
+            completion_receipt: None,
             seq: 0,
             responses: Vec::new(),
             outcome: None,
@@ -334,6 +343,29 @@ impl Store {
             .collect();
         records.sort_by_key(|r| (r.received_seq, r.created, r.id.clone()));
         records
+    }
+    pub fn round_receipt(&self, record: &Record, round: &str) -> Option<String> {
+        self.records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| {
+                r.id != record.id
+                    && r.binding == record.binding
+                    && r.session_id == record.session_id
+                    && r.service_instance == record.service_instance
+                    && r.stream_id == record.stream_id
+                    && r.round_id.as_deref() == Some(round)
+                    && r.completion_receipt.is_none()
+            })
+            .map(|r| r.id.clone())
+    }
+    pub fn completion_delivered(&self, record: &Record) -> bool {
+        let records = self.records.lock().unwrap();
+        record.completion_receipt.as_ref().is_none_or(|id| {
+            // Missing owners have already expired from delivered-record retention.
+            records.get(id).is_none_or(|r| r.state == State::Delivered)
+        })
     }
     /// Root admission precedes followups even if the creation response is still in flight.
     pub fn predecessors(&self, record: &Record) -> Vec<Record> {

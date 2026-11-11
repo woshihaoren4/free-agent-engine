@@ -42,7 +42,9 @@ pub fn parse(
     };
     let mut rejection = None;
     let mut text = String::new();
-    if user.is_empty() {
+    if !config.allows_user(user) {
+        rejection = Some("权限不足".into());
+    } else if user.is_empty() {
         rejection = Some("无法识别飞书用户，消息缺少发送者 open_id".into());
     } else if message.message_type != "text" {
         rejection = Some("目前只支持文本消息".into());
@@ -91,12 +93,73 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn whitelist_filters_all_interactions_by_sender_open_id() {
+        for (whitelist, allowed) in [
+            (None, true),
+            (Some(json!(null)), true),
+            (Some(json!([])), false),
+            (Some(json!(["ou_alice", "ou_bob"])), true),
+            (Some(json!(["ou_bob"])), false),
+            // A sender's employee user_id cannot substitute for their open_id.
+            (Some(json!(["alice"])), false),
+        ] {
+            let mut value = json!({
+                "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+            });
+            if let Some(whitelist) = whitelist {
+                value["user_id_whitelist"] = whitelist;
+            }
+            let config: Config = serde_json::from_value(value).unwrap();
+            for chat_type in ["p2p", "group"] {
+                for thread in ["", "omt_T1"] {
+                    for text in ["hello", "/help", "/clean", "/steer update", "/todo task"] {
+                        let event = serde_json::from_value(json!({
+                            "sender":{"sender_id":{"open_id":"ou_alice","user_id":"alice"},
+                                "sender_type":"user","tenant_key":"tenant"},
+                            "message":{"message_id":"om_input","chat_id":"chat","chat_type":chat_type,
+                                "thread_id":thread,"message_type":"text",
+                                "content":json!({"text":text}).to_string(),
+                                "mentions":[{"key":"@_user_1","id":{"open_id":"ou_bot"},"name":"Bot"}]}
+                        })).unwrap();
+                        let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+                        if allowed {
+                            assert!(record.rejection.is_none());
+                            assert_eq!(record.text, text);
+                        } else {
+                            assert_eq!(record.rejection.as_deref(), Some("权限不足"));
+                            assert!(record.text.is_empty());
+                        }
+                    }
+                }
+            }
+            if !allowed {
+                // Denied users receive the permission notice even when their
+                // message content cannot be parsed.
+                let event = serde_json::from_value(json!({
+                    "sender":{"sender_id":{"open_id":"ou_alice"},"sender_type":"user","tenant_key":"tenant"},
+                    "message":{"message_id":"om_bad","chat_id":"chat","chat_type":"p2p",
+                        "message_type":"text","content":"invalid json"}
+                })).unwrap();
+                let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+                assert_eq!(record.rejection.as_deref(), Some("权限不足"));
+            }
+        }
+    }
+
+    #[test]
     fn groups_require_real_bot_mention_inside_and_outside_threads() {
         let config: Config = serde_json::from_value(json!({
             "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
-        })).unwrap();
+        }))
+        .unwrap();
         for thread in ["", "omt_T1"] {
-            for text in ["hello", "@ou_bot hello", "/clean", "/steer update", "/session new"] {
+            for text in [
+                "hello",
+                "@ou_bot hello",
+                "/clean",
+                "/steer update",
+                "/session new",
+            ] {
                 for mentioned in [None, Some("ou_other"), Some("ou_bot")] {
                     let event = serde_json::from_value(json!({
                         "sender":{"sender_id":{"open_id":"ou_a"},"sender_type":"user","tenant_key":"tenant"},

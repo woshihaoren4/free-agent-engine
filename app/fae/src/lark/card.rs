@@ -21,6 +21,8 @@ pub struct Card {
     pub degraded: bool,
     #[serde(default)]
     pub reopened: bool,
+    #[serde(default)]
+    pub final_document: bool,
     pub pending: Option<Mutation>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,19 +47,27 @@ impl Card {
             closed: false,
             degraded: false,
             reopened: false,
+            final_document: false,
             pending: None,
         }
     }
 }
-pub fn document() -> anyhow::Result<Value> {
+fn summary(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(100)
+        .collect()
+}
+
+pub fn document(text: &str) -> anyhow::Result<Value> {
     let value = json!({
         "schema":"2.0",
-        "config":{"streaming_mode":true,"update_multi":true,
-            "summary":{"content":"生成中"},
-            "streaming_config":{"print_frequency_ms":{"default":50},"print_step":{"default":1}}},
+        "config":{"streaming_mode":false,"update_multi":true,
+            "summary":{"content":summary(text)}},
         "body":{"elements":[
-            {"tag":"markdown","content":"生成中…","element_id":"status"},
-            {"tag":"markdown","content":"","element_id":"answer"}
+            {"tag":"markdown","content":text,"element_id":"answer"}
         ]}
     });
     let card: larksuite_oapi_sdk_rs::card::v2::Card = serde_json::from_value(value.clone())?;
@@ -163,6 +173,10 @@ impl Writer {
     }
     pub async fn flush(&self, id: &str) -> anyhow::Result<()> {
         let record = self.store.get(id);
+        // Tool preambles and provisional answers stay local until the round completes.
+        if record.outcome.is_none() {
+            return Ok(());
+        }
         for index in 0..record.responses.len() {
             let mut card = self.store.get(id).responses[index].clone();
             if card.text.trim().is_empty() || card.closed {
@@ -191,13 +205,14 @@ impl Writer {
                 continue;
             }
             if card.card_id.is_none() {
+                let displayed = display_page(&record.responses, index);
                 let value = self
                     .sdk
                     .raw(
                         http::Method::POST,
                         "/open-apis/cardkit/v1/cards",
                         Some(json!({
-                            "type":"card_json","data":document()?.to_string()
+                            "type":"card_json","data":document(&displayed)?.to_string()
                         })),
                     )
                     .await?;
@@ -205,7 +220,11 @@ impl Writer {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Card ID missing"))?
                     .to_owned();
-                self.change(id, index, |c| c.card_id = Some(card_id))?;
+                self.change(id, index, |c| {
+                    c.card_id = Some(card_id);
+                    c.sent_text = displayed;
+                    c.final_document = true;
+                })?;
                 card = self.store.get(id).responses[index].clone();
             }
             if card.reply_id.is_none() {
@@ -230,7 +249,13 @@ impl Writer {
                         &card.reply_uuid,
                     )
                     .await?;
-                self.change(id, index, |c| c.reply_id = Some(reply))?;
+                self.change(id, index, |c| {
+                    c.reply_id = Some(reply);
+                    c.closed = c.final_document;
+                })?;
+            }
+            if self.store.get(id).responses[index].closed {
+                continue;
             }
             if card.pending.is_some() {
                 self.mutation(id, index, "", Value::Null).await?;
@@ -256,14 +281,7 @@ impl Writer {
                         .await?;
                 }
                 let summary = if status.is_empty() {
-                    self.store.get(id).responses[index]
-                        .text
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .chars()
-                        .take(100)
-                        .collect::<String>()
+                    summary(&self.store.get(id).responses[index].text)
                 } else {
                     status.to_owned()
                 };
@@ -300,6 +318,7 @@ impl Writer {
             }
         }
         if record.outcome.is_some()
+            && self.store.completion_delivered(&record)
             && record
                 .responses
                 .iter()
@@ -315,6 +334,10 @@ impl Writer {
                 self.sdk.untype(&record.message_id, reaction).await?;
             }
             self.store.update(id, |r| {
+                // Typing may complete while delivery cleanup is in flight.
+                if r.reaction_id != record.reaction_id {
+                    return;
+                }
                 r.state = State::Delivered;
                 r.delivered_at = Some(chrono::Utc::now().timestamp_millis());
                 r.reaction_id = None;
@@ -392,7 +415,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn retries_mutations_with_same_sequence_and_closes_only_after_finished() {
+    async fn waits_for_finished_then_retries_final_reply_without_placeholder() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, mut calls) = tokio::sync::mpsc::channel(32);
@@ -446,11 +469,11 @@ mod tests {
                     json!({"code":0,"tenant_access_token":"mock-token","expire":7200})
                 } else if path == "/open-apis/cardkit/v1/cards" {
                     json!({"code":0,"data":{"card_id":"card-1"}})
-                } else if path.ends_with("/reply") {
-                    json!({"code":0,"data":{"message_id":"reply-1","thread_id":"omt_card","chat_id":"chat","root_id":"message"}})
-                } else if path.ends_with("/answer/content") && !failed_once {
+                } else if path.ends_with("/reply") && !failed_once {
                     failed_once = true;
                     json!({"code":99991400,"msg":"temporary failure"})
+                } else if path.ends_with("/reply") {
+                    json!({"code":0,"data":{"message_id":"reply-1","thread_id":"omt_card","chat_id":"chat","root_id":"message"}})
                 } else {
                     json!({"code":0,"data":{}})
                 };
@@ -490,16 +513,17 @@ mod tests {
             sdk,
             store: store.clone(),
         };
-        let first_error = writer.flush(&id).await.unwrap_err();
-        let pending = store.get(&id).responses[0]
-            .pending
-            .clone()
-            .unwrap_or_else(|| panic!("Failure occurred before mutation: {first_error:#}"));
         writer.flush(&id).await.unwrap();
-        assert!(!store.get(&id).responses[0].closed);
+        assert!(calls.try_recv().is_err());
+        assert!(store.get(&id).responses[0].card_id.is_none());
         store
             .update(&id, |r| r.outcome = Some("succeeded".into()))
             .unwrap();
+        writer.flush(&id).await.unwrap_err();
+        let card = store.get(&id).responses[0].clone();
+        assert!(card.final_document);
+        assert!(card.pending.is_none());
+        assert!(!card.closed);
         writer.flush(&id).await.unwrap();
         assert!(store.get(&id).responses[0].closed);
         assert!(store.get(&id).state == State::Delivered);
@@ -507,20 +531,24 @@ mod tests {
         while let Ok(call) = calls.try_recv() {
             observed.push(call);
         }
-        let content: Vec<_> = observed
+        let creations: Vec<_> = observed
             .iter()
-            .filter(|(p, _)| p.ends_with("/answer/content"))
+            .filter(|(p, _)| p == "/open-apis/cardkit/v1/cards")
             .collect();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0].1, content[1].1);
-        assert_eq!(content[0].1["uuid"], pending.uuid);
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|(p, _)| p.ends_with("/reply"))
-                .count(),
-            1
-        );
+        assert_eq!(creations.len(), 1);
+        let document: Value =
+            serde_json::from_str(creations[0].1["data"].as_str().unwrap()).unwrap();
+        assert_eq!(document["config"]["streaming_mode"], false);
+        assert_eq!(document["config"]["summary"]["content"], "streamed text");
+        assert_eq!(document["body"]["elements"].as_array().unwrap().len(), 1);
+        assert_eq!(document["body"]["elements"][0]["content"], "streamed text");
+        let replies: Vec<_> = observed
+            .iter()
+            .filter(|(p, _)| p.ends_with("/reply"))
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0].1, replies[1].1);
+        assert_eq!(replies[0].1["uuid"], card.reply_uuid);
         assert!(
             observed
                 .iter()
@@ -531,8 +559,88 @@ mod tests {
             .iter()
             .filter_map(|(_, b)| b["sequence"].as_u64())
             .collect();
-        assert_eq!(sequences, vec![1, 1, 2, 3]);
+        assert!(sequences.is_empty());
+        let restarted = Writer {
+            sdk: writer.sdk.clone(),
+            store: Arc::new(Store::open(&home, 7).unwrap()),
+        };
+        restarted.flush(&id).await.unwrap();
+        assert!(calls.try_recv().is_err());
         server.abort();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[tokio::test]
+    async fn legacy_streaming_card_retries_mutation_and_finishes_without_empty_status() {
+        let mut failed = false;
+        let (base, requests, task) = super::super::sdk::tests::mock(move |path, body| {
+            if path.ends_with("/answer/content") && !failed {
+                failed = true;
+                json!({"code":99991400,"msg":"temporary failure"})
+            } else {
+                assert!(!path.ends_with("/status/content"));
+                if path.ends_with("/settings") {
+                    let settings: Value =
+                        serde_json::from_str(body["settings"].as_str().unwrap()).unwrap();
+                    assert_eq!(settings["streaming_mode"], false);
+                }
+                json!({"code":0,"data":{}})
+            }
+        })
+        .await;
+        let home = std::env::temp_dir().join(format!("fae-legacy-card-{}", wd_tools::uuid::v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant",
+            "agent_id":"fae","workspace":home
+        }))
+        .unwrap();
+        let store = Arc::new(Store::open(&home, 7).unwrap());
+        let binding = serde_json::from_value(json!({
+            "session_mapping_version":2,"thread_id":"omt_legacy","channel":"lark",
+            "app_id":"app","tenant_key":"tenant","user_id":"u","chat_id":"chat","chat_type":"p2p"
+        }))
+        .unwrap();
+        let id = super::super::identity::receipt_id("app", "tenant", "om_legacy");
+        let mut record = super::super::store::Record::new(
+            id.clone(),
+            "omt_legacy".into(),
+            binding,
+            "om_legacy".into(),
+            "q".into(),
+            None,
+        );
+        let mut card = Card::new("response".into());
+        card.text = "最终正文".into();
+        card.card_id = Some("legacy".into());
+        card.reply_id = Some("om_reply".into());
+        let mut saved = serde_json::to_value(card).unwrap();
+        saved.as_object_mut().unwrap().remove("final_document");
+        record
+            .responses
+            .push(serde_json::from_value(saved).unwrap());
+        record.outcome = Some("succeeded".into());
+        store.insert(record).unwrap();
+        let writer = Writer {
+            sdk: Sdk::for_test(config, base),
+            store: store.clone(),
+        };
+        writer.flush(&id).await.unwrap_err();
+        writer.flush(&id).await.unwrap();
+        assert!(store.get(&id).responses[0].closed);
+        let calls = requests.lock().unwrap();
+        let content: Vec<_> = calls
+            .iter()
+            .filter(|(p, _)| p.ends_with("/answer/content"))
+            .collect();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].1, content[1].1);
+        let sequences: Vec<_> = calls
+            .iter()
+            .filter_map(|(_, b)| b["sequence"].as_u64())
+            .collect();
+        assert_eq!(sequences, vec![1, 1, 2, 3]);
+        drop(calls);
+        task.abort();
         std::fs::remove_dir_all(home).unwrap();
     }
     #[test]
@@ -547,7 +655,11 @@ mod tests {
         );
     }
     #[test]
-    fn streaming_card_passes_sdk_validation() {
-        document().unwrap();
+    fn final_card_passes_sdk_validation_and_summary_preserves_unicode() {
+        let text = format!("{}\n正文", "玫瑰".repeat(70));
+        let card = document(&text).unwrap();
+        assert_eq!(card["config"]["summary"]["content"], "玫瑰".repeat(50));
+        assert_eq!(card["body"]["elements"][0]["content"], text);
+        assert!(card["config"].get("streaming_config").is_none());
     }
 }

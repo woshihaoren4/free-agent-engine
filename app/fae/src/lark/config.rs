@@ -10,6 +10,8 @@ pub struct Config {
     pub app_secret: String,
     pub tenant_key: String,
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id_whitelist: Option<Vec<String>>,
     #[serde(default = "default_workspace")]
     pub workspace: PathBuf,
     #[serde(default)]
@@ -33,7 +35,11 @@ mod thread_config_tests {
             "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae",
             "workspace":home,"group":{"require_mention":true,"reply_in_thread":false}
         });
-        std::fs::write(home.join("lark.config"), serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::write(
+            home.join("lark.config"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
         assert!(Config::load(&home).unwrap().group.reply_in_thread);
         assert!(Group::default().reply_in_thread);
         std::fs::remove_dir_all(home).unwrap();
@@ -101,6 +107,12 @@ impl Default for Storage {
     }
 }
 impl Config {
+    pub fn allows_user(&self, user_id: &str) -> bool {
+        self.user_id_whitelist
+            .as_ref()
+            .is_none_or(|users| users.iter().any(|user| user == user_id))
+    }
+
     pub fn load(home: &Path) -> anyhow::Result<Self> {
         let mut config: Self = serde_json::from_slice(&std::fs::read(home.join("lark.config"))?)?;
         anyhow::ensure!(config.version == 1, "Unsupported lark.config version");
@@ -232,6 +244,7 @@ impl Config {
             app_secret: "<APP_SECRET>".into(),
             tenant_key: "<TENANT_KEY>".into(),
             agent_id: "fae".into(),
+            user_id_whitelist: None,
             workspace,
             group: Group::default(),
             execution: Execution::default(),
