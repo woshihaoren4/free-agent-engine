@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use super::{
-    DEFAULT_CHANNEL, EXECUTE_PYTHON, effective_tool_name, ok_json, parse_arguments,
+    DEFAULT_CHANNEL, EXECUTE_PYTHON, command_cwd, effective_tool_name, ok_json, parse_arguments,
     request_tool_name, unsupported_tool,
 };
 
@@ -54,7 +54,7 @@ impl Tools for ExecutePythonTool {
                 "properties": {
                     "script": { "type": "string", "description": "Python source code to execute." },
                     "file": { "type": "string", "description": "Python file to execute. Relative paths are resolved from cwd." },
-                    "cwd": { "type": "string", "description": "Optional working directory." },
+                    "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
                     "python": { "type": "string", "description": "Python executable. Defaults to python3." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional timeout in seconds. Defaults to 60." }
                 },
@@ -66,15 +66,16 @@ impl Tools for ExecutePythonTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != EXECUTE_PYTHON {
             return Err(unsupported_tool(req.get_tool_name()));
         }
 
-        let args: ExecutePythonArgs = match parse_arguments(req.get_arguments()) {
+        let mut args: ExecutePythonArgs = match parse_arguments(req.get_arguments()) {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        args.cwd = Some(command_cwd(ctx, args.cwd)?);
 
         let python = args.python.unwrap_or_else(|| "python3".to_string());
         let mut command = Command::new(&python);

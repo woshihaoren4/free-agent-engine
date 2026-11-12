@@ -177,6 +177,7 @@ impl Actor {
         let session_id = self.info.session_id.clone();
         let agent_id = self.key.target.clone();
         let workspace = self.info.workspace.clone();
+        let timer_triggered = self.timer_occurrence.is_some();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = async {
@@ -202,6 +203,8 @@ impl Actor {
                                 .with_session_id(session_id.clone());
                             env.mode = mode;
                             let mut scope = fae_agent::ContextScope::root(user);
+                            scope.workspace = Some(workspace.clone());
+                            scope.execution_origin = timer_triggered.then(|| "timer".to_string());
                             scope.agent_id = Some(agent_id.clone());
                             scope.session = Some(fae_agent::ContextSession {
                                 session_id,
@@ -229,7 +232,14 @@ impl Actor {
                     SessionTarget::Workflow { workflow_id, input } => {
                         let (env, session) =
                             WorkflowEnv::new_with_user_id(workflow_id, input, user);
-                        let ctx = engine.launch(env).await?;
+                        let mut scope = fae_agent::ContextScope::root(session.user_id());
+                        scope.workspace = Some(workspace);
+                        scope.workflow_id = Some(env.workflow_id.clone());
+                        scope.session = Some(fae_agent::ContextSession {
+                            session_id,
+                            session: session.clone(),
+                        });
+                        let ctx = engine.launch_with_scope(scope, env).await?;
                         let state = ctx.state();
                         tx.send(Command::Started {
                             session: session.clone(),

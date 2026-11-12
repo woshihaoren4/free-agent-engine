@@ -12,6 +12,9 @@ pub(super) struct SingleAgentBinding {
 pub(in crate::plan) struct SingleAgentTemplate {
     pub(in crate::plan) agent: SingleAgentInfo,
     pub(in crate::plan) prompt: String,
+    pub(in crate::plan) runtime_context: Option<SingleAgentRuntimeContext>,
+    pub(in crate::plan) runtime: Option<RT>,
+    pub(in crate::plan) execution_mode: &'static str,
     pub(in crate::plan) model: SingleAgentModelConfig,
     pub(in crate::plan) tool_definitions: Vec<ChatCompletionTools>,
     pub(in crate::plan) tool_routes: HashMap<String, CallableRoute>,
@@ -497,7 +500,25 @@ impl SingleAgentPlan {
         task_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.messages.clear();
-        let prompt = prompt_with_user_memory(&self.template.prompt, &self.user_memory)?;
+        let history_limit = self.template.model.history_turns.saturating_mul(2);
+        let history_start = history.len().saturating_sub(history_limit);
+        let summary_start = history
+            .iter()
+            .rposition(|message| message.role == SessionMessageRole::Summary)
+            .unwrap_or(0);
+        let start = history_start.max(summary_start);
+        let mut prompt = self.template.prompt.clone();
+        if let Some(runtime) = &self.template.runtime_context {
+            let environment =
+                runtime_environment(&self.ctx, &self.template, history.len() - start, start).await;
+            append_prompt_section(
+                &mut prompt,
+                "runtime",
+                priority::RUNTIME,
+                runtime.to_prompt_with_environment(environment)?,
+            )?;
+        }
+        let prompt = prompt_with_user_memory(&prompt, &self.user_memory)?;
         let prompt = self
             .template
             .hook
@@ -511,14 +532,6 @@ impl SingleAgentPlan {
                 },
             ));
         }
-
-        let history_limit = self.template.model.history_turns.saturating_mul(2);
-        let history_start = history.len().saturating_sub(history_limit);
-        let summary_start = history
-            .iter()
-            .rposition(|message| message.role == SessionMessageRole::Summary)
-            .unwrap_or(0);
-        let start = history_start.max(summary_start);
         for message in &history[start..] {
             self.messages
                 .push(session_message_to_chat(message, &self.template.model.image_detail).await?);

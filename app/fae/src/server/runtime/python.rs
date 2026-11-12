@@ -34,7 +34,7 @@ impl PythonActionRuntime {
             .cloned()
             .unwrap_or(Value::Null);
         let output = tokio::select! {
-            output = execute_python(code, &arguments) => output?,
+            output = execute_python(code, &arguments, &task.ctx) => output?,
             reason = task.ctx.cancellation() => return Err(anyhow::anyhow!("{reason}").into()),
         };
         Ok(TaskResp {
@@ -86,17 +86,23 @@ impl RuntimeSelectExec<WorkflowActionRequest, WorkflowActionResponse, (), ()>
         Self::execute(task).await
     }
 }
-async fn execute_python(code: &str, arguments: &Value) -> anyhow::Result<Value> {
+async fn execute_python(
+    code: &str,
+    arguments: &Value,
+    ctx: &fae_agent::Ctx,
+) -> anyhow::Result<Value> {
     let program = format!(
         "import json\narguments = json.loads({})\nresult = None\n{code}\nprint(json.dumps(result, ensure_ascii=False))\n",
         serde_json::to_string(&serde_json::to_string(arguments)?)?
     );
-    let output = tokio::process::Command::new("python3")
-        .arg("-c")
-        .arg(program)
-        .kill_on_drop(true)
-        .output()
-        .await?;
+    let mut command = tokio::process::Command::new("python3");
+    command.arg("-c").arg(program).kill_on_drop(true);
+    if let Ok(scope) = ctx.scope() {
+        if let Some(workspace) = &scope.workspace {
+            command.current_dir(workspace);
+        }
+    }
+    let output = command.output().await?;
     anyhow::ensure!(
         output.status.success(),
         "python action failed: {}",

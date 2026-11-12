@@ -348,6 +348,7 @@ impl SingleAgentTodoPlan {
         let mut template = self.template.clone();
         match self.todo.phase {
             TodoPhase::Planning => {
+                template.execution_mode = "todo_planning";
                 template.tool_definitions = template
                     .tool_definitions
                     .into_iter()
@@ -355,6 +356,7 @@ impl SingleAgentTodoPlan {
                     .collect();
             }
             TodoPhase::Executing => {
+                template.execution_mode = "todo_execution";
                 template
                     .tool_definitions
                     .retain(|definition| !is_todo_definition(definition));
@@ -735,6 +737,9 @@ mod tests {
                 metadata: HashMap::new(),
             },
             prompt: "You are a test agent.".to_string(),
+            runtime_context: None,
+            runtime: None,
+            execution_mode: "chat",
             model: SingleAgentModelConfig {
                 model: "test-model".to_string(),
                 image_detail: Default::default(),

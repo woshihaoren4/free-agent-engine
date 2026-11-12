@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use fae_agent::{SingleAgentHook, SingleAgentHookBuilder, SingleAgentHookContext};
+use fae_agent::{SingleAgentHook, SingleAgentHookBuilder, SingleAgentHookContext, prompt_priority};
 
 const WORKSPACE_DESCRIPTION: &str = "Current project and workspace description";
 
@@ -57,7 +57,8 @@ async fn append_workspace_prompt(workspace: &Path, prompt: String) -> anyhow::Re
         workspace_content.is_none() && rules.is_none() && agents.is_none() && project.is_none();
 
     let mut context = format!(
-        "<Workspace desc=\"{WORKSPACE_DESCRIPTION}\",workspace_path=\"{}\">\n",
+        "<Workspace priority=\"{}\" desc=\"{WORKSPACE_DESCRIPTION}\" workspace_path=\"{}\">\n",
+        prompt_priority::WORKSPACE,
         escape_xml(&workspace.display().to_string())
     );
     push_indented(
@@ -70,7 +71,7 @@ async fn append_workspace_prompt(workspace: &Path, prompt: String) -> anyhow::Re
     if is_empty {
         push_indented(
             &mut context,
-            "No workspace context files were found. Add project-specific context to workspace.md.",
+            "No workspace context files are configured for this session. Continue using the available task context. Create or modify workspace context files only when the user requests it or the task explicitly requires it.",
         );
     } else {
         push_indented(&mut context, "Workspace context:");
@@ -108,7 +109,10 @@ async fn read_optional(path: &Path) -> anyhow::Result<Option<String>> {
 }
 
 fn push_section(output: &mut String, name: &str, content: &str) {
-    push_indented(output, &format!("<{name}>"));
+    push_indented(
+        output,
+        &format!("<{name} priority=\"{}\">", prompt_priority::WORKSPACE),
+    );
     push_indented(output, content);
     push_indented(output, &format!("</{name}>"));
 }
@@ -155,16 +159,16 @@ mod tests {
             .unwrap();
 
         assert!(prompt.starts_with(
-            "base prompt\n\n<Workspace desc=\"Current project and workspace description\""
+            "base prompt\n\n<Workspace priority=\"70\" desc=\"Current project and workspace description\""
         ));
         assert!(prompt.contains(&format!(
             "Workspace description file path: {}",
             workspace.join(".fae/workspace.md").display()
         )));
         assert!(prompt.contains(
-            "No workspace context files were found. Add project-specific context to workspace.md."
+            "No workspace context files are configured for this session. Continue using the available task context. Create or modify workspace context files only when the user requests it or the task explicitly requires it."
         ));
-        assert!(!prompt.contains("<rules>"));
+        assert!(!prompt.contains("<rules "));
         assert!(prompt.ends_with("</Workspace>"));
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
@@ -192,7 +196,7 @@ mod tests {
             .unwrap();
 
         assert!(prompt.starts_with(
-            "base prompt\n\n<Workspace desc=\"Current project and workspace description\""
+            "base prompt\n\n<Workspace priority=\"70\" desc=\"Current project and workspace description\""
         ));
         assert!(prompt.contains(&format!("workspace_path=\"{}\"", workspace.display())));
         assert!(prompt.contains(&format!(
@@ -200,9 +204,17 @@ mod tests {
             fae_dir.join("workspace.md").display()
         )));
         assert!(prompt.contains("    workspace line\n"));
-        assert!(prompt.contains("    <rules>\n    rule one\n    rule two\n    </rules>\n"));
-        assert!(prompt.contains("    <agents>\n    agent content\n    </agents>\n"));
-        assert!(prompt.contains("    <project>\n    project content\n    </project>\n"));
+        assert!(
+            prompt.contains(
+                "    <rules priority=\"70\">\n    rule one\n    rule two\n    </rules>\n"
+            )
+        );
+        assert!(
+            prompt.contains("    <agents priority=\"70\">\n    agent content\n    </agents>\n")
+        );
+        assert!(
+            prompt.contains("    <project priority=\"70\">\n    project content\n    </project>\n")
+        );
         assert!(prompt.ends_with("</Workspace>"));
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
@@ -220,9 +232,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(prompt.contains("    <rules>\n    only rules\n    </rules>\n"));
-        assert!(prompt.contains("    <agents>\n    \n    </agents>\n"));
-        assert!(prompt.contains("    <project>\n    \n    </project>\n"));
+        assert!(prompt.contains("    <rules priority=\"70\">\n    only rules\n    </rules>\n"));
+        assert!(prompt.contains("    <agents priority=\"70\">\n    \n    </agents>\n"));
+        assert!(prompt.contains("    <project priority=\"70\">\n    \n    </project>\n"));
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 }

@@ -14,6 +14,7 @@ use wd_tools::channel::{Channel, Receiver, Sender};
 struct ObservedCall {
     ctx: Ctx,
     identifier: Option<String>,
+    messages: String,
 }
 
 #[derive(Debug)]
@@ -37,6 +38,7 @@ impl MockModel {
         self.calls.lock().unwrap().push(ObservedCall {
             ctx: task.ctx.clone(),
             identifier: task.req.safety_identifier.clone(),
+            messages: serde_json::to_string(&task.req.messages).unwrap(),
         });
         // Exercise the dedicated sub-agent invocation assembled by SingleAgentPlan.
         let scope = task.ctx.scope().unwrap();
@@ -323,7 +325,16 @@ async fn dedicated_agent_invocation_and_next_turn_preserve_session_and_identity(
 -> anyhow::Result<()> {
     let (engine, home, _, calls) = fixture().await?;
     let (env, session) = SingleAgentEnv::from_agent_id_with_user_id("parent", "delegate", "alice");
-    let ctx = engine.launch(env).await?;
+    let mut scope = ContextScope::root("alice");
+    scope.workspace = Some(home.clone());
+    scope.execution_origin = Some("timer".into());
+    scope.agent_id = Some("parent".into());
+    scope.session = Some(ContextSession {
+        session_id: "configured".into(),
+        session: session.clone(),
+    });
+    scope.turn_id = Some(1);
+    let ctx = engine.launch_with_scope(scope, env).await?;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), session.result()).await??,
         json!("done")
@@ -355,6 +366,16 @@ async fn dedicated_agent_invocation_and_next_turn_preserve_session_and_identity(
         json!("done")
     );
     let observed = calls.lock().unwrap();
+    for call in observed.iter() {
+        let scope = call.ctx.scope()?;
+        assert_eq!(scope.workspace.as_ref(), Some(&home));
+        assert_eq!(scope.execution_origin.as_deref(), Some("timer"));
+        assert!(call.messages.contains("default_command_cwd"));
+        assert!(call.messages.contains(&home.to_string_lossy().into_owned()));
+        assert!(call.messages.contains("current_time"));
+        assert!(call.messages.contains("retained_history_turns"));
+        assert!(!call.messages.contains("<history_context"));
+    }
     let parent_turns = observed
         .iter()
         .filter_map(|call| {

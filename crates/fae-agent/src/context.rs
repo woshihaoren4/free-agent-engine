@@ -120,6 +120,9 @@ pub struct ContextScope {
     pub node_id: Option<String>,
     pub turn_id: Option<u64>,
     pub todo: Option<Arc<TodoPlanScope>>,
+    /// Session-local execution directory, inherited by tools and child plans.
+    pub workspace: Option<std::path::PathBuf>,
+    pub execution_origin: Option<String>,
     pub timer_execution: Option<Arc<crate::TimerExecutionBinding>>,
 }
 impl ContextScope {
@@ -136,6 +139,8 @@ impl ContextScope {
             node_id: None,
             turn_id: None,
             todo: None,
+            workspace: None,
+            execution_origin: None,
             timer_execution: None,
         }
     }
@@ -146,6 +151,7 @@ impl ContextScope {
 pub struct ContextChildSpec {
     pub timer_source: Option<crate::SingleAgentSource>,
     pub timer_workspace: Option<std::path::PathBuf>,
+    pub workspace: Option<std::path::PathBuf>,
     pub session: Option<ContextSession>,
     pub agent_id: Option<String>,
     pub workflow_id: Option<String>,
@@ -484,6 +490,7 @@ pub(crate) fn test_context(scope: Option<ContextScope>) -> Ctx {
             scope.scope_id = wd_tools::uuid::v4();
             scope.parent_scope_id = Some(parent.scope_id.clone());
             scope.timer_execution = spec.timer_binding(&parent);
+            scope.workspace = parent.workspace.clone().or(spec.workspace);
             scope.todo = spec.todo.resolve(&parent.todo, spec.execution);
             if spec.execution {
                 scope.session = spec.session;

@@ -410,6 +410,12 @@ impl EngineContext {
         Arc::new(Self::new(engine))
     }
     fn validate(scope: &ContextScope) -> anyhow::Result<()> {
+        if let Some(workspace) = &scope.workspace {
+            anyhow::ensure!(
+                workspace.is_absolute(),
+                "session workspace must be an absolute path"
+            );
+        }
         if let Some(todo) = &scope.todo {
             crate::validate_path_segment("plan_id", &todo.plan_id)?;
             anyhow::ensure!(
@@ -513,6 +519,8 @@ impl Context for EngineContext {
                 .turn_id
                 .or_else(|| if spec.execution { None } else { parent.turn_id }),
             todo: spec.todo.resolve(&parent.todo, spec.execution),
+            workspace: parent.workspace.clone().or(spec.workspace),
+            execution_origin: parent.execution_origin.clone(),
             timer_execution,
         };
         Self::validate(&scope)?;

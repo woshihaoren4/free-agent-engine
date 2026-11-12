@@ -438,6 +438,9 @@ impl Session<SessionInput, SessionOutput> for CommonSession {
             session: self.clone(),
         });
         scope.turn_id = Some(turn_id);
+        if let Some(runtime) = &binding.template.runtime_context {
+            runtime.restore_environment(&mut scope);
+        }
         ctx.bind_scope(scope)?;
         self.bind_context(ctx.clone());
         ctx.set_state(crate::ContextState::Running)?;

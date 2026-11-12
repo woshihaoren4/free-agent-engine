@@ -114,7 +114,8 @@ const fn default_max_completion_tokens() -> Option<u32> {
 
 const MAX_EMPTY_MODEL_RETRIES: usize = 1;
 const EMPTY_MODEL_RETRY_PROMPT: &str = "Your previous response ended without assistant output. \
-Continue the task from the available context and return either a tool call or a final answer.";
+Continue the task from the available context and return either a tool call or a final answer. \
+Use existing tool results and avoid repeating completed operations with external effects solely because this response was empty.";
 const IMAGE_TOKEN_COST_ENV: &str = "FAE_IMAGE_TOKEN_COST";
 const DEFAULT_IMAGE_TOKEN_COST: usize = 1_280;
 
@@ -337,3 +338,15 @@ pub use session::CommonSession;
 use builder::*;
 use execution::*;
 use message::*;
+
+/// Priorities are assigned by source, never by user-supplied section names.
+pub mod prompt_priority {
+    pub const SETTING: u8 = 100;
+    pub const CONFIG: u8 = 90;
+    pub const SKILLS: u8 = 80;
+    pub const WORKSPACE: u8 = 70;
+    pub const USER_MEMORY: u8 = 60;
+    pub const CATALOG: u8 = 50;
+    pub const RUNTIME: u8 = 40;
+}
+use prompt_priority as priority;

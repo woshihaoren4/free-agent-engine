@@ -24,3 +24,5 @@ async-openai = {path = "../async-openai", version = "0.40.2",features = ["full"]
 pin-project = "1.1.10"
 dirs = "6.0.0"
 chrono = "0.4"
+chrono-tz = "0.10"
+iana-time-zone = "0.1"

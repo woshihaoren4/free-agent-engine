@@ -172,6 +172,7 @@ pub(in crate::plan::single_agent) fn validate_prompt_tag(tag: &str) -> anyhow::R
 pub(in crate::plan::single_agent) fn append_prompt_section(
     prompt: &mut String,
     tag: &str,
+    priority: u8,
     text: impl AsRef<str>,
 ) -> anyhow::Result<()> {
     validate_prompt_tag(tag)?;
@@ -184,7 +185,7 @@ pub(in crate::plan::single_agent) fn append_prompt_section(
     }
     prompt.push('<');
     prompt.push_str(tag);
-    prompt.push_str(">\n");
+    prompt.push_str(&format!(" priority=\"{priority}\">\n"));
     prompt.push_str(text);
     prompt.push_str("\n</");
     prompt.push_str(tag);

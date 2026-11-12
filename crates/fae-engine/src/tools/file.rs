@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{
     DEFAULT_CHANNEL, LIST_DIRECTORY, READ_FILE, WRITE_FILE, effective_tool_name, ok_json,
-    parse_arguments, request_tool_name, unsupported_tool,
+    parse_arguments, request_tool_name, resolve_execution_path, unsupported_tool,
 };
 
 #[derive(Debug, Default)]
@@ -46,7 +46,7 @@ impl Tools for ReadFileTool {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to the file." },
+                    "path": { "type": "string", "description": "Path to the file. Relative paths use the session workspace." },
                     "with_line_numbers": { "type": "boolean", "description": "Prefix each line with a 1-based line number." },
                     "max_bytes": { "type": "integer", "minimum": 1, "description": "Optional maximum number of bytes to return." }
                 },
@@ -55,15 +55,16 @@ impl Tools for ReadFileTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != READ_FILE {
             return Err(unsupported_tool(req.get_tool_name()));
         }
 
-        let args: ReadFileArgs = match parse_arguments(req.get_arguments()) {
+        let mut args: ReadFileArgs = match parse_arguments(req.get_arguments()) {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        args.path = resolve_execution_path(ctx, args.path)?;
 
         let bytes = match tokio::fs::read(&args.path).await {
             Ok(bytes) => bytes,
@@ -130,7 +131,7 @@ impl Tools for WriteFileTool {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path to write." },
+                    "path": { "type": "string", "description": "Path to write. Relative paths use the session workspace." },
                     "content": { "type": "string", "description": "File content." },
                     "append": { "type": "boolean", "description": "Append to the file instead of replacing it." },
                     "create_parent": { "type": "boolean", "description": "Create missing parent directories before writing." }
@@ -140,15 +141,16 @@ impl Tools for WriteFileTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != WRITE_FILE {
             return Err(unsupported_tool(req.get_tool_name()));
         }
 
-        let args: WriteFileArgs = match parse_arguments(req.get_arguments()) {
+        let mut args: WriteFileArgs = match parse_arguments(req.get_arguments()) {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        args.path = resolve_execution_path(ctx, args.path)?;
 
         if args.create_parent {
             if let Some(parent) = args.path.parent() {
@@ -223,22 +225,23 @@ impl Tools for ListDirectoryTool {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Directory path to list." }
+                    "path": { "type": "string", "description": "Directory path to list. Relative paths use the session workspace." }
                 },
                 "required": ["path"]
             }
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != LIST_DIRECTORY {
             return Err(unsupported_tool(req.get_tool_name()));
         }
 
-        let args: ListDirectoryArgs = match parse_arguments(req.get_arguments()) {
+        let mut args: ListDirectoryArgs = match parse_arguments(req.get_arguments()) {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        args.path = resolve_execution_path(ctx, args.path)?;
 
         let mut dir = match tokio::fs::read_dir(&args.path).await {
             Ok(dir) => dir,

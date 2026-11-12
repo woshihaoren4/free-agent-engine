@@ -93,7 +93,7 @@ impl Tools for DefaultTools {
     }
 
     async fn desc(&self, ctx: &Ctx, tool_name: &str) -> anyhow::Result<Value> {
-        match effective_tool_name(tool_name) {
+        let mut description = match effective_tool_name(tool_name) {
             DEFAULT_CHANNEL => Ok(json!({
                 "channel": DEFAULT_CHANNEL,
                 "tools": DEFAULT_TOOL_NAMES
@@ -112,7 +112,19 @@ impl Tools for DefaultTools {
             TIMER => self.timer.desc(ctx, tool_name).await,
             VOLCENGINE_SEARCH => self.volcengine_search.desc(ctx, tool_name).await,
             _ => Err(unsupported_tool(tool_name)),
-        }
+        }?;
+        let readiness = match effective_tool_name(tool_name) {
+            READ_FILE | WRITE_FILE | LIST_DIRECTORY => json!({"status": "available"}),
+            VOLCENGINE_SEARCH
+                if std::env::var("ARK_WEB_SEARCH_APIKEY")
+                    .map_or(true, |value| value.trim().is_empty()) =>
+            {
+                json!({"status": "missing_configuration", "missing_configuration": ["ARK_WEB_SEARCH_APIKEY"]})
+            }
+            _ => json!({"status": "unverified"}),
+        };
+        description["readiness"] = readiness;
+        Ok(description)
     }
 
     async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
@@ -162,4 +174,31 @@ fn request_tool_name(req: &fae_agent::ToolRequest) -> &str {
 
 fn unsupported_tool(tool_name: &str) -> anyhow::Error {
     anyhow::anyhow!("unsupported tool `{tool_name}`")
+}
+
+fn execution_workspace(ctx: &Ctx) -> anyhow::Result<PathBuf> {
+    if let Ok(scope) = ctx.scope() {
+        if let Some(workspace) = &scope.workspace {
+            return Ok(workspace.clone());
+        }
+        if let Some(binding) = &scope.timer_execution {
+            return Ok(binding.workspace.clone());
+        }
+    }
+    Ok(std::env::current_dir()?)
+}
+
+fn resolve_execution_path(ctx: &Ctx, path: PathBuf) -> anyhow::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(execution_workspace(ctx)?.join(path))
+    }
+}
+
+fn command_cwd(ctx: &Ctx, cwd: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match cwd {
+        Some(path) => resolve_execution_path(ctx, path),
+        None => execution_workspace(ctx),
+    }
 }

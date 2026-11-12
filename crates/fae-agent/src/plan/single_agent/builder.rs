@@ -43,7 +43,12 @@ impl SingleAgentPlanBuilder {
 
     /// Trusted host execution environment; never populated from model arguments.
     pub fn set_timer_workspace(&mut self, workspace: PathBuf) {
-        self.timer_workspace = Some(workspace);
+        self.set_workspace(workspace);
+    }
+
+    /// Bind the default directory without changing the service process directory.
+    pub fn set_workspace(&mut self, workspace: PathBuf) {
+        self.timer_workspace = Some(absolute_path(&workspace));
     }
 
     pub fn hooks(&self) -> &[Arc<dyn SingleAgentHookBuilder>] {
@@ -148,6 +153,10 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         Ok(crate::ContextChildSpec {
             timer_source: Some(env.source.clone()),
             timer_workspace: self.timer_workspace.clone(),
+            workspace: self
+                .timer_workspace
+                .clone()
+                .or_else(|| std::env::current_dir().ok()),
             execution: true,
             session: Some(crate::ContextSession {
                 session_id: env.session_id.clone().unwrap_or(config.agent.session_id),
@@ -209,6 +218,10 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
                 session: env.session.clone(),
             });
             scope.turn_id = Some(turn_id);
+            scope.workspace = self
+                .timer_workspace
+                .clone()
+                .or_else(|| std::env::current_dir().ok());
             if let Some(workspace) = &self.timer_workspace {
                 scope.timer_execution = Some(Arc::new(crate::TimerExecutionBinding {
                     owner: crate::TimerOwner {
@@ -234,6 +247,14 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             .cloned()
             .collect::<Vec<_>>();
         let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &configured_tools).await?;
+        anyhow::ensure!(
+            skills.is_empty()
+                || tool_routes.keys().any(|name| matches!(
+                    name.as_str(),
+                    "read_file" | "execute_command" | "execute_python"
+                )),
+            "agents with skills require a configured file or command reading tool"
+        );
         if mode == Some(SingleAgentMode::Todo) {
             anyhow::ensure!(
                 matches!(
@@ -293,17 +314,22 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             &mcp_tools,
             &sub_agents,
             &workflows,
-            Some(&SingleAgentRuntimeContext::new(
-                &config.agent,
-                &self.home_dir,
-                &config_path,
-                &prompt_path,
-            )),
+            None,
         )?;
+        let mut runtime_context = SingleAgentRuntimeContext::new(
+            &config.agent,
+            &self.home_dir,
+            &config_path,
+            &prompt_path,
+        );
+        runtime_context.bind_environment(ctx.scope()?.as_ref());
         let hook = self.build_hook().await;
         let template = SingleAgentTemplate {
             agent: config.agent,
             prompt,
+            runtime_context: Some(runtime_context),
+            runtime: Some(rt.clone()),
+            execution_mode: "chat",
             model: config.model,
             tool_definitions,
             tool_routes,

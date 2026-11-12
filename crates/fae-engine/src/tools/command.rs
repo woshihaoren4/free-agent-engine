@@ -10,8 +10,8 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
 use super::{
-    APPLY_PATCH, DEFAULT_CHANNEL, EXECUTE_COMMAND, effective_tool_name, ok_json, parse_arguments,
-    request_tool_name, unsupported_tool,
+    APPLY_PATCH, DEFAULT_CHANNEL, EXECUTE_COMMAND, command_cwd, effective_tool_name,
+    execution_workspace, ok_json, parse_arguments, request_tool_name, unsupported_tool,
 };
 
 #[derive(Debug, Default)]
@@ -48,12 +48,12 @@ impl Tools for ExecuteCommandTool {
 
         Ok(json!({
             "name": EXECUTE_COMMAND,
-            "description": "Execute a shell command and return stdout, stderr, and exit status. Destructive commands may only target FAE_HOST, the process working directory, or the system temporary directory.",
+            "description": "Execute a shell command and return stdout, stderr, and exit status. Destructive commands may only target FAE_HOST, the session workspace, the process working directory, or the system temporary directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute." },
-                    "cwd": { "type": "string", "description": "Optional working directory." },
+                    "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional command timeout in seconds. Defaults to 60." }
                 },
                 "required": ["command"]
@@ -61,7 +61,7 @@ impl Tools for ExecuteCommandTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != EXECUTE_COMMAND {
             return Err(unsupported_tool(req.get_tool_name()));
         }
@@ -70,12 +70,14 @@ impl Tools for ExecuteCommandTool {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        let cwd = command_cwd(ctx, args.cwd)?;
+        let workspace = execution_workspace(ctx)?;
 
-        if let Err(err) = validate_command_safety(&args.command, args.cwd.as_deref()) {
+        if let Err(err) = validate_command_safety(&args.command, Some(&cwd), &workspace) {
             return Ok(ToolResponse::with_error(403, err));
         }
 
-        run_shell_command(args.command, args.cwd, args.timeout_secs).await
+        run_shell_command(args.command, Some(cwd), args.timeout_secs).await
     }
 }
 
@@ -108,7 +110,7 @@ impl Tools for ApplyPatchTool {
                 "type": "object",
                 "properties": {
                     "patch": { "type": "string", "description": "Unified diff content." },
-                    "cwd": { "type": "string", "description": "Optional working directory." },
+                    "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
                     "strip": { "type": "integer", "minimum": 0, "description": "Path components to strip. Defaults to 1." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional timeout in seconds. Defaults to 60." }
                 },
@@ -117,15 +119,16 @@ impl Tools for ApplyPatchTool {
         }))
     }
 
-    async fn exec(&self, _ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
+    async fn exec(&self, ctx: &Ctx, req: ToolRequest) -> anyhow::Result<ToolResponse> {
         if request_tool_name(&req) != APPLY_PATCH {
             return Err(unsupported_tool(req.get_tool_name()));
         }
 
-        let args: ApplyPatchArgs = match parse_arguments(req.get_arguments()) {
+        let mut args: ApplyPatchArgs = match parse_arguments(req.get_arguments()) {
             Ok(args) => args,
             Err(resp) => return Ok(resp),
         };
+        args.cwd = Some(command_cwd(ctx, args.cwd)?);
 
         let strip = args.strip.unwrap_or(1);
         let mut command = Command::new("patch");
@@ -240,7 +243,11 @@ const DESTRUCTIVE_COMMANDS: &[&str] = &[
     "rm", "rmdir", "unlink", "mv", "chmod", "chown", "chgrp", "truncate", "shred", "dd", "fdisk",
 ];
 
-fn validate_command_safety(command: &str, cwd: Option<&Path>) -> Result<(), String> {
+fn validate_command_safety(
+    command: &str,
+    cwd: Option<&Path>,
+    workspace: &Path,
+) -> Result<(), String> {
     let process_cwd = std::env::current_dir()
         .map_err(|err| format!("cannot determine current directory: {err}"))?;
     let command_cwd = cwd.unwrap_or(&process_cwd);
@@ -248,6 +255,7 @@ fn validate_command_safety(command: &str, cwd: Option<&Path>) -> Result<(), Stri
         process_cwd.clone(),
         crate::default_fae_host(),
         std::env::temp_dir(),
+        workspace.to_path_buf(),
     ]
     .map(|path| normalize_path(&path, &process_cwd));
 

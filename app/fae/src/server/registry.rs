@@ -398,7 +398,7 @@ impl Registry {
             ));
         }
         let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
-        builder.set_timer_workspace(open.workspace.clone());
+        builder.set_workspace(open.workspace.clone());
         builder.add_hook(WorkspaceHookBuilder::new(open.workspace.clone()));
         let (target, name, user, model, session, kind) = match &open.target {
             SessionTarget::Agent { source } => {
@@ -620,7 +620,7 @@ impl Registry {
         }
         let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
         builder.add_hook(WorkspaceHookBuilder::new(binding.workspace.clone()));
-        builder.set_timer_workspace(binding.workspace.clone());
+        builder.set_workspace(binding.workspace.clone());
         builder
             .freeze_source(&binding.source)
             .await
