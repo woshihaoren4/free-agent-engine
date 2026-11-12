@@ -428,9 +428,7 @@ impl Store {
             Ok(bytes) => {
                 let mut saved: ThreadBinding = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
-                    saved.binding == proposed.binding
-                        && saved.agent_id == proposed.agent_id
-                        && saved.workspace == proposed.workspace,
+                    saved.binding == proposed.binding && saved.agent_id == proposed.agent_id,
                     "Thread binding conflict"
                 );
                 anyhow::ensure!(
@@ -439,8 +437,12 @@ impl Store {
                         || saved.root_id == proposed.root_id,
                     "Thread root conflict"
                 );
-                if saved.root_id.is_empty() && !proposed.root_id.is_empty() {
-                    saved.root_id = proposed.root_id.clone();
+                let update_root = saved.root_id.is_empty() && !proposed.root_id.is_empty();
+                if update_root || saved.workspace != proposed.workspace {
+                    if update_root {
+                        saved.root_id = proposed.root_id.clone();
+                    }
+                    saved.workspace = proposed.workspace.clone();
                     crate::server::lifecycle::atomic_write(
                         &path,
                         &serde_json::to_vec(&saved)?,

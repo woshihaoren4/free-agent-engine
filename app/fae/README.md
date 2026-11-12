@@ -28,9 +28,10 @@ executable and config path. `status`, `show`, `stop`, `--help` and `--version`
 do not start a service.
 
 Use `--fae-home` or `FAE_HOST` to isolate service instances. Each home contains
-`server.config`, a private `server.token`, `start.lock`, `server.lock` and
-rotating `log/server.log`. The token authenticates both control and session
-connections; browser Origin requests are rejected. No system service is
+`server.config`, a private `server.token`, the process lock `server.lock`,
+the start/stop lock `server/server.lock` and rotating `server/server.log`.
+The token authenticates both control and session connections; browser Origin
+requests are rejected. No system service is
 installed, so automatic startup happens on the next business command after
 an OS restart. A stopped service's next implicit startup uses the default
 address and port.
@@ -43,7 +44,16 @@ running service's configured port. To recover a service previously launched with
 sudo, run `sudo fae --fae-home /absolute/path/to/.fae server stop`, then start
 it as the home owner. Keep `server.token` at mode `0600`.
 
-Each logical session has its own connection and fixed workspace/configuration.
+Each logical session has its own connection and frozen Agent configuration.
+Its workspace can be changed when opening or resuming it: an explicit caller
+workspace overrides the saved session workspace. Omitting the protocol `workspace`
+field reuses that saved directory, including after a service restart. New sessions
+without a saved directory fall back to the service's current directory.
+The TUI always supplies a directory: the current directory by default, or the
+value of `--workspace`. Changes apply to subsequent rounds; a running round
+retains its original workspace. Conversation history stays with the session.
+Session workspace defaults are saved in `session/<agent>/<user>/<session>.json`,
+alongside the corresponding `<session>.jsonl` conversation history.
 An active session cannot be opened by a second client. Clients can resume
 within the same service instance using ordered event replay (up to 4096
 events or 16 MiB). A replay gap is reported explicitly. A service restart
@@ -168,6 +178,8 @@ Its delivery budget is shared across all records within a 25-second shutdown
 deadline; records that remain undelivered are retried on the next start.
 
 The gateway has a private loopback control socket and instance handshake.
+Its start/stop lock is `lark/lark.lock`; `lark/gateway.lock` protects the running
+process.
 Its service credential (`lark.token`) only opens `/v3/lark/session` and cannot
 initialize agents, clean user data or stop the service. Wire protocol v3
 requires restarting previously running services after upgrading.
@@ -295,7 +307,7 @@ Deleting a timer suppresses pending work but does not cancel an execution
 already handed off.
 
 State is stored separately at
-`<FAE home>/timer/<agent>/<user>/state.json`, protected by `timer.lock`.
+`<FAE home>/timer/<agent>/<user>/state.json`, protected by `schedule/timer.lock`.
 The service runs at most 2 timer rounds within its 8-round/32-session limits.
 The pending queue is capped at 256; excess due times wait without consuming
 counts. Definitions are limited to 100 per agent/user and 1000 per home.

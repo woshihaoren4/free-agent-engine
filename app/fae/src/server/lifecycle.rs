@@ -47,6 +47,9 @@ pub fn runtime_file_error(path: &Path, error: std::io::Error) -> anyhow::Error {
 
 impl FileLock {
     pub fn try_acquire(path: &Path) -> anyhow::Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| runtime_file_error(parent, error))?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -62,6 +65,10 @@ impl FileLock {
     }
     pub async fn acquire(path: PathBuf) -> anyhow::Result<Self> {
         tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| runtime_file_error(parent, error))?;
+            }
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -220,7 +227,7 @@ pub fn process_alive(pid: u32) -> anyhow::Result<bool> {
 }
 
 pub fn log_file(home: &Path) -> anyhow::Result<File> {
-    let dir = home.join("log");
+    let dir = home.join("server");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("server.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= 8 * 1024 * 1024) {
@@ -234,7 +241,7 @@ pub fn log_file(home: &Path) -> anyhow::Result<File> {
 }
 
 pub fn rotate_running_log(home: &Path) -> anyhow::Result<()> {
-    let path = home.join("log/server.log");
+    let path = home.join("server/server.log");
     let Ok(metadata) = std::fs::metadata(&path) else {
         return Ok(());
     };
@@ -268,7 +275,7 @@ pub fn rotate_running_log(home: &Path) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         // Preserve the inherited append handles while bounding the active file.
-        std::fs::copy(&path, home.join("log/server.log.1"))?;
+        std::fs::copy(&path, home.join("server/server.log.1"))?;
         OpenOptions::new().write(true).open(&path)?.set_len(0)?;
     }
     Ok(())

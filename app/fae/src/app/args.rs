@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "FAE_HOST")]
     pub fae_home: Option<PathBuf>,
 
-    /// Workspace whose .fae context files are added to agent prompts
+    /// Session workspace override (defaults to the current directory)
     #[arg(long, global = true, default_value = ".")]
     pub workspace: PathBuf,
 

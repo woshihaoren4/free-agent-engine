@@ -18,6 +18,7 @@ pub enum Command {
         out: Outbound,
         request: String,
         resume: Option<Resume>,
+        workspace: std::path::PathBuf,
     },
     Request(ClientEnvelope),
     Detach {
@@ -43,7 +44,8 @@ pub struct Actor {
     stream: String,
     target: SessionTarget,
     info: SessionInfo,
-    builder: Option<SingleAgentPlanBuilder>,
+    builder: SingleAgentPlanBuilder,
+    execution_workspace: Option<std::path::PathBuf>,
     engine: Option<Engine>,
     session: Option<CommonSession>,
     context: Option<Ctx>,
@@ -80,7 +82,8 @@ impl Actor {
             stream,
             target,
             info,
-            builder: Some(builder),
+            builder,
+            execution_workspace: None,
             engine: None,
             session: None,
             context: None,
@@ -154,20 +157,30 @@ impl Actor {
         } else {
             self.registry.reserve_round(&self.key)?;
         }
-        let round = wd_tools::uuid::v4();
-        self.round = Some(round.clone());
         self.cancel_pending = false;
         self.context = None;
+        if self.execution_workspace.as_ref() != Some(&self.info.workspace) {
+            // A running round retains its scope. Rebuild only when starting the
+            // next round, loading its history under the same session identity.
+            self.session = None;
+            if let Some(engine) = self.engine.take() {
+                if let Err(error) = engine.exit().await {
+                    self.registry.finish_round(&self.key);
+                    return Err(ProtocolError::new("internal_error", error));
+                }
+            }
+        }
+        let round = wd_tools::uuid::v4();
+        self.round = Some(round.clone());
         if self.engine.is_none() {
             let loader = fae_agent::FAEWorkflowMetadataLoader::with_home_dir(&self.registry.home);
-            self.engine = Some(
-                build_engine(
-                    loader,
-                    self.builder.take().unwrap(),
-                    self.registry.timer.clone(),
-                )
-                .await,
-            );
+            let mut builder = self.builder.clone();
+            builder.set_workspace(self.info.workspace.clone());
+            builder.add_hook(super::workspace::WorkspaceHookBuilder::new(
+                self.info.workspace.clone(),
+            ));
+            self.engine = Some(build_engine(loader, builder, self.registry.timer.clone()).await);
+            self.execution_workspace = Some(self.info.workspace.clone());
         }
         let engine = self.engine.as_ref().unwrap().clone();
         let previous = self.session.clone();
@@ -338,9 +351,13 @@ impl Actor {
                 let digest = if mode.is_none() && !auto_steer && !explicit_steer {
                     crate::lark::identity::hash(&[&serde_json::to_string(&data).unwrap()])
                 } else {
-                    crate::lark::identity::hash(&[&serde_json::to_string(
-                        &(&data, &mode, auto_steer, explicit_steer),
-                    ).unwrap()])
+                    crate::lark::identity::hash(&[&serde_json::to_string(&(
+                        &data,
+                        &mode,
+                        auto_steer,
+                        explicit_steer,
+                    ))
+                    .unwrap()])
                 };
                 if let Some(receipt) = super::acceptance::read(
                     &self.registry.home,
@@ -356,8 +373,13 @@ impl Actor {
                     });
                 }
                 let supplemented = explicit_steer || (auto_steer && self.round.is_some());
-                if supplemented && (self.round.is_none() || self.cancel_pending || self.session.is_none()) {
-                    return Err(ProtocolError::new("round_not_active", "No round accepts steering; it may still be starting"));
+                if supplemented
+                    && (self.round.is_none() || self.cancel_pending || self.session.is_none())
+                {
+                    return Err(ProtocolError::new(
+                        "round_not_active",
+                        "No round accepts steering; it may still be starting",
+                    ));
                 }
                 // Persist intent before launching work. A crash here must never cause a replay.
                 super::acceptance::write(
@@ -370,8 +392,11 @@ impl Actor {
                     supplemented,
                 )?;
                 let round = if supplemented {
-                    self.session.as_ref().unwrap()
-                        .call(SessionInput::Supplement(data)).await
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .call(SessionInput::Supplement(data))
+                        .await
                         .map_err(|e| ProtocolError::new("round_not_active", e))?;
                     self.round.clone().unwrap()
                 } else {
@@ -389,8 +414,15 @@ impl Actor {
                     supplemented,
                 )?;
                 if supplemented {
-                    let outcome = RoundOutcome::Succeeded { result: serde_json::json!("steered") };
-                    super::acceptance::finish(&self.registry.home, &external_request_id, &self.key, outcome.clone())?;
+                    let outcome = RoundOutcome::Succeeded {
+                        result: serde_json::json!("steered"),
+                    };
+                    super::acceptance::finish(
+                        &self.registry.home,
+                        &external_request_id,
+                        &self.key,
+                        outcome.clone(),
+                    )?;
                     return Ok(ServerMessage::Acceptance {
                         round_id: Some(round),
                         uncertain: false,
@@ -563,7 +595,9 @@ impl Actor {
                     out,
                     request,
                     resume,
+                    workspace,
                 } => {
+                    self.info.workspace = workspace;
                     self.lease = out.id.clone();
                     self.out = Some(out);
                     self.info.status = self.status();

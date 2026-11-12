@@ -48,7 +48,7 @@ impl Tools for ExecutePythonTool {
 
         Ok(json!({
             "name": EXECUTE_PYTHON,
-            "description": "Execute inline Python code or a Python file with python3 by default.",
+            "description": "Execute inline Python code or a Python file with python3 by default. Provide exactly one of script or file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -57,11 +57,7 @@ impl Tools for ExecutePythonTool {
                     "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
                     "python": { "type": "string", "description": "Python executable. Defaults to python3." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional timeout in seconds. Defaults to 60." }
-                },
-                "oneOf": [
-                    { "required": ["script"] },
-                    { "required": ["file"] }
-                ]
+                }
             }
         }))
     }

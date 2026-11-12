@@ -7,6 +7,59 @@ use std::{
 use anyhow::Context;
 use fae_agent::{SingleAgentHook, SingleAgentHookBuilder, SingleAgentHookContext, prompt_priority};
 
+use super::registry::Key;
+use crate::protocol::ProtocolError;
+
+/// Resolve and persist session defaults alongside conversation history.
+pub struct SessionWorkspace {
+    path: PathBuf,
+}
+
+impl SessionWorkspace {
+    pub fn new(home: &Path, key: &Key) -> Result<Self, ProtocolError> {
+        let path = fae_engine::SessionRuntime::with_host_dir(home)
+            .session_path(&key.target, &key.user, &key.session)
+            .map_err(|e| ProtocolError::new("invalid_session_id", e))?
+            .with_extension("json");
+        Ok(Self { path })
+    }
+
+    pub fn resolve(
+        &self,
+        explicit: Option<&Path>,
+        current: Option<&Path>,
+    ) -> Result<PathBuf, ProtocolError> {
+        let workspace = if let Some(workspace) = explicit.or(current) {
+            workspace.to_path_buf()
+        } else {
+            match std::fs::read(&self.path) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|e| ProtocolError::new("internal_error", e))?,
+                Err(e) if e.kind() == ErrorKind::NotFound => std::env::current_dir()
+                    .map_err(|e| ProtocolError::new("invalid_workspace", e))?,
+                Err(e) => return Err(ProtocolError::new("internal_error", e)),
+            }
+        };
+        if !workspace.is_absolute() || !workspace.is_dir() {
+            return Err(ProtocolError::new(
+                "invalid_workspace",
+                "Workspace must be an absolute directory",
+            ));
+        }
+        workspace
+            .canonicalize()
+            .map_err(|e| ProtocolError::new("invalid_workspace", e))
+    }
+
+    pub fn save(&self, workspace: &Path) -> Result<(), ProtocolError> {
+        let save = || -> anyhow::Result<()> {
+            std::fs::create_dir_all(self.path.parent().unwrap())?;
+            super::lifecycle::atomic_write(&self.path, &serde_json::to_vec(workspace)?, true)
+        };
+        save().map_err(|e| ProtocolError::new("internal_error", e))
+    }
+}
+
 const WORKSPACE_DESCRIPTION: &str = "Current project and workspace description";
 
 #[derive(Clone, Debug)]

@@ -35,20 +35,38 @@ pub fn owns_session(binding: &SessionBinding, id: &str) -> bool {
         return false;
     }
     let base = session_id(binding);
-    id == base || id.strip_prefix(&format!("{base}--")).is_some_and(|suffix| {
-        suffix.len() == 36 && suffix.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() }
+    id == base
+        || id.strip_prefix(&format!("{base}--")).is_some_and(|suffix| {
+            suffix.len() == 36
+                && suffix.bytes().enumerate().all(|(i, b)| {
+                    if matches!(i, 8 | 13 | 18 | 23) {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_hexdigit()
+                    }
+                })
         })
-    })
 }
 pub fn valid_thread(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 256
-        && id != "." && id != ".."
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    !id.is_empty()
+        && id.len() <= 256
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 pub fn worker_key(binding: &SessionBinding, agent: &str) -> String {
-    hash(&["fae-lark-worker-v2", agent, &binding.app_id, &binding.tenant_key,
-        &binding.user_id, &binding.chat_type, &binding.chat_id, &session_id(binding)])
+    hash(&[
+        "fae-lark-worker-v2",
+        agent,
+        &binding.app_id,
+        &binding.tenant_key,
+        &binding.user_id,
+        &binding.chat_type,
+        &binding.chat_id,
+        &session_id(binding),
+    ])
 }
 pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
     let binding = open
@@ -68,14 +86,14 @@ pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
         "Invalid Lark identity"
     );
     anyhow::ensure!(
-        open.session_id.as_deref().is_some_and(|id| owns_session(binding, id)),
+        open.session_id
+            .as_deref()
+            .is_some_and(|id| owns_session(binding, id)),
         "Lark session identity mismatch"
     );
-    anyhow::ensure!(binding.session_mapping_version == 2 || open.resume.is_some(),
-        "Legacy Lark mapping is only available for recovery");
     anyhow::ensure!(
-        open.workspace == config.workspace,
-        "Lark workspace mismatch"
+        binding.session_mapping_version == 2 || open.resume.is_some(),
+        "Legacy Lark mapping is only available for recovery"
     );
     anyhow::ensure!(
         matches!(&open.target, SessionTarget::Agent { source: fae_agent::SingleAgentSource::AgentId(id) } if id == &config.agent_id),

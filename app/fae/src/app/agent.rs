@@ -47,7 +47,7 @@ pub async fn run(
         binding: None,
         target: SessionTarget::Agent { source },
         session_id: args.session_id,
-        workspace,
+        workspace: Some(workspace),
         resume: None,
     };
     let mut client = Client::open(home, config, open.clone()).await?;

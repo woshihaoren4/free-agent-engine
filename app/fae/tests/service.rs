@@ -151,7 +151,7 @@ impl Service {
                 source: SingleAgentSource::AgentId("fae".into()),
             },
             session_id: Some(session.into()),
-            workspace: self.home.clone(),
+            workspace: Some(self.home.clone()),
             resume: None,
         }
     }
@@ -163,7 +163,7 @@ impl Service {
                 input: json!({}),
             },
             session_id: Some(session.into()),
-            workspace: self.home.clone(),
+            workspace: Some(self.home.clone()),
             resume: None,
         }
     }
@@ -317,7 +317,11 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
     let mut other_chat = binding;
     other_chat.chat_id = "another-chat".into();
     conflict.binding = Some(other_chat);
-    assert!(Client::open(&service.home, &service.config, conflict).await.is_err());
+    assert!(
+        Client::open(&service.home, &service.config, conflict)
+            .await
+            .is_err()
+    );
     service.stop().await;
     model_task.abort();
 }
@@ -575,17 +579,34 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     let mut second_open = open.clone();
     second_open.session_id = Some("omt_parallel".into());
     second_open.binding.as_mut().unwrap().thread_id = "omt_parallel".into();
-    let mut second = Client::open(&service.home, &service.config, second_open).await.unwrap();
-    assert!(matches!(second.request(ClientMessage::Status).await.unwrap(),
-        ServerMessage::Status(SessionStatus { round_id: None, .. })));
-    let accepted = second.request(ClientMessage::ExternalInput {
-        external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "parallel"),
-        input: SessionInput::NewChat("hello from T2".into()), mode: None, auto_steer: true,
-    }).await.unwrap();
-    assert!(matches!(accepted, ServerMessage::Ack { round_id: Some(_)}));
-    assert!(matches!(finish(&mut second).await.1, RoundOutcome::Succeeded { .. }));
+    let mut second = Client::open(&service.home, &service.config, second_open)
+        .await
+        .unwrap();
+    assert!(matches!(
+        second.request(ClientMessage::Status).await.unwrap(),
+        ServerMessage::Status(SessionStatus { round_id: None, .. })
+    ));
+    let accepted = second
+        .request(ClientMessage::ExternalInput {
+            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "parallel"),
+            input: SessionInput::NewChat("hello from T2".into()),
+            mode: None,
+            auto_steer: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(accepted, ServerMessage::Ack { round_id: Some(_) }));
+    assert!(matches!(
+        finish(&mut second).await.1,
+        RoundOutcome::Succeeded { .. }
+    ));
     assert_eq!(requests.recv().await.unwrap(), "hello from T2");
-    second.request(ClientMessage::Close { cancel_active: false }).await.unwrap();
+    second
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
     drop(second);
     assert!(client.request(ClientMessage::Clean).await.is_err());
     // Ordinary input and command text both steer the existing round.
@@ -767,6 +788,15 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                             };
                             let args = json!({"operation":"create","idempotency_key":text,"name":"Service timer","input":"background timer input","schedule":schedule});
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"timer-1","type":"function","function":{"name":"timer","arguments":args.to_string()}}]}), "tool_calls")
+                        } else if text == "workspace:probe" && !tool_result {
+                            (json!({"role":"assistant","tool_calls":[{"index":0,"id":"workspace-1","type":"function","function":{"name":"execute_command","arguments":"{\"command\":\"pwd\"}"}}]}), "tool_calls")
+                        } else if text == "workspace:probe" {
+                            let prompt = body["messages"].as_array().unwrap().iter()
+                                .filter(|m| m["role"] == "system")
+                                .map(|m| m["content"].as_str().unwrap_or_default())
+                                .collect::<Vec<_>>().join("\n");
+                            let tool = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+                            (json!({"role":"assistant","content":json!({"prompt":prompt,"tool":tool}).to_string()}), "stop")
                         } else if text == "delegate" {
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"agent","arguments":"{\"agent_id\":\"worker\",\"input\":\"slow child\"}"}}]}), "tool_calls")
                         } else { (json!({"role":"assistant","content":"mock answer"}), "stop") };
@@ -1052,9 +1082,205 @@ async fn agents_support_multiple_rounds_cancel_current_and_delegated_contexts() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_workspace_overrides_defaults_and_updates_execution_after_resume() {
+    let (base, _requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    let first = service.home.join("first");
+    let second = service.home.join("second");
+    for (path, marker) in [(&first, "FIRST_WORKSPACE"), (&second, "SECOND_WORKSPACE")] {
+        std::fs::create_dir_all(path.join(".fae")).unwrap();
+        std::fs::write(path.join(".fae/workspace.md"), marker).unwrap();
+    }
+    let mut open = service.agent("workspace");
+    open.workspace = Some(first.clone());
+    let mut client = Client::open(&service.home, &service.config, open.clone())
+        .await
+        .unwrap();
+    let stream = client.stream.clone();
+    for (path, marker) in [(&first, "FIRST_WORKSPACE"), (&second, "SECOND_WORKSPACE")] {
+        assert_eq!(&client.info.workspace, path);
+        input(&mut client, "workspace:probe").await;
+        let RoundOutcome::Succeeded { result } = finish(&mut client).await.1 else {
+            panic!()
+        };
+        let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
+        assert!(
+            probe["prompt"].as_str().unwrap().contains(marker),
+            "{probe}"
+        );
+        assert!(
+            probe["prompt"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("workspace_path=\"{}\"", path.display())),
+            "{probe}"
+        );
+        // The tool result must reflect the actual process directory, not just
+        // the workspace advertised by SessionInfo or the prompt.
+        let tool = probe["tool"].as_str().unwrap();
+        assert!(tool.contains(&path.display().to_string()), "{tool}");
+        let ServerMessage::Status(status) = client.request(ClientMessage::Status).await.unwrap()
+        else {
+            panic!()
+        };
+        let after_seq = status.latest_seq;
+        client
+            .request(ClientMessage::Close {
+                cancel_active: false,
+            })
+            .await
+            .unwrap();
+        if path == &first {
+            drop(client);
+            open.workspace = Some(second.clone());
+            open.resume = Some(Resume {
+                stream_id: stream.clone(),
+                after_seq,
+            });
+            client = Client::open(&service.home, &service.config, open.clone())
+                .await
+                .unwrap();
+            assert_eq!(client.stream, stream);
+        }
+    }
+    drop(client);
+    open.resume = None;
+    // An omitted JSON field must also be accepted by the server.
+    let mut value = serde_json::to_value(&open).unwrap();
+    value.as_object_mut().unwrap().remove("workspace");
+    open = serde_json::from_value(value).unwrap();
+    let mut client = Client::open(&service.home, &service.config, open.clone())
+        .await
+        .unwrap();
+    assert_eq!(client.info.workspace, second);
+    let ServerMessage::History { messages } = client
+        .request(ClientMessage::History {
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        messages.len() >= 4,
+        "history must survive workspace changes"
+    );
+    let history = fae_engine::SessionRuntime::with_host_dir(&service.home)
+        .session_path("fae", &client.info.user_id, "workspace")
+        .unwrap();
+    assert!(history.is_file());
+    let saved: PathBuf =
+        serde_json::from_slice(&std::fs::read(history.with_extension("json")).unwrap()).unwrap();
+    assert_eq!(saved, second);
+    assert!(!service.home.join("session-workspaces").exists());
+    client.request(ClientMessage::Clean).await.unwrap();
+    assert!(!history.exists());
+    assert!(history.with_extension("json").is_file());
+    drop(client);
+    let mut client = Client::open(&service.home, &service.config, open.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        client.info.workspace, second,
+        "saved default must survive actor removal"
+    );
+    client
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    drop(client);
+    service.stop().await;
+    service.child = Command::new(env!("CARGO_BIN_EXE_fae"))
+        .arg("--fae-home")
+        .arg(&service.home)
+        .args(["server", "start", "--foreground", "--port"])
+        .arg(service.config.port.to_string())
+        .env("OPENAI_BASE_URL", &base)
+        .env("OPENAI_API_KEY", "test-key")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(config) = fae::server::lifecycle::read_config(&service.home) {
+                if client::hello(&service.home, &config).await.is_ok() {
+                    service.config = config;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut client = Client::open(&service.home, &service.config, open)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.info.workspace, second,
+        "saved default must survive restart"
+    );
+    client
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    drop(client);
+
+    // Exercise the real CLI parser and client. The cwd or explicit flag must
+    // override the default saved by the prior invocation.
+    for explicit in [false, true] {
+        let home = service.home.clone();
+        let cwd = first.clone();
+        let override_workspace = second.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_fae"));
+            command.current_dir(cwd).arg("--fae-home").arg(home);
+            if explicit {
+                command.arg("--workspace").arg(override_workspace);
+            }
+            command
+                .args(["agent", "--session-id", "workspace", "workspace:probe"])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probe: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let expected = if explicit { &second } else { &first };
+        assert!(
+            probe["tool"]
+                .as_str()
+                .unwrap()
+                .contains(&expected.display().to_string()),
+            "{probe}"
+        );
+    }
+    service.stop().await;
+    model_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workflow_disconnect_replay_dedup_authentication_and_shutdown() {
     let mut service = Service::start(None).await;
-    service.write_workflow("delayed", "import time\ntime.sleep(0.4)\nresult = 42");
+    service.write_workflow(
+        "delayed",
+        "import time\ntime.sleep(0.4)\nopen('workspace-round.txt', 'w').write('done')\nresult = 42",
+    );
+    let next_workspace = service.home.join("next-workspace");
+    std::fs::create_dir(&next_workspace).unwrap();
     let open = service.workflow("delayed", "replay");
     let mut client = Client::open(&service.home, &service.config, open.clone())
         .await
@@ -1069,6 +1295,7 @@ async fn workflow_disconnect_replay_dedup_authentication_and_shutdown() {
         .unwrap();
     drop(client);
     let mut resume = open;
+    resume.workspace = Some(next_workspace.clone());
     resume.resume = Some(Resume {
         stream_id: stream,
         after_seq: 0,
@@ -1077,9 +1304,12 @@ async fn workflow_disconnect_replay_dedup_authentication_and_shutdown() {
         .await
         .unwrap();
     assert!(client.info.resumed);
+    assert_eq!(client.info.workspace, next_workspace);
     assert!(
         matches!(finish(&mut client).await.1, RoundOutcome::Succeeded { result } if result == json!(42))
     );
+    assert!(service.home.join("workspace-round.txt").exists());
+    assert!(!next_workspace.join("workspace-round.txt").exists());
     client
         .request(ClientMessage::Close {
             cancel_active: false,
@@ -1315,9 +1545,9 @@ async fn daemon_reuses_custom_endpoint_and_preserves_locked_corrupt_discovery() 
     .unwrap();
     service.stop().await;
 
-    std::fs::create_dir_all(service.home.join("log")).unwrap();
+    std::fs::create_dir_all(service.home.join("server")).unwrap();
     std::fs::write(
-        service.home.join("log/server.log"),
+        service.home.join("server/server.log"),
         "error: old-startup-failure\n",
     )
     .unwrap();
@@ -1336,7 +1566,7 @@ async fn daemon_reuses_custom_endpoint_and_preserves_locked_corrupt_discovery() 
     assert!(diagnostic.contains("address_in_use"), "{diagnostic}");
     assert!(!diagnostic.contains("old-startup-failure"), "{diagnostic}");
     assert!(
-        std::fs::read_to_string(service.home.join("log/server.log"))
+        std::fs::read_to_string(service.home.join("server/server.log"))
             .unwrap()
             .contains("address_in_use")
     );
@@ -1385,6 +1615,10 @@ async fn concurrent_detached_start_has_one_instance_and_survives_clients() {
     assert_ne!(config.pid, service.child.id());
     assert_eq!(config.port, port);
     client::hello(&service.home, &config).await.unwrap();
+    assert!(service.home.join("server/server.lock").is_file());
+    assert!(!service.home.join("start.lock").exists());
+    assert!(service.home.join("schedule/timer.lock").is_file());
+    assert!(!service.home.join("timer.lock").exists());
     assert!(
         fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server.lock"))
             .unwrap()
@@ -1438,14 +1672,14 @@ async fn independent_workflow_opens_and_session_capacity_remain_isolated() {
     );
     let mut conflicting = service.agent("idle-0");
     std::fs::create_dir(service.home.join("other-workspace")).unwrap();
-    conflicting.workspace = service.home.join("other-workspace");
+    conflicting.workspace = Some(service.home.join("other-workspace"));
     assert!(
         Client::open(&service.home, &service.config, conflicting)
             .await
             .err()
             .unwrap()
             .to_string()
-            .contains("session_binding_conflict")
+            .contains("session_in_use")
     );
     service.stop().await;
 }

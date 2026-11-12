@@ -62,7 +62,7 @@ pub async fn ensure(home: &Path) -> anyhow::Result<ServerConfig> {
 
 fn startup_diagnostic(home: &Path, offset: u64) -> String {
     let read = || -> std::io::Result<String> {
-        let mut log = std::fs::File::open(home.join("log/server.log"))?;
+        let mut log = std::fs::File::open(home.join("server/server.log"))?;
         log.seek(SeekFrom::Start(offset))?;
         let mut bytes = Vec::new();
         log.take(8 * 1024).read_to_end(&mut bytes)?;
@@ -81,7 +81,7 @@ pub async fn start(
     explicit: bool,
 ) -> anyhow::Result<ServerConfig> {
     lifecycle::check_home_owner(home)?;
-    let _start = FileLock::acquire(home.join("start.lock")).await?;
+    let _start = FileLock::acquire(home.join("server/server.lock")).await?;
     if let Some(config) = discover(home).await? {
         if explicit {
             anyhow::ensure!(
@@ -135,7 +135,7 @@ pub async fn start(
         if let Some(status) = child.try_wait()? {
             anyhow::bail!(
                 "Service exited {status}; address {address}:{port}; see {}{}",
-                home.join("log/server.log").display(),
+                home.join("server/server.log").display(),
                 startup_diagnostic(home, log_offset)
             );
         }
@@ -153,13 +153,13 @@ pub async fn start(
     }
     anyhow::bail!(
         "Service readiness timed out; see {}{}",
-        home.join("log/server.log").display(),
+        home.join("server/server.log").display(),
         startup_diagnostic(home, log_offset)
     )
 }
 
 pub async fn stop(home: &Path) -> anyhow::Result<bool> {
-    let _start = FileLock::acquire(home.join("start.lock")).await?;
+    let _start = FileLock::acquire(home.join("server/server.lock")).await?;
     let Some(config) = discover(home).await? else {
         if let Some(_probe) = FileLock::try_acquire(&home.join("server.lock"))? {
             lifecycle::clear_discovery(home)?;
@@ -182,6 +182,6 @@ pub async fn stop(home: &Path) -> anyhow::Result<bool> {
     }
     anyhow::bail!(
         "Service shutdown exceeded 10 seconds; see {}",
-        home.join("log/server.log").display()
+        home.join("server/server.log").display()
     )
 }

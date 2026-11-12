@@ -236,7 +236,7 @@ impl Gateway {
                         source: fae_agent::SingleAgentSource::AgentId(self.config.agent_id.clone()),
                     },
                     session_id: Some(record.session_id.clone()),
-                    workspace: self.config.workspace.clone(),
+                    workspace: Some(self.config.workspace.clone()),
                     binding: Some(record.binding.clone()),
                     resume: if recovering {
                         Some(Resume {

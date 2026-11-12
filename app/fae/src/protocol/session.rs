@@ -20,7 +20,9 @@ pub struct Resume {
 pub struct OpenSession {
     pub target: SessionTarget,
     pub session_id: Option<String>,
-    pub workspace: PathBuf,
+    /// Explicit caller override; omission reuses the session's saved workspace.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
     pub resume: Option<Resume>,
     #[serde(default)]
     pub binding: Option<SessionBinding>,

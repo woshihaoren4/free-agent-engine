@@ -39,8 +39,9 @@ impl TimerRuntime {
         let home = home.into();
         let home_copy = home.clone();
         let (lock, store) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            std::fs::create_dir_all(&home_copy)?;
-            let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(home_copy.join("timer.lock"))?;
+            let schedule = home_copy.join("schedule");
+            std::fs::create_dir_all(&schedule)?;
+            let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(schedule.join("timer.lock"))?;
             lock.try_lock_exclusive().map_err(|e| anyhow::anyhow!("timer store already in use: {e}"))?;
             Ok((lock, timer::load(&home_copy)?))
         }).await??;

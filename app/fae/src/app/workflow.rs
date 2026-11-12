@@ -33,7 +33,7 @@ pub async fn run(
             input: input(&args.input).await?,
         },
         session_id: None,
-        workspace,
+        workspace: Some(workspace),
         resume: None,
     };
     let mut client = Client::open(home, config, open).await?;

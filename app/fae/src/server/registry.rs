@@ -1,7 +1,7 @@
 use super::{
     connection::Outbound,
     session::{Actor, Command},
-    workspace::WorkspaceHookBuilder,
+    workspace::SessionWorkspace,
 };
 use crate::protocol::*;
 use fae_agent::SingleAgentPlanBuilder;
@@ -36,13 +36,26 @@ mod shutdown_tests {
         let binding: SessionBinding = serde_json::from_value(serde_json::json!({
             "session_mapping_version":2,"thread_id":"omt_T1","channel":"lark","user_id":"ou_a",
             "app_id":"app","tenant_key":"tenant","chat_type":"group","chat_id":"chat"
-        })).unwrap();
+        }))
+        .unwrap();
         let open = OpenSession {
-            target: SessionTarget::Agent { source: fae_agent::SingleAgentSource::AgentId("source".into()) },
-            session_id: Some("omt_T1".into()), workspace: home.clone(), resume: None, binding: Some(binding),
+            target: SessionTarget::Agent {
+                source: fae_agent::SingleAgentSource::AgentId("source".into()),
+            },
+            session_id: Some("omt_T1".into()),
+            workspace: Some(home.clone()),
+            resume: None,
+            binding: Some(binding),
         };
-        let key = Key { kind: "agent".into(), target: "actual-agent".into(), user: "ou_a".into(), session: "omt_T1".into() };
-        Registry::new(home.clone(), "first".into()).persist_lark_binding(&open, &key).unwrap();
+        let key = Key {
+            kind: "agent".into(),
+            target: "actual-agent".into(),
+            user: "ou_a".into(),
+            session: "omt_T1".into(),
+        };
+        Registry::new(home.clone(), "first".into())
+            .persist_lark_binding(&open, &key)
+            .unwrap();
         let restarted = Registry::new(home.clone(), "second".into());
         restarted.persist_lark_binding(&open, &key).unwrap();
         let mut conflicting = open.clone();
@@ -52,8 +65,8 @@ mod shutdown_tests {
         renamed.target = "renamed-agent".into();
         assert!(restarted.persist_lark_binding(&open, &renamed).is_err());
         conflicting = open.clone();
-        conflicting.workspace = home.join("other-workspace");
-        assert!(restarted.persist_lark_binding(&conflicting, &key).is_err());
+        conflicting.workspace = Some(home.join("other-workspace"));
+        restarted.persist_lark_binding(&conflicting, &key).unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -79,7 +92,7 @@ mod shutdown_tests {
                     target: SessionTarget::Agent {
                         source: fae_agent::SingleAgentSource::AgentId("worker".into()),
                     },
-                    workspace: PathBuf::from("."),
+                    workspace: Some(PathBuf::from(".")),
                     session_id: Some("timer-session".into()),
                     resume: None,
                     binding: None,
@@ -173,11 +186,15 @@ impl Registry {
                     anyhow::ensure!(
                         saved.open.binding == proposed.binding
                             && saved.target_id == key.target
-                            && saved.open.workspace == proposed.workspace
                             && serde_json::to_value(&saved.open.target)?
                                 == serde_json::to_value(&proposed.target)?,
                         "Session binding cannot change"
                     );
+                    let saved = StoredLarkBinding {
+                        open: proposed,
+                        target_id: key.target.clone(),
+                    };
+                    super::lifecycle::atomic_write(&path, &serde_json::to_vec(&saved)?, true)?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let saved = StoredLarkBinding {
@@ -287,11 +304,15 @@ impl Registry {
     }
     pub async fn open(
         self: &Arc<Self>,
-        open: OpenSession,
+        mut open: OpenSession,
         out: Outbound,
         request: String,
     ) -> Result<(Key, String, mpsc::Sender<Command>), ProtocolError> {
-        if !open.workspace.is_absolute() || !open.workspace.is_dir() {
+        if open
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| !workspace.is_absolute() || !workspace.is_dir())
+        {
             return Err(ProtocolError::new(
                 "invalid_workspace",
                 "Workspace must be an absolute directory",
@@ -345,9 +366,8 @@ impl Registry {
                         "Session is being released",
                     ));
                 }
-                if entry.open.workspace != open.workspace
-                    || serde_json::to_value(&entry.open.target).unwrap()
-                        != serde_json::to_value(&open.target).unwrap()
+                if serde_json::to_value(&entry.open.target).unwrap()
+                    != serde_json::to_value(&open.target).unwrap()
                     || open
                         .session_id
                         .as_ref()
@@ -364,21 +384,35 @@ impl Registry {
                         "Session already has a connected client",
                     ));
                 }
+                let store = SessionWorkspace::new(&self.home, &entry.key)?;
+                let workspace =
+                    store.resolve(open.workspace.as_deref(), entry.open.workspace.as_deref())?;
+                let mut updated = entry.open.clone();
+                updated.workspace = Some(workspace.clone());
+                self.persist_lark_binding(&updated, &entry.key)?;
+                store.save(&workspace)?;
+                entry.open.workspace = Some(workspace.clone());
                 entry.leased = true;
                 entry.lease_id = out.id.clone();
                 entry.disconnected = None;
-                Some((entry.key.clone(), entry.stream.clone(), entry.tx.clone()))
+                Some((
+                    entry.key.clone(),
+                    entry.stream.clone(),
+                    entry.tx.clone(),
+                    workspace,
+                ))
             } else {
                 None
             }
         };
-        if let Some((key, stream, tx)) = existing {
+        if let Some((key, stream, tx, workspace)) = existing {
             let lease = out.id.clone();
             if tx
                 .send(Command::Attach {
                     out,
                     request,
                     resume: open.resume,
+                    workspace,
                 })
                 .await
                 .is_err()
@@ -398,8 +432,6 @@ impl Registry {
             ));
         }
         let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
-        builder.set_workspace(open.workspace.clone());
-        builder.add_hook(WorkspaceHookBuilder::new(open.workspace.clone()));
         let (target, name, user, model, session, kind) = match &open.target {
             SessionTarget::Agent { source } => {
                 builder
@@ -459,7 +491,7 @@ impl Registry {
             user: user.clone(),
             session: session.clone(),
         };
-        let (tx, stream, new_actor) = {
+        let (tx, stream, new_actor, workspace) = {
             let mut state = self.state.lock().unwrap();
             if state.stopping {
                 return Err(ProtocolError::new(
@@ -467,7 +499,7 @@ impl Registry {
                     "Service is stopping",
                 ));
             }
-            self.persist_lark_binding(&open, &key)?;
+            let store = SessionWorkspace::new(&self.home, &key)?;
             if let Some(entry) = state.entries.get_mut(&key) {
                 if entry.closing {
                     return Err(ProtocolError::new(
@@ -475,14 +507,13 @@ impl Registry {
                         "Session is being released",
                     ));
                 }
-                if entry.open.workspace != open.workspace
-                    || entry.open.binding != open.binding
+                if entry.open.binding != open.binding
                     || serde_json::to_value(&entry.open.target).unwrap()
                         != serde_json::to_value(&open.target).unwrap()
                 {
                     return Err(ProtocolError::new(
                         "session_binding_conflict",
-                        "Session is bound to another workspace or source",
+                        "Session is bound to another identity or source",
                     ));
                 }
                 if entry.leased {
@@ -501,10 +532,16 @@ impl Registry {
                         "Stream belongs to an expired instance",
                     ));
                 }
+                let workspace =
+                    store.resolve(open.workspace.as_deref(), entry.open.workspace.as_deref())?;
+                open.workspace = Some(workspace.clone());
+                self.persist_lark_binding(&open, &key)?;
+                store.save(&workspace)?;
+                entry.open.workspace = Some(workspace.clone());
                 entry.leased = true;
                 entry.lease_id = out.id.clone();
                 entry.disconnected = None;
-                (entry.tx.clone(), entry.stream.clone(), None)
+                (entry.tx.clone(), entry.stream.clone(), None, workspace)
             } else {
                 if open.resume.is_some() {
                     return Err(ProtocolError::new(
@@ -518,6 +555,10 @@ impl Registry {
                         "At most 32 sessions may be retained",
                     ));
                 }
+                let workspace = store.resolve(open.workspace.as_deref(), None)?;
+                open.workspace = Some(workspace.clone());
+                self.persist_lark_binding(&open, &key)?;
+                store.save(&workspace)?;
                 let stream = wd_tools::uuid::v4();
                 let (tx, rx) = mpsc::channel(512);
                 let (done, closed) = tokio::sync::watch::channel(None);
@@ -537,7 +578,7 @@ impl Registry {
                         disconnected: None,
                     },
                 );
-                (tx, stream, Some((rx, done)))
+                (tx, stream, Some((rx, done)), workspace)
             }
         };
         if let Some((rx, done)) = new_actor {
@@ -547,7 +588,7 @@ impl Registry {
                 user_id: user,
                 model,
                 session_id: session,
-                workspace: open.workspace.clone(),
+                workspace: workspace.clone(),
                 status: SessionStatus {
                     state: "idle".into(),
                     round_id: None,
@@ -573,6 +614,7 @@ impl Registry {
                 out,
                 request,
                 resume: open.resume,
+                workspace,
             })
             .await
             .is_err()
@@ -619,7 +661,6 @@ impl Registry {
             }
         }
         let mut builder = SingleAgentPlanBuilder::with_home_dir(&self.home);
-        builder.add_hook(WorkspaceHookBuilder::new(binding.workspace.clone()));
         builder.set_workspace(binding.workspace.clone());
         builder
             .freeze_source(&binding.source)
@@ -653,7 +694,7 @@ impl Registry {
         };
         let open = OpenSession {
             target: target.clone(),
-            workspace: binding.workspace.clone(),
+            workspace: Some(binding.workspace.clone()),
             session_id: Some(key.session.clone()),
             resume: None,
             binding: None,
@@ -687,6 +728,7 @@ impl Registry {
                     "Timer session already exists",
                 ));
             }
+            SessionWorkspace::new(&self.home, &key)?.save(&binding.workspace)?;
             state.entries.insert(
                 key.clone(),
                 Entry {

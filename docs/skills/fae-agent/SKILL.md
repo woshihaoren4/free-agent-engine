@@ -1,11 +1,11 @@
 ---
 name: fae-agent
-description: Creates, configures, modifies, runs, and troubleshoots FAE agents. Invoke for agent initialization, config, prompts, models, tools, skills, MCP, or sessions.
+description: Configures, runs, and troubleshoots FAE agents and the Lark gateway. Use for agent initialization, prompts, models, tools, skills, MCP, sessions, or Feishu(lark) gateway setup and operations.
 ---
 
 # FAE Agent
 
-使用本 Skill 通过 `fae` 命令和配置文件创建、修改、运行或排查 FAE Agent。
+使用本 Skill 通过 `fae` 命令和配置文件创建、修改、运行或排查 FAE Agent 及飞书 Lark 网关。
 
 ## 核心原则
 
@@ -15,8 +15,10 @@ description: Creates, configures, modifies, runs, and troubleshoots FAE agents. 
 - 任务清单由 `todo` 工具维护，并保存在
   `<FAE_HOST>/session/<agent-id>/<user-id>/todo/<plan-id>.json`，按外层 todo 编排计划隔离。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
-- 运行和验证统一使用 `fae agent`。
-- 本 Skill 只处理 Agent 命令与配置，不展开底层实现。
+- Agent 本地运行和验证使用 `fae agent`；飞书接入配置与操作使用 `fae lark`。
+- Lark 网关使用独立的 `<FAE_HOST>/lark.config`；处理网关任务时先阅读
+  [references/lark-gateway.md](references/lark-gateway.md)。
+- 本 Skill 只处理 Agent 与网关命令及配置，不展开底层实现。
 
 ## 标准流程
 
@@ -39,6 +41,10 @@ fae agent --agent-id reviewer "review this workspace"
 ```
 
 6. 根据实际输出调整 config 或 prompt，再次用同一命令验证。
+
+若任务是接入或管理飞书网关，按 Lark 参考文件执行 `fae lark init`、配置凭据和 Agent、
+`fae lark check`、`fae lark check --online`，再按任务要求启动及检查状态。
+修改网关配置后重启网关；`fae lark stop` 只停止网关，主服务仍会运行。
 
 自定义 home：
 
@@ -118,6 +124,8 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
   `ARK_WEB_SEARCH_APIKEY`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
+- 改飞书应用、接入 Agent、工作区、用户白名单或网关执行参数：编辑 `lark.config`，
+  按 Lark 参考文件校验并重启网关。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
   Agent 的 config 都包含非空 `agent.desc`。
 - 增减 Workflow：修改 `workflows`，使用 `<FAE_HOST>/workflows` 下的 Workflow ID；对应
@@ -137,6 +145,8 @@ fae init --agent-id reviewer --model gpt-5 --force
   [references/agent-api.md](references/agent-api.md)
 - 创建、修改、复制、Skill、MCP、会话和排错配方：
   [references/recipes.md](references/recipes.md)
+- 飞书应用权限、Lark 网关配置字段、启停、话题会话、白名单和排错：
+  [references/lark-gateway.md](references/lark-gateway.md)
 
 如果任务主要是创建多节点图、条件、并行、循环或父子流程，应改用 `fae-workflow` Skill。
 
@@ -148,3 +158,6 @@ fae init --agent-id reviewer --model gpt-5 --force
 4. 检查 Tool、Skill 和 MCP 名称是否真实存在。
 5. 使用 `fae agent --agent-id <id> "reply with OK"` 做最小运行验证。
 6. 根据错误定位配置加载、模型连接、能力路由或会话历史问题。
+
+网关问题按 Lark 参考文件检查 `lark.config`、离线/在线校验、网关与主服务状态以及
+`<FAE_HOST>/lark/gateway.log`。
