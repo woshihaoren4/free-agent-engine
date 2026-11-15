@@ -22,8 +22,8 @@ use tokio::{net::TcpListener, sync::watch, task::JoinSet};
 pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()> {
     anyhow::ensure!(port > 0, "port 0 is not permitted");
     lifecycle::check_home_owner(&home)?;
-    let _lock = lifecycle::FileLock::try_acquire(&home.join("server.lock"))?
-        .ok_or_else(|| anyhow::anyhow!("service already holds server.lock"))?;
+    let _lock = lifecycle::FileLock::try_acquire(&home.join("server/server.lock"))?
+        .ok_or_else(|| anyhow::anyhow!("service already holds server/server.lock"))?;
     let listener = TcpListener::bind(SocketAddr::new(address, port))
         .await
         .map_err(|e| {
@@ -60,8 +60,9 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
     let (shutdown, mut stopping) = watch::channel(false);
     let signal = lifecycle::stop_signal()?;
     tokio::pin!(signal);
+    std::fs::create_dir_all(home.join("lark"))?;
+    lifecycle::atomic_write(&home.join("lark/lark.token"), lark_token.as_bytes(), true)?;
     lifecycle::publish(&home, &config, &token)?;
-    lifecycle::atomic_write(&home.join("lark.token"), lark_token.as_bytes(), true)?;
     eprintln!("FAE service ready: PID {} {address}:{port}", config.pid);
     let mut connections = JoinSet::new();
     let mut reap = tokio::time::interval(Duration::from_secs(60));

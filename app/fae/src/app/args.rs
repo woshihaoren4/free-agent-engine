@@ -29,6 +29,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Restart the background service and the configured Feishu gateway
+    Restart,
     /// Manage the Feishu agent gateway (never started by default)
     Lark(LarkArgs),
     /// Manage the background service for this FAE home
@@ -173,7 +175,9 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "init" | "uninstall" | "agent" | "workflow" | "server" | "lark" => return args,
+            "init" | "uninstall" | "restart" | "agent" | "workflow" | "server" | "lark" => {
+                return args;
+            }
             "--fae-home" | "--workspace" | "--color" => index += 2,
             "--no-alt-screen" => index += 1,
             "--help" | "-h" | "--version" | "-V" => {
@@ -200,6 +204,19 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_restart_without_inserting_agent_mode() {
+        for arguments in [
+            vec!["fae", "restart"],
+            vec!["fae", "--fae-home", "/tmp/fae", "restart"],
+        ] {
+            let cli =
+                Cli::try_parse_from(with_default_agent(arguments.into_iter().map(Into::into)))
+                    .unwrap();
+            assert!(matches!(cli.command, Some(Command::Restart)));
+        }
+    }
 
     #[test]
     fn lark_commands_are_explicit_root_commands() {

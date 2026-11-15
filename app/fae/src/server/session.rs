@@ -45,6 +45,7 @@ pub struct Actor {
     target: SessionTarget,
     info: SessionInfo,
     builder: SingleAgentPlanBuilder,
+    lark_hook: Option<crate::lark::hook::LarkHook>,
     execution_workspace: Option<std::path::PathBuf>,
     engine: Option<Engine>,
     session: Option<CommonSession>,
@@ -83,6 +84,7 @@ impl Actor {
             target,
             info,
             builder,
+            lark_hook: None,
             execution_workspace: None,
             engine: None,
             session: None,
@@ -105,6 +107,15 @@ impl Actor {
     }
     pub fn reserve_internal_round(&mut self) {
         self.round_reserved = true;
+    }
+    pub fn bind_lark_environment(&mut self, binding: SessionBinding) {
+        let hook = crate::lark::hook::LarkHook::new(
+            self.info.target_id.clone(),
+            self.info.session_id.clone(),
+            binding,
+        );
+        self.builder.add_hook(hook.clone());
+        self.lark_hook = Some(hook);
     }
     fn envelope(&self, request: Option<&str>, body: ServerMessage) -> ServerEnvelope {
         ServerEnvelope::new(&self.registry.instance, Some(&self.stream), request, body)
@@ -381,6 +392,15 @@ impl Actor {
                         "No round accepts steering; it may still be starting",
                     ));
                 }
+                let environment = if let Some(hook) = &self.lark_hook {
+                    Some(
+                        hook.load_message(&self.registry.home, &external_request_id)
+                            .await
+                            .map_err(|e| ProtocolError::new("lark_environment", e))?,
+                    )
+                } else {
+                    None
+                };
                 // Persist intent before launching work. A crash here must never cause a replay.
                 super::acceptance::write(
                     &self.registry.home,
@@ -391,19 +411,38 @@ impl Actor {
                     true,
                     supplemented,
                 )?;
-                let round = if supplemented {
+                let previous_environment = environment.map(|environment| {
+                    self.lark_hook
+                        .as_ref()
+                        .unwrap()
+                        .replace_environment(environment)
+                });
+                let result = if supplemented {
                     self.session
                         .as_ref()
                         .unwrap()
                         .call(SessionInput::Supplement(data))
                         .await
-                        .map_err(|e| ProtocolError::new("round_not_active", e))?;
-                    self.round.clone().unwrap()
+                        .map(|_| self.round.clone().unwrap())
+                        .map_err(|e| ProtocolError::new("round_not_active", e))
                 } else {
-                    let round = self.start(Some((data, mode))).await?;
-                    self.external_request_id = Some(external_request_id.clone());
-                    round
+                    self.start(Some((data, mode))).await
                 };
+                let round = match result {
+                    Ok(round) => round,
+                    Err(error) => {
+                        if let Some(previous) = previous_environment {
+                            self.lark_hook
+                                .as_ref()
+                                .unwrap()
+                                .replace_environment(previous);
+                        }
+                        return Err(error);
+                    }
+                };
+                if !supplemented {
+                    self.external_request_id = Some(external_request_id.clone());
+                }
                 super::acceptance::write(
                     &self.registry.home,
                     &external_request_id,

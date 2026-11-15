@@ -11,6 +11,7 @@ const SKILL_FILE: &str = "SKILL.md";
 #[derive(Debug, Clone)]
 pub struct SkillRuntime {
     host_dir: PathBuf,
+    agents_skills_dir: Option<PathBuf>,
 }
 
 impl Default for SkillRuntime {
@@ -29,6 +30,10 @@ impl SkillRuntime {
     pub fn with_host_dir(host_dir: impl Into<PathBuf>) -> Self {
         Self {
             host_dir: host_dir.into(),
+            agents_skills_dir: std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .or_else(|| std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
+                .map(|home| PathBuf::from(home).join(".agents/skills")),
         }
     }
 
@@ -40,7 +45,16 @@ impl SkillRuntime {
         let path = match query {
             SkillQuery::Name(name) => {
                 validate_skill_name(&name)?;
-                self.host_dir.join("skills").join(name).join(SKILL_FILE)
+                let path = self.host_dir.join("skills").join(&name).join(SKILL_FILE);
+                if !tokio::fs::try_exists(&path)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("skill path `{}`: {error}", path.display()))?
+                    && let Some(agents_skills_dir) = &self.agents_skills_dir
+                {
+                    agents_skills_dir.join(name).join(SKILL_FILE)
+                } else {
+                    path
+                }
             }
             SkillQuery::Path(path) => path,
         };
@@ -206,6 +220,48 @@ mod tests {
         assert_eq!(directory[0].name, "beta");
 
         tokio::fs::remove_dir_all(host).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queries_agents_skill_and_prefers_host_skill() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let host = temp.path().join("fae");
+        let agents_skills_dir = temp.path().join(".agents/skills");
+        let agents_skill = agents_skills_dir.join("alpha").join(SKILL_FILE);
+        let host_skill = host.join("skills/alpha").join(SKILL_FILE);
+        tokio::fs::create_dir_all(agents_skill.parent().unwrap()).await?;
+        tokio::fs::write(&agents_skill, "---\ndescription: Agents skill\n---\n").await?;
+
+        let runtime = SkillRuntime {
+            host_dir: host,
+            agents_skills_dir: Some(agents_skills_dir),
+        };
+        let skills = runtime.query(SkillQuery::Name("alpha".into())).await?;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].path, agents_skill);
+        assert_eq!(skills[0].description, "Agents skill");
+        assert!(
+            runtime
+                .query(SkillQuery::Name("missing".into()))
+                .await
+                .is_err()
+        );
+
+        tokio::fs::create_dir_all(host_skill.parent().unwrap()).await?;
+        tokio::fs::write(&host_skill, "---\ndescription: Host skill\n---\n").await?;
+        let skills = runtime.query(SkillQuery::Name("alpha".into())).await?;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].path, host_skill);
+        assert_eq!(skills[0].description, "Host skill");
+
+        tokio::fs::write(&host_skill, "---\ninvalid: [\n---\n").await?;
+        assert!(
+            runtime
+                .query(SkillQuery::Name("alpha".into()))
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

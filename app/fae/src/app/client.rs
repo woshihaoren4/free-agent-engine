@@ -96,9 +96,9 @@ impl Drop for Transport {
 }
 pub async fn connect(home: &Path, config: &ServerConfig, route: &str) -> anyhow::Result<Socket> {
     let path = home.join(if route == "/v3/lark/session" {
-        "lark.token"
+        "lark/lark.token"
     } else {
-        "server.token"
+        "server/server.token"
     });
     let token = tokio::fs::read_to_string(&path)
         .await

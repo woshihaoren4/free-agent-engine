@@ -1,5 +1,6 @@
 mod card;
 pub mod config;
+pub mod hook;
 pub mod identity;
 mod inbound;
 pub mod lifecycle;
@@ -178,7 +179,9 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     ws_task.abort();
     let shutdown_gateway = gateway.clone();
-    let mut router = tokio::spawn(async move { shutdown_gateway.shutdown().await; });
+    let mut router = tokio::spawn(async move {
+        shutdown_gateway.shutdown().await;
+    });
     stop_task(&mut router, deadline).await;
     stop_task(&mut outbox, deadline).await;
     // The outbox has exited before this writer takes ownership. One deadline

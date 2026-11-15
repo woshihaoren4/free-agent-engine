@@ -17,7 +17,17 @@ fae server start --address 127.0.0.1 --port 2666
 fae server status
 fae server show
 fae server stop
+fae restart
 ```
+
+`fae restart` stops the Feishu gateway first, restarts the background service,
+then starts the gateway and waits until it is ready. It preserves a running
+service's address and port; if the service is stopped, it starts at
+`127.0.0.1:6666`. Without `lark.config`, it only restarts the service.
+An existing gateway configuration and its Agent dependencies are checked
+before stopping either component. Restart cancels active work. If gateway
+startup fails, the command reports an error and the restarted service remains
+running. Use `fae --fae-home /path/to/.fae restart` to select a home.
 
 `start` waits for an authenticated readiness handshake. An occupied port is
 an error; it never chooses another port. A running service is reused from
@@ -28,8 +38,8 @@ executable and config path. `status`, `show`, `stop`, `--help` and `--version`
 do not start a service.
 
 Use `--fae-home` or `FAE_HOST` to isolate service instances. Each home contains
-`server.config`, a private `server.token`, the process lock `server.lock`,
-the start/stop lock `server/server.lock` and rotating `server/server.log`.
+`server.config`, a private `server/server.token`, the process lock `server/server.lock`,
+the start/stop lock `server/start-stop.lock` and rotating `server/server.log`.
 The token authenticates both control and session connections; browser Origin
 requests are rejected. No system service is
 installed, so automatic startup happens on the next business command after
@@ -42,7 +52,11 @@ credentials. The default port 6666 does not require privileged port access.
 Explicit ports below 1024 may require privileges. Later clients reuse the
 running service's configured port. To recover a service previously launched with
 sudo, run `sudo fae --fae-home /absolute/path/to/.fae server stop`, then start
-it as the home owner. Keep `server.token` at mode `0600`.
+it as the home owner. Keep `server/server.token` at mode `0600`.
+
+Before upgrading from the old root-level lock/token layout, stop the service
+using the old executable, then start it with the new executable. Lock files
+must not be moved while the service is running.
 
 Each logical session has its own connection and frozen Agent configuration.
 Its workspace can be changed when opening or resuming it: an explicit caller
@@ -135,6 +149,18 @@ session histories, todo state and user memory; existing data is not migrated.
 Add the bot to the group and @ it; messages from other tenants and bots are ignored.
 Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
 
+The conversation's main Agent receives a `LarkEnvironment` prompt section,
+separate from the user query. It describes the application, tenant, sender
+`open_id`, chat type/ID, current thread/session, and latest accepted message's
+ID, reply relationships, original thread ID, timestamps, bot identity and
+structured mentions. Metadata is read from the gateway's durable receipt;
+older receipts may lack event fields. Steering refreshes this section on the
+next model request. The section identifies the JSON as environment data;
+it does not fetch contact profiles, group details or quoted message bodies.
+Only the authenticated conversation's root Agent receives it, including when
+a child Agent has the same name. Other sessions, delegated Agents, workflow
+nodes and timer executions do not receive this environment section.
+
 Accepted messages inside a thread receive a `Typing` reaction on a separate task.
 Steering inputs receive the same reaction and keep it until the original round's
 final answer has been delivered, even if the gateway restarts after confirmation.
@@ -180,7 +206,7 @@ deadline; records that remain undelivered are retried on the next start.
 The gateway has a private loopback control socket and instance handshake.
 Its start/stop lock is `lark/lark.lock`; `lark/gateway.lock` protects the running
 process.
-Its service credential (`lark.token`) only opens `/v3/lark/session` and cannot
+Its service credential (`lark/lark.token`) only opens `/v3/lark/session` and cannot
 initialize agents, clean user data or stop the service. Wire protocol v3
 requires restarting previously running services after upgrading.
 

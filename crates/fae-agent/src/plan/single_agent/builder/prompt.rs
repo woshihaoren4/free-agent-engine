@@ -115,7 +115,7 @@ impl SingleAgentRuntimeContext {
                 },
                 "skills": {
                     "path": path(&self.fae_home.join("skills")),
-                    "purpose": "Contains installed skills and their SKILL.md instructions."
+                    "purpose": "Contains installed skills and their SKILL.md instructions. Searched first when loading a skill by name."
                 },
                 "workflows": {
                     "path": path(&self.fae_home.join("workflows")),
@@ -135,6 +135,15 @@ impl SingleAgentRuntimeContext {
                 }
             },
         });
+        if let Some(home) = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .or_else(|| std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()))
+        {
+            value["directories"]["agents_skills"] = serde_json::json!({
+                "path": path(&PathBuf::from(home).join(".agents/skills")),
+                "purpose": "Contains user-wide skills and their SKILL.md instructions. Searched when a skill is not found in the FAE skills directory during loading by name."
+            });
+        }
         if let Some(environment) = environment.as_object() {
             value
                 .as_object_mut()

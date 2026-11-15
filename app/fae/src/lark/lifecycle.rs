@@ -156,6 +156,10 @@ pub async fn status(home: &Path) -> anyhow::Result<Option<serde_json::Value>> {
 pub async fn start(home: &Path) -> anyhow::Result<serde_json::Value> {
     prepare(home)?;
     let _start = FileLock::acquire(home.join("lark/lark.lock")).await?;
+    start_locked(home).await
+}
+/// Caller must hold lark/lark.lock.
+pub(crate) async fn start_locked(home: &Path) -> anyhow::Result<serde_json::Value> {
     if let Some(status) = status(home).await? {
         return Ok(status);
     }
@@ -224,6 +228,10 @@ pub async fn stop(home: &Path) -> anyhow::Result<bool> {
         return Ok(false);
     }
     let _start = FileLock::acquire(home.join("lark/lark.lock")).await?;
+    stop_locked(home).await
+}
+/// Caller must hold lark/lark.lock.
+pub(crate) async fn stop_locked(home: &Path) -> anyhow::Result<bool> {
     if query(home, "stop").await?.is_none() {
         return Ok(false);
     }

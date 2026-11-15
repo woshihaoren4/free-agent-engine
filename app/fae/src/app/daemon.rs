@@ -20,9 +20,9 @@ pub async fn discover(home: &Path) -> anyhow::Result<Option<ServerConfig>> {
             if is_permission_denied(&error) {
                 return Err(error);
             }
-            if FileLock::try_acquire(&home.join("server.lock"))?.is_none() {
+            if FileLock::try_acquire(&home.join("server/server.lock"))?.is_none() {
                 anyhow::bail!(
-                    "Service holds server.lock but discovery information is missing or invalid: {error}"
+                    "Service holds server/server.lock but discovery information is missing or invalid: {error}"
                 );
             }
             return Ok(None);
@@ -35,7 +35,7 @@ pub async fn discover(home: &Path) -> anyhow::Result<Option<ServerConfig>> {
                 if is_permission_denied(&error) {
                     return Err(error);
                 }
-                if FileLock::try_acquire(&home.join("server.lock"))?.is_none() {
+                if FileLock::try_acquire(&home.join("server/server.lock"))?.is_none() {
                     anyhow::bail!(
                         "Service is unavailable at {}:{}: {error:#}",
                         config.address,
@@ -44,7 +44,7 @@ pub async fn discover(home: &Path) -> anyhow::Result<Option<ServerConfig>> {
                 }
             }
         }
-    } else if FileLock::try_acquire(&home.join("server.lock"))?.is_none() {
+    } else if FileLock::try_acquire(&home.join("server/server.lock"))?.is_none() {
         anyhow::bail!("Service lock is held despite stale discovery information");
     }
     Ok(None)
@@ -81,7 +81,16 @@ pub async fn start(
     explicit: bool,
 ) -> anyhow::Result<ServerConfig> {
     lifecycle::check_home_owner(home)?;
-    let _start = FileLock::acquire(home.join("server/server.lock")).await?;
+    let _start = FileLock::acquire(home.join("server/start-stop.lock")).await?;
+    start_locked(home, address, port, explicit).await
+}
+
+async fn start_locked(
+    home: &Path,
+    address: IpAddr,
+    port: u16,
+    explicit: bool,
+) -> anyhow::Result<ServerConfig> {
     if let Some(config) = discover(home).await? {
         if explicit {
             anyhow::ensure!(
@@ -94,7 +103,7 @@ pub async fn start(
         return Ok(config);
     }
     {
-        let _probe = FileLock::try_acquire(&home.join("server.lock"))?.ok_or_else(|| {
+        let _probe = FileLock::try_acquire(&home.join("server/server.lock"))?.ok_or_else(|| {
             anyhow::anyhow!("Service lock is held; cannot start another instance")
         })?;
         lifecycle::clear_discovery(home)?;
@@ -159,9 +168,29 @@ pub async fn start(
 }
 
 pub async fn stop(home: &Path) -> anyhow::Result<bool> {
-    let _start = FileLock::acquire(home.join("server/server.lock")).await?;
+    let _start = FileLock::acquire(home.join("server/start-stop.lock")).await?;
+    stop_locked(home).await
+}
+
+/// Keep the current endpoint and serialize the entire stop/start operation.
+pub async fn restart(home: &Path) -> anyhow::Result<ServerConfig> {
+    lifecycle::check_home_owner(home)?;
+    let _start = FileLock::acquire(home.join("server/start-stop.lock")).await?;
+    let endpoint = discover(home)
+        .await?
+        .map(|config| (config.address, config.port))
+        .unwrap_or((IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT));
+    stop_locked(home)
+        .await
+        .context("stop service for restart")?;
+    start_locked(home, endpoint.0, endpoint.1, true)
+        .await
+        .context("start service after stopping it for restart")
+}
+
+async fn stop_locked(home: &Path) -> anyhow::Result<bool> {
     let Some(config) = discover(home).await? else {
-        if let Some(_probe) = FileLock::try_acquire(&home.join("server.lock"))? {
+        if let Some(_probe) = FileLock::try_acquire(&home.join("server/server.lock"))? {
             lifecycle::clear_discovery(home)?;
         }
         return Ok(false);
@@ -169,7 +198,7 @@ pub async fn stop(home: &Path) -> anyhow::Result<bool> {
     client::control(home, &config, ControlMessage::Shutdown).await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Some(_probe) = FileLock::try_acquire(&home.join("server.lock"))? {
+        if let Some(_probe) = FileLock::try_acquire(&home.join("server/server.lock"))? {
             anyhow::ensure!(
                 !home.join("server.config").exists(),
                 "Service exited without completing cleanup; see server.log"

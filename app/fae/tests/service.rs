@@ -186,6 +186,7 @@ impl Service {
         assert!(fae::app::daemon::stop(&self.home).await.unwrap());
         assert!(self.child.wait().unwrap().success());
         assert!(!self.home.join("server.config").exists());
+        assert!(!self.home.join("lark/lark.token").exists());
         assert!(!fae::app::daemon::stop(&self.home).await.unwrap());
     }
 }
@@ -197,10 +198,178 @@ impl Drop for Service {
     }
 }
 
+struct DetachedService(PathBuf);
+impl Drop for DetachedService {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_fae"))
+            .arg("--fae-home")
+            .arg(&self.0)
+            .args(["server", "stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_preserves_custom_endpoint_without_lark_config() {
+    let mut service = Service::start(None).await;
+    let _cleanup = DetachedService(service.home.clone());
+    let previous = service.config.clone();
+    let output = Command::new(env!("CARGO_BIN_EXE_fae"))
+        .arg("--fae-home")
+        .arg(&service.home)
+        .arg("restart")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no lark.config"));
+    assert!(service.child.wait().unwrap().success());
+    let config = fae::server::lifecycle::read_config(&service.home).unwrap();
+    assert_ne!(config.pid, previous.pid);
+    assert_ne!(config.instance_id, previous.instance_id);
+    assert_eq!(config.address, previous.address);
+    assert_eq!(config.port, previous.port);
+    client::hello(&service.home, &config).await.unwrap();
+    assert!(!service.home.join("lark/runtime.json").exists());
+    assert!(fae::app::daemon::stop(&service.home).await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_rejects_invalid_lark_config_before_stopping_service() {
+    let mut service = Service::start(None).await;
+    for config in [
+        json!({}),
+        json!({
+            "version":1,"app_id":"test-app","app_secret":"test-secret",
+            "tenant_key":"tenant","agent_id":"missing","workspace":service.home
+        }),
+    ] {
+        std::fs::write(
+            service.home.join("lark.config"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_fae"))
+            .arg("--fae-home")
+            .arg(&service.home)
+            .arg("restart")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("before restart"));
+        assert_eq!(
+            fae::server::lifecycle::read_config(&service.home)
+                .unwrap()
+                .instance_id,
+            service.config.instance_id
+        );
+        client::hello(&service.home, &service.config).await.unwrap();
+    }
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_stops_gateway_first_and_reports_gateway_start_failure() {
+    use fae::server::lifecycle::FileLock;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut service = Service::start(None).await;
+    let _cleanup = DetachedService(service.home.clone());
+    service.init("fae").await;
+    std::fs::write(
+        service.home.join("lark.config"),
+        serde_json::to_vec(&json!({
+            "version":1,"app_id":"test-app","app_secret":"test-secret",
+            "tenant_key":"tenant","agent_id":"fae","workspace":service.home
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // A local control endpoint exercises gateway shutdown without contacting
+    // Feishu. Removing the config during shutdown makes the next start fail.
+    let lock = FileLock::try_acquire(&service.home.join("lark/gateway.lock"))
+        .unwrap()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut runtime = fae::lark::lifecycle::Runtime::new();
+    runtime.port = listener.local_addr().unwrap().port();
+    runtime.ready = true;
+    std::fs::write(
+        service.home.join("lark/runtime.json"),
+        serde_json::to_vec(&runtime).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(service.home.join("lark/control.token"), "test-token").unwrap();
+    let home = service.home.clone();
+    let previous = service.config.clone();
+    let gateway = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["command"], "stop");
+        assert_eq!(request["token"], "test-token");
+        assert_eq!(request["instance"], runtime.instance);
+        // The original service must still be available when the gateway stops.
+        client::hello(&home, &previous).await.unwrap();
+        stream
+            .write_all(format!("{}\n", json!({"runtime":runtime})).as_bytes())
+            .await
+            .unwrap();
+        std::fs::remove_file(home.join("lark/runtime.json")).unwrap();
+        std::fs::remove_file(home.join("lark.config")).unwrap();
+        drop(lock);
+    });
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_fae"))
+        .arg("--fae-home")
+        .arg(&service.home)
+        .arg("restart")
+        .output()
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("service restarted, but Lark gateway failed to start")
+    );
+    assert!(service.child.wait().unwrap().success());
+    let config = fae::server::lifecycle::read_config(&service.home).unwrap();
+    assert_ne!(config.instance_id, service.config.instance_id);
+    assert_eq!(config.port, service.config.port);
+    client::hello(&service.home, &config).await.unwrap();
+    assert!(fae::app::daemon::stop(&service.home).await.unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lark_binds_raw_user_and_deduplicates_external_input() {
     let (base, mut requests, model_task) = model().await;
     let mut service = Service::start(Some(&base)).await;
+    assert!(service.home.join("lark/lark.token").is_file());
+    assert!(!service.home.join("lark.token").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(service.home.join("lark/lark.token"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     service.init("fae").await;
     let path = service.home.join("agents/fae_config.json");
     let mut agent: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -700,6 +869,105 @@ async fn input(client: &mut Client, text: &str) -> String {
         other => panic!("expected ack: {other:?}"),
     }
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lark_environment_reaches_main_prompt_and_refreshes_between_rounds() {
+    let (base, mut requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    std::fs::write(
+        service.home.join("lark.config"),
+        serde_json::to_vec(&json!({
+            "version":1,"app_id":"cli_test","app_secret":"secret",
+            "tenant_key":"tenant","agent_id":"fae","workspace":service.home
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let binding = SessionBinding {
+        session_mapping_version: 2,
+        thread_id: "omt_environment".into(),
+        channel: "lark".into(),
+        app_id: "cli_test".into(),
+        tenant_key: "tenant".into(),
+        user_id: "ou_alice".into(),
+        chat_type: "group".into(),
+        chat_id: "oc_environment".into(),
+    };
+    let mut open = service.agent(&binding.thread_id);
+    open.binding = Some(binding.clone());
+    let mut client = Client::open(&service.home, &service.config, open)
+        .await
+        .unwrap();
+    std::fs::create_dir_all(service.home.join("lark/records")).unwrap();
+    for message_id in ["om_first", "om_second"] {
+        let id = fae::lark::identity::receipt_id("cli_test", "tenant", message_id);
+        // A durable gateway receipt; optional delivery fields are omitted.
+        std::fs::write(
+            service.home.join(format!("lark/records/{id}.json")),
+            serde_json::to_vec(&json!({
+                "id":id,"session_id":binding.thread_id,"binding":binding,
+                "message_id":message_id,"text":"lark:probe","state":"received",
+                "root_id":"om_root","parent_id":"om_parent","inbound_thread_id":"",
+                "seq":0,"responses":[],"notice_uuid":"uuid","notice_sent":false,"created":1234,
+                "message_metadata":{"bot_open_id":"ou_bot","create_time":"1234567890000",
+                    "mentions":[{"key":"@_user_2","name":"张三","open_id":"ou_zhang",
+                        "user_id":null,"union_id":null,"mentioned_type":"user","tenant_key":"tenant"}]}
+            })).unwrap(),
+        ).unwrap();
+        client
+            .request(ClientMessage::ExternalInput {
+                external_request_id: id,
+                input: SessionInput::NewChat("lark:probe".into()),
+                mode: None,
+                auto_steer: true,
+            })
+            .await
+            .unwrap();
+        let RoundOutcome::Succeeded { result } = finish(&mut client).await.1 else {
+            panic!()
+        };
+        let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
+        let prompt = probe["prompt"].as_str().unwrap();
+        assert!(prompt.contains(message_id) && prompt.contains("om_parent"));
+        assert!(prompt.contains("oc_environment") && prompt.contains("ou_zhang"));
+        assert!(!prompt.contains("secret"));
+        assert_eq!(prompt.matches("<LarkEnvironment ").count(), 1);
+        if message_id == "om_second" {
+            assert!(!prompt.contains("om_first"));
+        }
+        assert_eq!(probe["query"], "lark:probe");
+        assert_eq!(requests.recv().await.unwrap(), "lark:probe");
+    }
+    client
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    let mut ordinary = Client::open(&service.home, &service.config, service.agent("ordinary"))
+        .await
+        .unwrap();
+    input(&mut ordinary, "lark:probe").await;
+    let RoundOutcome::Succeeded { result } = finish(&mut ordinary).await.1 else {
+        panic!()
+    };
+    let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
+    assert!(
+        !probe["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("<LarkEnvironment ")
+    );
+    ordinary
+        .request(ClientMessage::Close {
+            cancel_active: false,
+        })
+        .await
+        .unwrap();
+    service.stop().await;
+    model_task.abort();
+}
+
 async fn finish(client: &mut Client) -> (String, RoundOutcome) {
     let mut observed = Vec::new();
     let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -797,6 +1065,12 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                                 .collect::<Vec<_>>().join("\n");
                             let tool = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
                             (json!({"role":"assistant","content":json!({"prompt":prompt,"tool":tool}).to_string()}), "stop")
+                        } else if text == "lark:probe" {
+                            let prompt = body["messages"].as_array().unwrap().iter()
+                                .filter(|m| m["role"] == "system")
+                                .map(|m| m["content"].as_str().unwrap_or_default())
+                                .collect::<Vec<_>>().join("\n");
+                            (json!({"role":"assistant","content":json!({"prompt":prompt,"query":text}).to_string()}), "stop")
                         } else if text == "delegate" {
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"agent","arguments":"{\"agent_id\":\"worker\",\"input\":\"slow child\"}"}}]}), "tool_calls")
                         } else { (json!({"role":"assistant","content":"mock answer"}), "stop") };
@@ -1367,7 +1641,7 @@ async fn workflow_disconnect_replay_dedup_authentication_and_shutdown() {
         .endpoint("/v1/control")
         .into_client_request()
         .unwrap();
-    let token = std::fs::read_to_string(service.home.join("server.token")).unwrap();
+    let token = std::fs::read_to_string(service.home.join("server/server.token")).unwrap();
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
@@ -1440,7 +1714,7 @@ async fn unreadable_credentials_and_discovery_preserve_running_service() {
         return;
     }
     let mut service = Service::start(None).await;
-    for name in ["server.token", "server.config"] {
+    for name in ["server/server.token", "server.config"] {
         let path = service.home.join(name);
         let permissions = std::fs::metadata(&path).unwrap().permissions();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
@@ -1616,13 +1890,22 @@ async fn concurrent_detached_start_has_one_instance_and_survives_clients() {
     assert_eq!(config.port, port);
     client::hello(&service.home, &config).await.unwrap();
     assert!(service.home.join("server/server.lock").is_file());
+    assert!(service.home.join("server/start-stop.lock").is_file());
+    assert!(service.home.join("server/server.token").is_file());
+    assert!(!service.home.join("server.lock").exists());
+    assert!(!service.home.join("server.token").exists());
     assert!(!service.home.join("start.lock").exists());
     assert!(service.home.join("schedule/timer.lock").is_file());
     assert!(!service.home.join("timer.lock").exists());
     assert!(
-        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server.lock"))
+        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/server.lock"))
             .unwrap()
             .is_none()
+    );
+    assert!(
+        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/start-stop.lock"))
+            .unwrap()
+            .is_some()
     );
     assert!(fae::app::daemon::stop(&service.home).await.unwrap());
 }
@@ -1802,9 +2085,9 @@ async fn sigterm_performs_owned_discovery_cleanup() {
     .await
     .unwrap();
     assert!(!service.home.join("server.config").exists());
-    assert!(!service.home.join("server.token").exists());
+    assert!(!service.home.join("server/server.token").exists());
     assert!(
-        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server.lock"))
+        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/server.lock"))
             .unwrap()
             .is_some()
     );

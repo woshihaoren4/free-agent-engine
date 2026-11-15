@@ -35,7 +35,7 @@ pub fn runtime_file_error(path: &Path, error: std::io::Error) -> anyhow::Error {
     let advice = if error.kind() == std::io::ErrorKind::PermissionDenied {
         " Check file ownership and permissions. If the service was started with sudo, \
          stop it using sudo with the same --fae-home, then restart as the home owner. \
-         Keep server.token private."
+         Keep server/server.token private."
     } else {
         ""
     };
@@ -155,7 +155,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8], private: bool) -> anyhow::Result<
 }
 
 pub fn publish(home: &Path, config: &ServerConfig, token: &str) -> anyhow::Result<()> {
-    atomic_write(&home.join("server.token"), token.as_bytes(), true)?;
+    atomic_write(&home.join("server/server.token"), token.as_bytes(), true)?;
     atomic_write(
         &home.join("server.config"),
         &serde_json::to_vec_pretty(config)?,
@@ -170,7 +170,13 @@ pub fn remove_owned(home: &Path, instance: &str) -> anyhow::Result<()> {
     Ok(())
 }
 pub fn clear_discovery(home: &Path) -> anyhow::Result<()> {
-    for name in ["server.config", "server.token", "lark.token"] {
+    for name in [
+        "server.config",
+        "server/server.token",
+        "lark/lark.token",
+        // Remove credentials left by versions that used the home root.
+        "lark.token",
+    ] {
         match std::fs::remove_file(home.join(name)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -329,11 +335,11 @@ mod tests {
     fn lock_and_owned_discovery_cleanup_preserve_other_instances() {
         let home = std::env::temp_dir().join(format!("fae-lock-{}", wd_tools::uuid::v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let lock = FileLock::try_acquire(&home.join("server.lock"))
+        let lock = FileLock::try_acquire(&home.join("server/server.lock"))
             .unwrap()
             .unwrap();
         assert!(
-            FileLock::try_acquire(&home.join("server.lock"))
+            FileLock::try_acquire(&home.join("server/server.lock"))
                 .unwrap()
                 .is_none()
         );
@@ -348,12 +354,18 @@ mod tests {
             executable: "fae".into(),
         };
         publish(&home, &config, "private-token").unwrap();
+        std::fs::create_dir_all(home.join("lark")).unwrap();
+        atomic_write(&home.join("lark/lark.token"), b"lark-private-token", true).unwrap();
+        std::fs::write(home.join("lark.token"), "legacy-token").unwrap();
+        assert!(home.join("server/server.token").is_file());
+        assert!(!home.join("server.token").exists());
+        assert!(!home.join("server.lock").exists());
         assert!(process_alive(config.pid).unwrap());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(home.join("server.token"))
+                std::fs::metadata(home.join("server/server.token"))
                     .unwrap()
                     .permissions()
                     .mode()
@@ -363,12 +375,18 @@ mod tests {
         }
         remove_owned(&home, "other").unwrap();
         assert!(home.join("server.config").exists());
+        assert!(home.join("server/server.token").exists());
+        assert!(home.join("lark/lark.token").exists());
+        assert!(home.join("lark.token").exists());
         remove_owned(&home, "instance").unwrap();
         assert!(!home.join("server.config").exists());
-        assert!(home.join("server.lock").exists());
+        assert!(!home.join("server/server.token").exists());
+        assert!(!home.join("lark/lark.token").exists());
+        assert!(!home.join("lark.token").exists());
+        assert!(home.join("server/server.lock").exists());
         drop(lock);
         assert!(
-            FileLock::try_acquire(&home.join("server.lock"))
+            FileLock::try_acquire(&home.join("server/server.lock"))
                 .unwrap()
                 .is_some()
         );

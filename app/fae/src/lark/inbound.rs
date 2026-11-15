@@ -85,6 +85,29 @@ pub fn parse(
     );
     record.root_id = message.root_id.clone();
     record.parent_id = message.parent_id.clone();
+    record.message_metadata = super::hook::MessageMetadata {
+        bot_open_id: bot.into(),
+        sender_type: event.sender.sender_type.clone(),
+        sender_user_id: event.sender.user_id().map(str::to_owned),
+        sender_union_id: event.sender.union_id().map(str::to_owned),
+        message_type: message.message_type.clone(),
+        original_root_id: message.root_id.clone(),
+        create_time: message.create_time.clone(),
+        update_time: message.update_time.clone(),
+        mentions: message
+            .mentions
+            .iter()
+            .map(|mention| super::hook::Mention {
+                key: mention.key.clone(),
+                name: mention.name.clone(),
+                open_id: mention.open_id().map(str::to_owned),
+                user_id: mention.user_id().map(str::to_owned),
+                union_id: mention.union_id().map(str::to_owned),
+                mentioned_type: mention.mentioned_type.clone(),
+                tenant_key: mention.tenant_key.clone(),
+            })
+            .collect(),
+    };
     Ok(Some(record))
 }
 
@@ -92,6 +115,44 @@ pub fn parse(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn retains_event_metadata_separately_from_normalized_query() {
+        let config: Config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+        }))
+        .unwrap();
+        let event = serde_json::from_value(json!({
+            "sender":{"sender_id":{"open_id":"ou_alice","user_id":"alice","union_id":"on_alice"},
+                "sender_type":"user","tenant_key":"tenant"},
+            "message":{"message_id":"om_input","chat_id":"oc_chat","chat_type":"group",
+                "thread_id":"omt_T1","root_id":"om_root","parent_id":"om_parent",
+                "create_time":"1234567890000","update_time":"1234567890001",
+                "message_type":"text","content":json!({"text":"@_user_1 请联系 @_user_2"}).to_string(),
+                "mentions":[
+                    {"key":"@_user_1","id":{"open_id":"ou_bot"},"name":"Bot","mentioned_type":"bot"},
+                    {"key":"@_user_2","id":{"open_id":"ou_zhang"},"name":"张三","mentioned_type":"user","tenant_key":"tenant"}
+                ]}
+        })).unwrap();
+        let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+        assert_eq!(record.text, "请联系 @张三");
+        assert_eq!(record.message_metadata.bot_open_id, "ou_bot");
+        assert_eq!(
+            record.message_metadata.sender_user_id.as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            record.message_metadata.sender_union_id.as_deref(),
+            Some("on_alice")
+        );
+        assert_eq!(record.message_metadata.create_time, "1234567890000");
+        assert_eq!(record.message_metadata.original_root_id, "om_root");
+        assert_eq!(record.message_metadata.update_time, "1234567890001");
+        assert_eq!(record.message_metadata.mentions.len(), 2);
+        assert_eq!(
+            record.message_metadata.mentions[1].open_id.as_deref(),
+            Some("ou_zhang")
+        );
+    }
     #[test]
     fn whitelist_filters_all_interactions_by_sender_open_id() {
         for (whitelist, allowed) in [

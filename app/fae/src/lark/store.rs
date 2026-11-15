@@ -37,6 +37,8 @@ pub struct Record {
     pub session_id: String,
     pub binding: SessionBinding,
     pub message_id: String,
+    #[serde(default)]
+    pub message_metadata: super::hook::MessageMetadata,
     pub text: String,
     pub rejection: Option<String>,
     pub state: State,
@@ -208,6 +210,7 @@ impl Record {
             session_id,
             binding,
             message_id,
+            message_metadata: Default::default(),
             text,
             rejection,
             state: State::Received,

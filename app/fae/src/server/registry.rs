@@ -596,7 +596,7 @@ impl Registry {
                 },
                 resumed: false,
             };
-            let actor = Actor::new(
+            let mut actor = Actor::new(
                 self.clone(),
                 key.clone(),
                 stream.clone(),
@@ -606,6 +606,9 @@ impl Registry {
                 tx.clone(),
                 done,
             );
+            if let Some(binding) = &open.binding {
+                actor.bind_lark_environment(binding.clone());
+            }
             tokio::spawn(actor.run(rx));
         }
         let lease = out.id.clone();
