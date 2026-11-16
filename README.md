@@ -87,6 +87,6 @@ cargo run
 - [x] agent 任务的并行分发
 - [x] 多计划执行
 - [x] workflow
-- [ ] hook规范化
+- [x] hook规范化
 - [x] 多session通信改造
 - [x] 消息规范化
