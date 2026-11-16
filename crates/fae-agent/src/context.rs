@@ -346,13 +346,37 @@ pub struct ContextStackQuery {
 }
 
 pub trait Context: Debug + Send + Sync + 'static {
+    /// 获取当前上下文所属的引擎，用于访问运行时、构建计划或准备子计划。
     fn get_engine(&self) -> EngineRef;
+
+    /// 获取已绑定的作用域，读取用户、会话、执行归属及工作目录等信息；未绑定时返回错误。
     fn scope(&self) -> anyhow::Result<Arc<ContextScope>>;
+
+    /// 为尚处于 Created 状态的上下文一次性绑定根作用域。
+    /// 作用域必须通过身份校验且不能指定父作用域；重复绑定或状态不符时返回错误。
     fn bind_scope(&self, scope: ContextScope) -> anyhow::Result<()>;
+
+    /// 按指定规则创建子上下文，生成新的作用域 ID 并关联父作用域，始终继承用户身份。
+    /// 任务子上下文默认继承执行归属，独立执行子上下文按 spec 重新指定归属；
+    /// 子上下文共享引擎和执行记录存储，但拥有独立的 Created 状态。父作用域未绑定或已终结时返回错误。
     fn fork(&self, spec: ContextChildSpec) -> anyhow::Result<Ctx>;
+
+    /// 订阅当前上下文的执行状态，可读取最新状态并异步等待变化，不消费成功结果。
     fn state(&self) -> ContextStateView;
+
+    /// 更新执行状态并通知订阅者，返回 Applied 或 Unchanged；非法迁移或终态后的写入返回错误。
+    /// Created 可转为 Running、Failed 或 Cancelled，Running 可转为任一终态；
+    /// 重复设置 Created 或 Running 不触发更新，失败或取消会递归取消尚未终结的子上下文。
     fn set_state(&self, state: ContextState) -> anyhow::Result<ContextStateUpdate>;
+
+    /// 为当前作用域追加任务生命周期记录，补充记录 ID、全树递增序号和时间戳。
+    /// 结束阶段可关联同一任务的开始记录并补充耗时；返回记录 ID，未绑定作用域、
+    /// 指定的父记录不存在或共享存储容量已满时返回错误。
     fn append_stack(&self, entry: ContextStackDraft) -> anyhow::Result<StackEntryId>;
+
+    /// 按任务、计划、执行器、阶段及序号筛选执行记录，并按序号升序返回。
+    /// 默认只查询当前作用域，tree 为 true 时包含后代作用域；
+    /// after_sequence 为排他下界，limit 未指定时最多返回 256 条。
     fn stacks(&self, query: ContextStackQuery) -> anyhow::Result<Vec<ContextStack>>;
 }
 #[derive(Debug)]
