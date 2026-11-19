@@ -190,7 +190,15 @@ impl Actor {
             builder.add_hook(super::workspace::WorkspaceHookBuilder::new(
                 self.info.workspace.clone(),
             ));
-            self.engine = Some(build_engine(loader, builder, self.registry.timer.clone()).await);
+            self.engine = Some(
+                build_engine(
+                    loader,
+                    builder,
+                    self.registry.timer.clone(),
+                    self.registry.plugins.clone(),
+                )
+                .await,
+            );
             self.execution_workspace = Some(self.info.workspace.clone());
         }
         let engine = self.engine.as_ref().unwrap().clone();

@@ -216,6 +216,32 @@ concurrent users and gateway/service restarts. The repository checks use local
 mocks; real Feishu permissions, streaming behavior and network recovery require
 deployment verification.
 
+## Plugins
+
+Install the Python SDK in the interpreter used by the service:
+
+```bash
+python3 -m pip install -e ./python/fae-plugin-py
+# Set this before starting the service when using a virtual environment.
+export FAE_PLUGIN_PYTHON=/path/to/venv/bin/python
+fae plugin project_context
+fae plugin --show project_context
+fae plugin --show '*'
+```
+
+Place single files or directories in `<fae_home>/plugins/`. Python single files
+provide `plugin_config()`; directories provide JSON `plugin.config`. Plugins
+support Agent hooks, tool channels and complete/streaming model responses.
+`direct` registers separate Rust execution nodes; `chain` runs one Python onion
+chain in the order of first successful registration.
+
+Loading connects to or starts the home service and atomically publishes the
+candidate. Failed reloads preserve the working version; existing runs and
+streams retain their snapshots. Status inspection works offline without
+starting a service or executing plugin code. Accepted state and source snapshots
+live in `<fae_home>/plugin-state/`. JavaScript is not available in this release.
+See the [SDK API and runnable examples](../../python/fae-plugin-py/README.md).
+
 ## Single agent
 
 Initialize the default `fae` agent:

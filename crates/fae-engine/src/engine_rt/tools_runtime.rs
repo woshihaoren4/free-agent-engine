@@ -15,6 +15,7 @@ pub struct ToolsRuntime {
     tools_hooks: Vec<Box<dyn ToolsHookBuilder>>,
     event_sender: Sender<Event>,
     event_receiver: Receiver<Event>,
+    plugins: Option<fae_agent::plugin::adapter::PluginAdapter>,
 }
 
 impl std::fmt::Debug for ToolsRuntime {
@@ -36,6 +37,7 @@ impl Default for ToolsRuntime {
             tools_hooks: Vec::new(),
             event_sender,
             event_receiver,
+            plugins: None,
         }
     }
 }
@@ -45,6 +47,14 @@ impl ToolsRuntime {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_plugins(mut self, manager: Arc<fae_agent::plugin::PluginManager>) -> Self {
+        for channel in self.tools.keys() {
+            manager.reserve_tool(channel);
+        }
+        self.plugins = Some(fae_agent::plugin::adapter::PluginAdapter::new(manager));
+        self
     }
 
     pub fn tools(&self) -> &HashMap<String, Arc<dyn Tools>> {
@@ -113,8 +123,11 @@ impl ToolsRuntime {
         None
     }
 
-    async fn build_tool(&self, tool_name: &str) -> Option<Arc<dyn Tools>> {
-        let mut tool = self.lookup_tool(tool_name)?.clone();
+    async fn build_tool(&self, ctx: &Ctx, tool_name: &str) -> Option<Arc<dyn Tools>> {
+        let mut tool = self
+            .lookup_tool(tool_name)
+            .cloned()
+            .or_else(|| self.plugins.as_ref().and_then(|p| p.tool(ctx, tool_name)))?;
         for hook in &self.tools_hooks {
             tool = hook.build(tool).await;
         }
@@ -127,7 +140,7 @@ impl ToolsRuntime {
     ) -> fae_agent::Result<TaskResp<ToolResponse>> {
         let TaskReq { ctx, meta, req } = task;
         let tool = self
-            .build_tool(req.get_tool_name())
+            .build_tool(&ctx, req.get_tool_name())
             .await
             .ok_or(fae_agent::Error::RuntimeNoSupport)?;
         let resp = tool.exec(&ctx, req).await?;
@@ -151,22 +164,31 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
     }
 
     async fn select(&self, ty: TaskType, tool_name: String) -> fae_agent::Result<Value> {
+        let ctx = Ctx::new(Arc::new(ContextNull));
+        self.select_with_context(&ctx, ty, tool_name).await
+    }
+
+    async fn select_with_context(
+        &self,
+        ctx: &Ctx,
+        ty: TaskType,
+        tool_name: String,
+    ) -> fae_agent::Result<Value> {
         if ty != TaskType::Tool {
             return Err(fae_agent::Error::RuntimeNoSupport);
         }
 
         let tool = self
-            .build_tool(&tool_name)
+            .build_tool(ctx, &tool_name)
             .await
             .ok_or(fae_agent::Error::RuntimeNoSupport)?;
-        let ctx = Ctx::new(Arc::new(ContextNull));
-        Ok(tool.desc(&ctx, &tool_name).await?)
+        Ok(tool.desc(ctx, &tool_name).await?)
     }
 
     async fn spawn(&self, task: TaskReq<ToolRequest>) -> fae_agent::Result<()> {
         let TaskReq { ctx, mut meta, req } = task;
         let tool = self
-            .build_tool(req.get_tool_name())
+            .build_tool(&ctx, req.get_tool_name())
             .await
             .ok_or(fae_agent::Error::RuntimeNoSupport)?;
         let event_sender = self.event_sender.clone();

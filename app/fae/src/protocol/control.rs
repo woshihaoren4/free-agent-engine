@@ -36,6 +36,8 @@ pub enum ControlMessage {
     Hello,
     Initialize(InitArgsDto),
     Status,
+    PluginLoad { id: String },
+    PluginShow { id: String },
     Shutdown,
 }
 

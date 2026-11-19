@@ -98,6 +98,9 @@ impl Clone for ToolResponse {
     }
 }
 impl ToolResponse {
+    pub(crate) fn plugin_result(&self) -> Option<&str> {
+        self.once_result.as_deref()
+    }
     pub fn with_result(res: String) -> Self {
         Self {
             once_result: Some(res),

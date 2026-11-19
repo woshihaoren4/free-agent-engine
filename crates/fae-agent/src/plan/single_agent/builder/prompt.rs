@@ -328,7 +328,7 @@ pub(in crate::plan::single_agent) async fn runtime_environment(
         if let Some(CallableRoute::Tool(tool_name)) = template.tool_routes.get(name) {
             if let Some(rt) = &template.runtime {
                 if let Ok(description) = rt
-                    .select::<_, Value>(TaskType::Tool, tool_name.clone())
+                    .select_with_context::<_, Value>(ctx, TaskType::Tool, tool_name.clone())
                     .await
                 {
                     // Copy only the readiness contract, never descriptions or credentials.

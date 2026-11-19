@@ -56,6 +56,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
     let timer = fae_engine::TimerRuntime::with_home_dir(home.clone()).await?;
     let registry =
         registry::Registry::with_timer(home.clone(), config.instance_id.clone(), timer.handle());
+    registry.plugins.restore().await?;
     let services = timer::ServerServices::start(timer, registry.clone()).await?;
     let (shutdown, mut stopping) = watch::channel(false);
     let signal = lifecycle::stop_signal()?;

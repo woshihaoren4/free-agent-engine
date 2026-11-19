@@ -246,7 +246,8 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             .filter(|tool_name| !matches!(tool_name.as_str(), AGENT_TOOL_NAME | WORKFLOW_TOOL_NAME))
             .cloned()
             .collect::<Vec<_>>();
-        let (mut tool_definitions, mut tool_routes) = resolve_tools(&rt, &configured_tools).await?;
+        let (mut tool_definitions, mut tool_routes) =
+            resolve_tools(&rt, &ctx, &configured_tools).await?;
         anyhow::ensure!(
             skills.is_empty()
                 || tool_routes.keys().any(|name| matches!(

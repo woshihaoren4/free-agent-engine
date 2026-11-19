@@ -4,6 +4,7 @@ pub mod client;
 pub mod daemon;
 mod output;
 pub mod paths;
+mod plugin;
 mod restart;
 mod workflow;
 
@@ -13,6 +14,7 @@ use args::{Cli, Command, ServerCommand};
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let home = paths::home(cli.fae_home)?;
     match cli.command {
+        Some(Command::Plugin(args)) => plugin::run(&home, args).await,
         Some(Command::Restart) => restart::run(&home).await,
         Some(Command::Lark(args)) => {
             use args::LarkCommand;

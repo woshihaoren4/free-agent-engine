@@ -691,6 +691,7 @@ pub(crate) struct SessionOutputChannel {
 struct SessionOutputChannelInner {
     sender: UnboundedSender<SessionOutput>,
     receiver: Mutex<UnboundedReceiver<SessionOutput>>,
+    plugin_pending: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionOutputChannel {
@@ -700,25 +701,55 @@ impl SessionOutputChannel {
             inner: Arc::new(SessionOutputChannelInner {
                 sender,
                 receiver: Mutex::new(receiver),
+                plugin_pending: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
 
     pub(crate) fn emit(&self, output: SessionOutput) -> anyhow::Result<()> {
-        self.inner
-            .sender
-            .send(output)
-            .map_err(|error| anyhow::anyhow!("send session output failed: {error}"))
+        use std::sync::atomic::Ordering;
+        let plugin = output.input_type == "plugin_message";
+        if plugin {
+            self.inner
+                .plugin_pending
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    (count < 64).then_some(count + 1)
+                })
+                .map_err(|_| anyhow::anyhow!("SessionBusy: plugin message queue is full"))?;
+        }
+        match self.inner.sender.send(output) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if plugin {
+                    self.inner.plugin_pending.fetch_sub(1, Ordering::AcqRel);
+                }
+                Err(anyhow::anyhow!("send session output failed: {error}"))
+            }
+        }
     }
 
     pub(crate) async fn answer(&self) -> Option<SessionOutput> {
-        self.inner.receiver.lock().await.recv().await
+        let output = self.inner.receiver.lock().await.recv().await;
+        if output
+            .as_ref()
+            .is_some_and(|o| o.input_type == "plugin_message")
+        {
+            self.inner
+                .plugin_pending
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        output
     }
 
     pub(crate) async fn drain(&self) -> Vec<SessionOutput> {
         let mut receiver = self.inner.receiver.lock().await;
         let mut outputs = Vec::new();
         while let Ok(output) = receiver.try_recv() {
+            if output.input_type == "plugin_message" {
+                self.inner
+                    .plugin_pending
+                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
             outputs.push(output);
         }
         outputs
@@ -812,6 +843,36 @@ pub enum SessionResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn plugin_output_queue_is_bounded_and_consumption_restores_capacity() {
+        let channel = SessionOutputChannel::new();
+        let message = || {
+            SessionOutput::from(SessionEvent::single_agent_for(
+                "fae",
+                1,
+                "plugin",
+                SessionEventData::Custom {
+                    event_type: "plugin_message".into(),
+                    content: json!({"text":"progress"}),
+                },
+            ))
+        };
+        for _ in 0..64 {
+            channel.emit(message()).unwrap();
+        }
+        assert!(
+            channel
+                .emit(message())
+                .unwrap_err()
+                .to_string()
+                .contains("SessionBusy")
+        );
+        channel.answer().await.unwrap();
+        channel.emit(message()).unwrap();
+        assert_eq!(channel.drain().await.len(), 64);
+        channel.emit(message()).unwrap();
+    }
 
     #[test]
     fn custom_event_uses_its_type_and_supports_arbitrary_content() {

@@ -1,0 +1,10 @@
+{
+  "agent": {
+    "name": "table_demo",
+    "desc": "调用 Python 表格图片工具",
+    "user_id": "master",
+    "session_id": "default"
+  },
+  "model": {"model": "gpt-4o-mini"},
+  "tools": ["fae_table_image__generate"]
+}

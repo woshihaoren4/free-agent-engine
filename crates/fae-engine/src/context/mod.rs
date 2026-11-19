@@ -381,6 +381,7 @@ pub struct EngineContext {
     engine: EngineRef,
     local: Mutex<Local>,
     stacks: Arc<Mutex<StackStore>>,
+    plugins: Mutex<Option<Arc<fae_agent::plugin::PluginRun>>>,
 }
 impl EngineContext {
     pub fn new(engine: Engine) -> Self {
@@ -399,6 +400,7 @@ impl EngineContext {
         Self {
             engine,
             stacks,
+            plugins: Mutex::new(None),
             local: Mutex::new(Local {
                 scope,
                 state,
@@ -441,6 +443,20 @@ impl EngineContext {
     }
 }
 impl Context for EngineContext {
+    fn with_active(&self, action: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        let local = self.local.lock().unwrap();
+        anyhow::ensure!(!local.state.borrow().is_terminal(), "ContextFinished");
+        action()
+    }
+    fn plugin_run(&self) -> Option<Arc<fae_agent::plugin::PluginRun>> {
+        self.plugins.lock().unwrap().clone()
+    }
+    fn bind_plugin_run(&self, run: Arc<fae_agent::plugin::PluginRun>) {
+        let mut slot = self.plugins.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(run);
+        }
+    }
     fn get_engine(&self) -> EngineRef {
         self.engine.clone()
     }
@@ -534,6 +550,9 @@ impl Context for EngineContext {
             self.stacks.clone(),
             Some(Arc::new(scope)),
         ));
+        if let Some(run) = self.plugin_run() {
+            child.bind_plugin_run(run);
+        }
         local.children.retain(|child| child.strong_count() > 0);
         local.children.push(Arc::downgrade(&child));
         Ok(Ctx::new(child))

@@ -107,6 +107,7 @@ pub struct TerminalUi {
     cwd: String,
     messages: Vec<Message>,
     child_streams: HashMap<String, Vec<BufferedMessage>>,
+    plugin_messages: std::collections::HashSet<String>,
     composer: Composer,
     attachments: Vec<String>,
     file_browser: Option<FileBrowser>,
@@ -228,6 +229,7 @@ impl TerminalUi {
             cwd: display_cwd(),
             messages: Vec::new(),
             child_streams: HashMap::new(),
+            plugin_messages: std::collections::HashSet::new(),
             composer: Composer::default(),
             attachments: Vec::new(),
             file_browser: None,
@@ -548,12 +550,23 @@ impl TerminalUi {
                 event_type,
                 content,
             } => {
+                if event_type == "plugin_message" {
+                    if let Some(id) = content["message_id"].as_str() {
+                        if !self.plugin_messages.insert(id.into()) {
+                            return Ok(false);
+                        }
+                    }
+                }
                 self.flush_child_streams(&run_id, None);
                 self.finish_stream();
                 self.messages.push(Message::new(
                     MessageKind::System,
                     title(&event_type),
-                    compact_value(&content),
+                    if event_type == "plugin_message" {
+                        content["text"].as_str().unwrap_or_default().to_owned()
+                    } else {
+                        compact_value(&content)
+                    },
                     None,
                 ));
             }

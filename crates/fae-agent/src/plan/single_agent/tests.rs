@@ -2175,6 +2175,151 @@ user-defined rules, and other long-term facts."
         assert!(plan.final_output.is_empty());
     }
 
+    #[derive(Debug)]
+    struct QueryHook {
+        calls: Arc<StdMutex<Vec<String>>>,
+        cancel: bool,
+    }
+    #[async_trait::async_trait]
+    impl SingleAgentHook for QueryHook {
+        async fn on_query(
+            &self,
+            ctx: &SingleAgentHookContext<'_>,
+            query: String,
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push(format!("query:{query}"));
+            if self.cancel {
+                ctx.ctx
+                    .set_state(crate::ContextState::cancelled("query cancelled"))?;
+            }
+            Ok(query.trim().to_owned())
+        }
+        async fn on_memory(
+            &self,
+            _: &SingleAgentHookContext<'_>,
+            memories: Vec<UserMemory>,
+        ) -> anyhow::Result<Vec<UserMemory>> {
+            self.calls.lock().unwrap().push("memory".into());
+            Ok(memories)
+        }
+    }
+    #[tokio::test]
+    async fn query_precedes_memory_and_normalizes_saved_and_supplemented_input() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let mut template = test_template();
+        template.hook = Arc::new(QueryHook {
+            calls: calls.clone(),
+            cancel: false,
+        });
+        let session = CommonSession::new();
+        let mut plan = SingleAgentPlan::new(
+            Ctx::null(),
+            template,
+            "  initial  ".into(),
+            1,
+            session.clone(),
+        );
+        assert!(matches!(plan.init().await.unwrap(), PlanNext::Tasks(_)));
+        assert_eq!(plan.input, "initial");
+        assert_eq!(plan.unsaved_messages[0], SessionMessage::user("initial"));
+        assert_eq!(
+            session.answer().await.unwrap().unwrap().output["input"],
+            "initial"
+        );
+        plan.next(
+            TaskResp {
+                ctx: Ctx::null(),
+                meta: TaskMeta::default(),
+                resp: UserMemoryResponse::Memories {
+                    path: PathBuf::new(),
+                    memories: Vec::new(),
+                },
+            }
+            .into_response(),
+        )
+        .await
+        .unwrap();
+        plan.append_user_inputs(vec![SessionInputData::text("  supplement  ")])
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["query:  initial  ", "memory", "query:  supplement  "]
+        );
+        assert_eq!(
+            plan.unsaved_messages.last().unwrap(),
+            &SessionMessage::user("supplement")
+        );
+    }
+    #[tokio::test]
+    async fn query_cancellation_stops_before_turn_started() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let mut template = test_template();
+        template.hook = Arc::new(QueryHook {
+            calls,
+            cancel: true,
+        });
+        let ctx = crate::context::test_context(Some(crate::ContextScope::root("user-1")));
+        ctx.set_state(crate::ContextState::Running).unwrap();
+        let session = CommonSession::new();
+        let mut plan =
+            SingleAgentPlan::new(ctx.clone(), template, "stop".into(), 1, session.clone());
+        assert!(plan.init().await.is_err());
+        assert!(ctx.state().current().is_cancelled());
+        assert!(session.drain_outputs().await.is_empty());
+    }
+    #[tokio::test]
+    async fn query_transform_preserves_attachments_in_model_and_saved_input() {
+        let mut template = test_template();
+        template.hook = Arc::new(QueryHook {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+            cancel: false,
+        });
+        let images = vec!["https://example.com/test.png".to_owned()];
+        let mut plan = SingleAgentPlan::new_with_images(
+            Ctx::null(),
+            template,
+            "  image question  ".into(),
+            images.clone(),
+            1,
+            CommonSession::new(),
+        );
+        plan.init().await.unwrap();
+        plan.prepare_messages(Vec::new(), None).await.unwrap();
+        assert_eq!(
+            plan.unsaved_messages[0],
+            SessionMessage::user_with_images("image question", images.clone())
+        );
+        let request = serde_json::to_value(plan.model_request()).unwrap();
+        assert_eq!(
+            request["messages"][1]["content"][0]["text"],
+            "image question"
+        );
+        assert_eq!(
+            request["messages"][1]["content"][1]["image_url"]["url"],
+            images[0]
+        );
+    }
+    #[tokio::test]
+    async fn internal_ephemeral_prompt_does_not_invoke_query_hook() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let mut template = test_template();
+        template.hook = Arc::new(QueryHook {
+            calls: calls.clone(),
+            cancel: false,
+        });
+        let mut plan = SingleAgentPlan::new_ephemeral(
+            Ctx::null(),
+            template,
+            "internal prompt".into(),
+            1,
+            CommonSession::new(),
+            Vec::new(),
+        );
+        plan.init().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
     fn test_template() -> SingleAgentTemplate {
         SingleAgentTemplate {
             agent: SingleAgentInfo {

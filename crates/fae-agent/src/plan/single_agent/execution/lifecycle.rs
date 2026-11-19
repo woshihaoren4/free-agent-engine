@@ -11,6 +11,30 @@ impl Plan for SingleAgentPlan {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
+        if !self.query_prepared {
+            self.input = self
+                .template
+                .hook
+                .on_query(&self.hook_context(None), self.input.clone())
+                .await?;
+            anyhow::ensure!(
+                !self.ctx.state().current().is_terminal(),
+                "input context finished"
+            );
+            anyhow::ensure!(
+                !self.input.trim().is_empty() || !self.images.is_empty(),
+                "query is empty and has no input attachments"
+            );
+            self.query_prepared = true;
+            self.unsaved_messages[0] =
+                SessionMessage::user_with_images(self.input.clone(), self.images.clone());
+        }
+        if self.unsaved_messages.is_empty() {
+            self.unsaved_messages.push(SessionMessage::user_with_images(
+                self.input.clone(),
+                self.images.clone(),
+            ));
+        }
         self.emit(
             self.template.agent.name.clone(),
             SessionEventData::TurnStarted {

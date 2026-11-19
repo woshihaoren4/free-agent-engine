@@ -29,6 +29,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Load or reload a plugin; --show inspects without starting the service
+    Plugin(PluginArgs),
     /// Restart the background service and the configured Feishu gateway
     Restart,
     /// Manage the Feishu agent gateway (never started by default)
@@ -43,6 +45,14 @@ pub enum Command {
     Agent(AgentArgs),
     /// Run a workflow stored in FAE_HOME/workflows
     Workflow(WorkflowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PluginArgs {
+    #[arg(value_name = "ID")]
+    pub id: String,
+    #[arg(long)]
+    pub show: bool,
 }
 
 #[derive(Debug, Args)]
@@ -175,7 +185,8 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
     while index < args.len() {
         let value = args[index].to_string_lossy();
         match value.as_ref() {
-            "init" | "uninstall" | "restart" | "agent" | "workflow" | "server" | "lark" => {
+            "init" | "uninstall" | "restart" | "plugin" | "agent" | "workflow" | "server"
+            | "lark" => {
                 return args;
             }
             "--fae-home" | "--workspace" | "--color" => index += 2,
@@ -204,6 +215,19 @@ fn with_default_agent(args: impl IntoIterator<Item = OsString>) -> Vec<OsString>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_commands_are_explicit_and_show_accepts_all() {
+        for args in [
+            vec!["fae", "plugin", "demo"],
+            vec!["fae", "plugin", "--show", "*"],
+            vec!["fae", "--fae-home", "/tmp/fae", "plugin", "--show", "demo"],
+        ] {
+            let cli =
+                Cli::try_parse_from(with_default_agent(args.into_iter().map(Into::into))).unwrap();
+            assert!(matches!(cli.command, Some(Command::Plugin(_))));
+        }
+    }
 
     #[test]
     fn parses_restart_without_inserting_agent_mode() {

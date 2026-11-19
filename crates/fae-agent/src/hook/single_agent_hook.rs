@@ -33,6 +33,14 @@ impl CompositeSingleAgentHook {
 
 #[async_trait::async_trait]
 pub trait SingleAgentHook: Debug + Send + Sync + 'static {
+    async fn on_query(
+        &self,
+        _ctx: &SingleAgentHookContext<'_>,
+        query: String,
+    ) -> anyhow::Result<String> {
+        Ok(query)
+    }
+
     async fn on_prompt(
         &self,
         _ctx: &SingleAgentHookContext<'_>,
@@ -108,6 +116,25 @@ pub trait SingleAgentHook: Debug + Send + Sync + 'static {
 
 #[async_trait::async_trait]
 impl SingleAgentHook for CompositeSingleAgentHook {
+    async fn on_query(
+        &self,
+        ctx: &SingleAgentHookContext<'_>,
+        mut query: String,
+    ) -> anyhow::Result<String> {
+        for hook in &self.hooks {
+            anyhow::ensure!(
+                !ctx.ctx.state().current().is_terminal(),
+                "hook context finished"
+            );
+            query = hook.on_query(ctx, query).await?;
+        }
+        anyhow::ensure!(
+            !ctx.ctx.state().current().is_terminal(),
+            "hook context finished"
+        );
+        Ok(query)
+    }
+
     async fn on_prompt(
         &self,
         ctx: &SingleAgentHookContext<'_>,

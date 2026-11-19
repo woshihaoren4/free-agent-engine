@@ -346,8 +346,27 @@ pub struct ContextStackQuery {
 }
 
 pub trait Context: Debug + Send + Sync + 'static {
+    fn plugin_run(&self) -> Option<Arc<crate::plugin::PluginRun>> {
+        None
+    }
+    fn bind_plugin_run(&self, _run: Arc<crate::plugin::PluginRun>) {}
+    /// Host-only short synchronous admission; implementations can serialize it
+    /// with terminal publication. The action must never call back into this Ctx.
+    fn with_active(&self, action: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.state().current().is_terminal(), "ContextFinished");
+        action()
+    }
     /// 获取当前上下文所属的引擎，用于访问运行时、构建计划或准备子计划。
     fn get_engine(&self) -> EngineRef;
+
+    /// Return the session bound to this scope, without consulting its current turn.
+    fn get_session(&self) -> anyhow::Result<Option<CommonSession>> {
+        Ok(self
+            .scope()?
+            .session
+            .as_ref()
+            .map(|binding| binding.session.clone()))
+    }
 
     /// 获取已绑定的作用域，读取用户、会话、执行归属及工作目录等信息；未绑定时返回错误。
     fn scope(&self) -> anyhow::Result<Arc<ContextScope>>;
@@ -382,6 +401,10 @@ pub trait Context: Debug + Send + Sync + 'static {
 #[derive(Debug)]
 pub struct ContextNull;
 impl Context for ContextNull {
+    fn get_session(&self) -> anyhow::Result<Option<CommonSession>> {
+        Ok(None)
+    }
+
     fn get_engine(&self) -> EngineRef {
         Arc::new(EngineNull)
     }
@@ -417,6 +440,9 @@ impl WeakCtx {
     }
 }
 impl Ctx {
+    pub fn same_context(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     /// Prepare an independent tool scope without mutating the caller's scope.
     pub fn with_todo_plan(&self, plan_id: String, user_input: String) -> anyhow::Result<Self> {
         let scope = self.scope()?;

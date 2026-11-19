@@ -10,6 +10,14 @@ use wd_tools::channel::Receiver;
 
 #[async_trait::async_trait]
 pub trait Runtime: Debug + Send + Sync + 'static {
+    async fn select_with_context(
+        &self,
+        _ctx: &crate::Ctx,
+        ty: TaskType,
+        cond: &mut common::AnyType,
+    ) -> crate::Result<common::AnyType> {
+        self.select(ty, cond).await
+    }
     fn id(&self) -> &str;
     async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>> {
         Err(crate::Error::RuntimeNoSupport)
@@ -51,6 +59,18 @@ impl Runtime for RuntimeNull {
 #[derive(Debug, Clone)]
 pub struct RT(Arc<dyn Runtime>);
 impl RT {
+    pub async fn select_with_context<Cond: Send + 'static, Info: Send + 'static>(
+        &self,
+        ctx: &crate::Ctx,
+        ty: TaskType,
+        cond: Cond,
+    ) -> anyhow::Result<Info> {
+        let mut cond: AnyType = Box::new(cond);
+        let info = self.0.select_with_context(ctx, ty, &mut cond).await?;
+        info.downcast::<Info>()
+            .map(|info| *info)
+            .map_err(|_| anyhow::anyhow!("runtime select type mismatch"))
+    }
     pub fn new(env: Arc<dyn Runtime>) -> Self {
         Self(env)
     }
@@ -125,6 +145,14 @@ where
     Cond: Debug + Send + 'static,
     Info: Debug + Send + 'static,
 {
+    async fn select_with_context(
+        &self,
+        _ctx: &crate::Ctx,
+        ty: TaskType,
+        cond: Cond,
+    ) -> crate::Result<Info> {
+        self.select(ty, cond).await
+    }
     fn id(&self) -> &str;
     fn tys(&self) -> Vec<TaskType>;
     async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>> {
@@ -185,6 +213,22 @@ where
     Cond: Debug + Send + 'static,
     Info: Debug + Send + 'static,
 {
+    async fn select_with_context(
+        &self,
+        ctx: &crate::Ctx,
+        ty: TaskType,
+        cond: &mut AnyType,
+    ) -> crate::Result<AnyType> {
+        if cond.downcast_ref::<Cond>().is_none() {
+            return Err(crate::Error::RuntimeNoSupport);
+        }
+        let value = std::mem::replace(cond, Box::new(()))
+            .downcast::<Cond>()
+            .unwrap();
+        Ok(Box::new(
+            self.inner.select_with_context(ctx, ty, *value).await?,
+        ))
+    }
     fn id(&self) -> &str {
         self.inner.id()
     }

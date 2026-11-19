@@ -71,6 +71,7 @@ pub(in crate::plan) struct SingleAgentPlan {
     ctx: Ctx,
     template: SingleAgentTemplate,
     input: String,
+    query_prepared: bool,
     images: Vec<String>,
     turn_id: u64,
     session: CommonSession,
@@ -250,6 +251,8 @@ impl SingleAgentPlan {
             ctx,
             template,
             input,
+            // Ephemeral plans contain orchestrator prompts, not a new user input.
+            query_prepared: !persist_session,
             images,
             turn_id,
             session,
@@ -470,8 +473,21 @@ impl SingleAgentPlan {
     }
 
     async fn append_user_inputs(&mut self, inputs: Vec<SessionInputData>) -> anyhow::Result<()> {
-        for input in inputs {
+        for mut input in inputs {
             let images = input.images.unwrap_or_default();
+            input.text = self
+                .template
+                .hook
+                .on_query(&self.hook_context(None), input.text)
+                .await?;
+            anyhow::ensure!(
+                !self.ctx.state().current().is_terminal(),
+                "input context finished"
+            );
+            anyhow::ensure!(
+                !input.text.trim().is_empty() || !images.is_empty(),
+                "query is empty and has no input attachments"
+            );
             let content =
                 user_message_content(&input.text, &images, &self.template.model.image_detail)
                     .await?;
