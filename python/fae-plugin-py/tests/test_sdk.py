@@ -2,6 +2,7 @@ import asyncio
 import json
 import importlib.util
 import os
+import py_compile
 import struct
 import sys
 import tempfile
@@ -18,6 +19,21 @@ from fae_plugin.types import encode
 
 
 class TypesTest(unittest.TestCase):
+    def test_member_modules_load_current_source_despite_stale_bytecode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "plugin.py"
+            helper = root / "helper.py"
+            source.write_text("import helper\nVALUE = 'old' + helper.VALUE\n")
+            helper.write_text("VALUE = 'old'\n")
+            for file in (source, helper):
+                before = file.stat()
+                py_compile.compile(str(file), doraise=True)
+                file.write_text(file.read_text().replace("'old'", "'new'"))
+                os.utime(file, ns=(before.st_atime_ns, before.st_mtime_ns))
+            module = ModuleLoader("fresh", root).load(source)
+            self.assertEqual(module.VALUE, "newnew")
+
     def test_model_mount_has_no_location_and_requires_match_method(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "model.py"

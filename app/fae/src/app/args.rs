@@ -29,7 +29,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Load or reload a plugin; --show inspects without starting the service
+    /// Install, inspect or uninstall plugins
     Plugin(PluginArgs),
     /// Restart the background service and the configured Feishu gateway
     Restart,
@@ -49,10 +49,21 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct PluginArgs {
-    #[arg(value_name = "ID")]
-    pub id: String,
-    #[arg(long)]
-    pub show: bool,
+    #[command(subcommand)]
+    pub command: PluginCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    /// Copy a plugin file or directory into plugins; replace the same ID
+    Install { source: PathBuf },
+    /// Show one plugin, or all plugins when ID is omitted or '*'
+    Show {
+        #[arg(default_value = "*")]
+        id: String,
+    },
+    /// Remove plugin files and mark the plugin uninstalled
+    Uninstall { id: String },
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +88,40 @@ pub enum LarkCommand {
     },
     Status,
     Stop,
+    /// Update the whitelist on disk and in the running gateway without restarting
+    Whitelist {
+        #[command(subcommand)]
+        command: WhitelistCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WhitelistCommand {
+    /// Add open_ids; an unrestricted whitelist becomes restricted to these users
+    Add {
+        #[arg(required = true)]
+        users: Vec<String>,
+    },
+    /// Remove open_ids from a restricted whitelist
+    Remove {
+        #[arg(required = true)]
+        users: Vec<String>,
+    },
+    /// Replace the whitelist; no open_ids means deny everyone
+    Set { users: Vec<String> },
+    /// Apply user_id_whitelist from lark.config to the running gateway
+    Reload,
+}
+
+impl From<WhitelistCommand> for crate::lark::whitelist::Update {
+    fn from(command: WhitelistCommand) -> Self {
+        match command {
+            WhitelistCommand::Add { users } => Self::Add(users),
+            WhitelistCommand::Remove { users } => Self::Remove(users),
+            WhitelistCommand::Set { users } => Self::Set(users),
+            WhitelistCommand::Reload => Self::Reload,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -219,14 +264,30 @@ mod tests {
     #[test]
     fn plugin_commands_are_explicit_and_show_accepts_all() {
         for args in [
-            vec!["fae", "plugin", "demo"],
-            vec!["fae", "plugin", "--show", "*"],
-            vec!["fae", "--fae-home", "/tmp/fae", "plugin", "--show", "demo"],
+            vec!["fae", "plugin", "install", "demo.py"],
+            vec!["fae", "plugin", "show"],
+            vec!["fae", "plugin", "show", "*"],
+            vec!["fae", "--fae-home", "/tmp/fae", "plugin", "show", "demo"],
+            vec!["fae", "plugin", "uninstall", "demo"],
         ] {
             let cli =
                 Cli::try_parse_from(with_default_agent(args.into_iter().map(Into::into))).unwrap();
             assert!(matches!(cli.command, Some(Command::Plugin(_))));
         }
+        for args in [
+            vec!["fae", "plugin", "demo"],
+            vec!["fae", "plugin", "--show", "*"],
+            vec!["fae", "plugin", "load", "demo"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from(["fae", "plugin", "show"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Plugin(PluginArgs {
+                command: PluginCommand::Show { id }
+            })) if id == "*"
+        ));
     }
 
     #[test]
@@ -257,6 +318,27 @@ mod tests {
                 command: LarkCommand::Check { online: true }
             }))
         ));
+        for arguments in [
+            vec!["fae", "lark", "whitelist", "add", "ou_alice", "ou_bob"],
+            vec!["fae", "lark", "whitelist", "remove", "ou_alice"],
+            vec!["fae", "lark", "whitelist", "set"],
+            vec!["fae", "lark", "whitelist", "set", "ou_alice"],
+            vec!["fae", "lark", "whitelist", "reload"],
+        ] {
+            let cli =
+                Cli::try_parse_from(with_default_agent(arguments.into_iter().map(Into::into)))
+                    .unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Lark(LarkArgs {
+                    command: LarkCommand::Whitelist { .. }
+                }))
+            ));
+        }
+        for action in ["add", "remove"] {
+            assert!(Cli::try_parse_from(["fae", "lark", "whitelist", action]).is_err());
+        }
+        assert!(Cli::try_parse_from(["fae", "lark", "whitelist", "allow-all"]).is_err());
     }
 
     #[test]

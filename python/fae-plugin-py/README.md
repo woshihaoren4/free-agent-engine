@@ -9,6 +9,34 @@ python3 -m pip install -e ./python/fae-plugin-py
 python3 -m pip install httpx
 ```
 
+## 打包和发布到 PyPI
+
+在仓库根目录执行：
+
+```bash
+# 仅打包并校验，不上传，也不需要 Token
+bash python/publish.sh --build-only
+
+# 打包、校验并发布到正式 PyPI；按提示隐藏输入 API Token
+bash python/publish.sh
+```
+
+自动化发布可通过环境变量 `PYPI_API_TOKEN` 或 `TWINE_PASSWORD` 提供 Token。
+脚本顶部列出了所有支持的环境变量。测试发布时设置
+`TWINE_REPOSITORY_URL=https://test.pypi.org/legacy/`，并使用 TestPyPI 的 Token。
+构建产物默认保存在本包的 `dist/`，上传只使用本次构建的 wheel 和源码压缩包。
+每次发布前更新 `pyproject.toml` 中的 `version`，PyPI 不允许覆盖同版本文件。
+
+发布成功后，其他人可安装并导入：
+
+```bash
+python3 -m pip install fae-plugin-py
+```
+
+```python
+from fae_plugin import Context, SingleAgentHook, ToolsHook, ModelHook
+```
+
 宿主从 `FAE_PLUGIN_PYTHON` 选择解释器，默认 `python3`。该解释器需要预先安装 SDK
 和插件业务依赖；加载插件不会执行 pip。FAE CLI 已启用 Rust `python` feature；
 独立使用 fae-agent/fae-engine 时需显式启用相应 feature。
@@ -41,13 +69,23 @@ class ProjectContext(SingleAgentHook):
 ```
 
 ```bash
-fae plugin project_context
-fae plugin --show project_context
-fae plugin --show '*'
-fae --fae-home /path/to/.fae plugin project_context
+fae plugin install /path/to/project_context.py
+fae plugin show project_context
+fae plugin show '*'
+fae --fae-home /path/to/.fae plugin uninstall project_context
 ```
 
-单文件配置函数是同步无参数函数，每次候选加载调用一次。目录插件以根目录
+`fae plugin show` 不传 ID 时等同于 `fae plugin show '*'`，简洁列出全部插件。
+
+安装命令将插件文件或目录复制到 `<fae_home>/plugins/`，同名覆盖并保留安装位置。
+固定 JSON 文件 `plugins/plugins.config` 的 `plugins` 数组记录安装顺序、
+`id`、`source`、`installed` 和 `enabled`；卸载保留源码并将两个状态设为 false，
+卸载后重装追加到末尾。可编辑 `enabled` 禁用插件。
+服务启动按配置顺序加载已安装且启用的当前源码，任何错误都会导致启动失败。
+服务运行时安装、覆盖和卸载即时更新运行时，无需重启；已有任务保留原 Worker 快照。
+服务未运行时只更新文件及配置，下次启动生效；未记录在配置中的源码不会自动加载。
+
+单文件配置函数是同步无参数函数，每次服务加载调用一次。目录插件以根目录
 `plugin.config` UTF-8 JSON 为唯一配置，必须有 `"engine": "py"`，入口为
 `"implementation": "plugin.py:ProjectContext"`，不调用配置函数。
 
@@ -241,9 +279,9 @@ class LookupCache:
 Worker 使用有界队列、8 个业务槽、每组 4 个槽、4 个同步线程及有界流引用。
 流逐块拉取，消费端 drop/cancel 释放调用。stdout 专用于协议，print 转到 stderr。
 
-重加载先校验新配置、类、签名、依赖和路由，再原子切换。旧 Run 的子任务和
-流保留旧快照，下一轮使用新版本；失败保留工作版本。状态与冻结源码在
-`plugin-state/active.json` 和 `plugin-state/versions/` 内管理，重启恢复冻结配置与源码，离线 show 不运行插件代码。
+启动时校验当前配置、类、签名、依赖和路由，错误直接向上传递。
+宿主不保存冻结源码或恢复旧版本。安装状态只记录在 `plugins/plugins.config`，
+重启重新读取当前源码及声明；离线 show 不运行插件代码，单文件声明显示为未知。
 
 ```bash
 PYTHONPATH=python/fae-plugin-py/src python3 -m unittest discover \

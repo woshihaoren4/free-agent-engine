@@ -22,6 +22,7 @@ pub struct LiveSession {
 pub struct Gateway {
     pub home: PathBuf,
     pub config: Config,
+    pub whitelist: super::whitelist::Policy,
     pub store: Arc<Store>,
     pub sdk: Sdk,
     pub stopping: watch::Receiver<bool>,
@@ -30,7 +31,7 @@ pub struct Gateway {
     pub tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 fn thread_help() -> &'static str {
-    "话题外发送普通消息开始新会话；话题内发送消息继续当前会话。\n群聊话题内外均需 @智能体。\n/status, /session  查看当前话题状态\n/todo <message>  规划并执行\n/session clean, /clean  清理当前话题历史和 todos\n/steer <message>  补充当前话题执行\n执行中所有输入自动作为 /steer"
+    "话题外发送普通消息开始新会话；话题内发送消息继续当前会话。\n群聊话题内外均需 @智能体。\n/status, /session  查看当前话题状态\n/todo <message>  规划并执行\n/session clean, /clean  清理当前话题历史和 todos\n/steer <message>  补充当前话题执行\n/stop  停止当前话题执行，空闲时忽略\n执行中除 /stop 和会话切换命令外，所有输入自动作为 /steer"
 }
 impl Gateway {
     fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
@@ -142,7 +143,7 @@ impl Gateway {
         anyhow::ensure!(!*self.stopping.borrow(), "网关已停止");
         // Apply the current policy to both live input and recovered receipts,
         // before creating a thread, opening a session, or executing commands.
-        if !self.config.allows_user(&record.binding.user_id) {
+        if !self.whitelist.allows_user(&record.binding.user_id) {
             return self.notice(id, "权限不足".into());
         }
         if let Some(error) = &record.rejection {
@@ -293,6 +294,25 @@ impl Gateway {
         }
         let client = live.client.as_mut().unwrap();
         let command = record.text.trim();
+        if command == "/stop" {
+            // Never replay a cancellation after a crash: a newer round may be running.
+            let stopped = if !recovering {
+                self.store.update(id, |r| r.state = State::Submitting)?;
+                tokio::time::timeout(Duration::from_secs(10), client.stop_round(status.round_id))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("停止状态不确定：服务请求超时"))??
+            } else {
+                false
+            };
+            if stopped {
+                return self.notice(id, "已请求停止当前执行".into());
+            }
+            self.store.update(id, |r| {
+                r.state = State::Delivering;
+                r.outcome = Some("succeeded".into());
+            })?;
+            return Ok(());
+        }
         if !recovering && !busy {
             match command {
                 "/help" | "/session -h" | "/session --help" => {
@@ -642,6 +662,7 @@ mod tests {
         Arc::new(Gateway {
             home: home.clone(),
             config: config.clone(),
+            whitelist: super::super::whitelist::Policy::new(config.user_id_whitelist.clone()),
             store: Arc::new(Store::open(&home, 7).unwrap()),
             sdk: Sdk::for_test(config, base),
             stopping,
@@ -715,9 +736,19 @@ mod tests {
                 "chat_id":"chat","thread_id":"omt_feedback","root_id":"om_root"}})
         })
         .await;
-        let mut gateway = feedback_gateway(base);
-        Arc::get_mut(&mut gateway).unwrap().config.user_id_whitelist =
-            Some(vec!["ou_other".into()]);
+        let gateway = feedback_gateway(base);
+        std::fs::write(
+            gateway.home.join("lark.config"),
+            serde_json::to_vec(&gateway.config).unwrap(),
+        )
+        .unwrap();
+        gateway
+            .whitelist
+            .update(
+                &gateway.home,
+                &super::super::whitelist::Update::Set(vec!["ou_other".into()]),
+            )
+            .unwrap();
         // These receipts have no saved rejection: recovery must enforce the
         // current whitelist before accepting input under an older policy.
         for (index, text, in_thread) in [
@@ -761,6 +792,33 @@ mod tests {
                 .count(),
             4
         );
+        // The same gateway must admit newly allowed users and reject them again
+        // after removal, including receipts restored from disk.
+        for (index, update, expected) in [
+            (
+                0,
+                super::super::whitelist::Update::Add(vec!["ou_user".into()]),
+                thread_help(),
+            ),
+            (
+                1,
+                super::super::whitelist::Update::Remove(vec!["ou_user".into()]),
+                "权限不足",
+            ),
+        ] {
+            let mut record = feedback_record(&format!("om_policy_change_{index}"));
+            record.text = "/help".into();
+            record.binding.thread_id.clear();
+            record.session_id.clear();
+            record.inbound_thread_id.clear();
+            record.thread_state = super::super::store::ThreadState::Unresolved;
+            let id = record.id.clone();
+            gateway.store.insert(record).unwrap();
+            gateway.whitelist.update(&gateway.home, &update).unwrap();
+            gateway.recover(id.clone()).await;
+            assert_eq!(gateway.store.get(&id).notice.as_deref(), Some(expected));
+            assert!(gateway.sessions.lock().await.is_empty());
+        }
         task.abort();
         std::fs::remove_dir_all(&gateway.home).unwrap();
     }
@@ -952,6 +1010,7 @@ mod tests {
         let gateway = Arc::new(Gateway {
             home: home.clone(),
             config: config.clone(),
+            whitelist: super::super::whitelist::Policy::new(config.user_id_whitelist.clone()),
             store: Arc::new(Store::open(&home, 7).unwrap()),
             sdk: Sdk::for_test(config, "http://127.0.0.1:1".into()),
             stopping,
@@ -990,7 +1049,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                gateway.store.get(&id).notice.unwrap()
+                gateway.store.get(&id).notice.unwrap_or_default()
             }
         };
         assert!(submit("help", "/help".into()).await.contains("/steer"));
@@ -1023,6 +1082,18 @@ mod tests {
                 .contains(&original)
         );
         let occupied = gateway.slots.clone().try_acquire_owned().unwrap();
+        assert!(submit("stop-idle", "/stop".into()).await.is_empty());
+        let stopped = gateway
+            .store
+            .get(&identity::receipt_id("test", "tenant", "stop-idle"));
+        assert_eq!(stopped.outcome.as_deref(), Some("succeeded"));
+        assert!(stopped.round_id.is_none());
+        assert!(stopped.responses.is_empty());
+        assert!(
+            submit("after-stop-idle", "/status".into())
+                .await
+                .contains("idle")
+        );
         let blocked = identity::receipt_id("test", "tenant", "blocked");
         gateway
             .store

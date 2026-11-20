@@ -1,12 +1,28 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fae-plugin-py"
 version = "0.1.0"
 description = "Typed Python plugins for the FAE agent engine"
+readme = "README.md"
 requires-python = ">=3.10"
+authors = [{ name = "Teshin", email = "1443965173@qq.com" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["fae", "agent", "plugins", "sdk"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/woshihaoren4/free-agent-engine"
+Documentation = "https://github.com/woshihaoren4/free-agent-engine/tree/v2-plugins/python/fae-plugin-py"
+Issues = "https://github.com/woshihaoren4/free-agent-engine/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

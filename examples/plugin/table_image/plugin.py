@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
-from fae_plugin import Context, ToolRequest, ToolResponse, ToolsHook
+from fae_plugin import ChainToolsHook, Context, HookNext, ToolRequest, ToolResponse
 
 
 def render_table(arguments: dict[str, Any], workspace: str | None) -> dict[str, Any]:
@@ -69,13 +69,14 @@ def render_table(arguments: dict[str, Any], workspace: str | None) -> dict[str, 
     return {"path": str(output), "rows": len(x), "width": width, "height": height}
 
 
-class TableImageTool(ToolsHook):
-    async def desc(self, ctx: Context, tool_name: str) -> dict[str, Any]:
+class TableImageTool(ChainToolsHook):
+    async def desc(self, ctx: Context, tool_name: str, *,
+                   next: HookNext[str, dict[str, Any]]) -> dict[str, Any]:
         if tool_name != f"{self.channel()}__generate":
-            raise ValueError(f"Unknown tool: {tool_name}")
+            return await next(tool_name)
         return {
             "name": tool_name,
-            "description": "将等长 x/y 数据排成两列表格并保存 PNG，返回真实文件路径。每对数据是一行。",
+            "description": "表格生成：将等长 x/y 数据排成两列表格并保存 PNG，展示明细并返回真实文件路径。每对数据是一行。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -94,9 +95,10 @@ class TableImageTool(ToolsHook):
             },
         }
 
-    async def exec(self, ctx: Context, request: ToolRequest) -> ToolResponse:
+    async def exec(self, ctx: Context, request: ToolRequest, *,
+                   next: HookNext[ToolRequest, ToolResponse]) -> ToolResponse:
         if request.tool_name != f"{self.channel()}__generate":
-            raise ValueError(f"Unknown tool: {request.tool_name}")
+            return await next(request)
         arguments = request.arguments_json()
         if not isinstance(arguments, dict):
             raise ValueError("Tool arguments must be an object")

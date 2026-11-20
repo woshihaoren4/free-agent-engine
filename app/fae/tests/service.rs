@@ -709,6 +709,7 @@ async fn lark_steers_active_round_without_queue_and_isolates_session_commands() 
     let mut client = Client::open(&service.home, &service.config, open.clone())
         .await
         .unwrap();
+    assert!(!client.stop_round(None).await.unwrap());
     let explicit = ClientMessage::ExternalInput {
         external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "idle-steer"),
         input: SessionInput::Supplement("idle".into()),
@@ -1313,24 +1314,15 @@ async fn agents_support_multiple_rounds_cancel_current_and_delegated_contexts() 
             .to_string()
             .contains("cleanup_busy")
     );
-    client
-        .request(ClientMessage::Cancel {
-            round_id: second.clone(),
-        })
-        .await
-        .unwrap();
+    assert!(client.stop_round(Some(second.clone())).await.unwrap());
     let (round, outcome) = finish(&mut client).await;
     assert_eq!(round, second);
     assert!(matches!(outcome, RoundOutcome::Cancelled { .. }));
+    assert!(!client.stop_round(Some(second)).await.unwrap());
     let delegated = input(&mut client, "delegate").await;
     assert_eq!(requests.recv().await.unwrap(), "delegate");
     assert_eq!(requests.recv().await.unwrap(), "slow child");
-    client
-        .request(ClientMessage::Cancel {
-            round_id: delegated,
-        })
-        .await
-        .unwrap();
+    assert!(client.stop_round(Some(delegated)).await.unwrap());
     assert!(matches!(
         finish(&mut client).await.1,
         RoundOutcome::Cancelled { .. }

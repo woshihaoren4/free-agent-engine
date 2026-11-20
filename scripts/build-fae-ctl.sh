@@ -146,7 +146,17 @@ require_command cargo
 require_command file
 require_command rustc
 
-build_target "${MAC_TARGET}" "${MAC_OUT_DIR}" "${MAC_OUT}"
-build_target "${LINUX_TARGET}" "${LINUX_OUT_DIR}" "${LINUX_OUT}"
+case "$(uname -s)" in
+  Darwin)
+    build_target "${MAC_TARGET}" "${MAC_OUT_DIR}" "${MAC_OUT}"
+    build_target "${LINUX_TARGET}" "${LINUX_OUT_DIR}" "${LINUX_OUT}"
+    ;;
+  Linux)
+    build_target "${LINUX_TARGET}" "${LINUX_OUT_DIR}" "${LINUX_OUT}"
+    ;;
+  *)
+    die "unsupported host platform: $(uname -s)"
+    ;;
+esac
 
 echo "Release artifacts are ready in ${OUT_DIR}"

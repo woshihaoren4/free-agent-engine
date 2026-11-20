@@ -56,7 +56,9 @@ class ModuleLoader:
         parent, _, child = name.rpartition(".")
         if parent in sys.modules:
             setattr(sys.modules[parent], child, module)
-        spec.loader.exec_module(module)
+        # Always read current source, including edits whose size and mtime still
+        # match an existing bytecode cache. -B only prevents writing new caches.
+        exec(compile(file.read_bytes(), str(file), "exec"), module.__dict__)
         return module
 
     def _import(self, name: str, globals: Any = None, locals: Any = None,

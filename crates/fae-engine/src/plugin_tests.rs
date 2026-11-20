@@ -15,6 +15,7 @@ fn write(root: &Path, id: &str, mode: &str, point: &str, body: &str) {
     std::fs::write(root.join(format!("plugins/{id}.py")),format!(
         "from fae_plugin import *\nimport asyncio\ndef plugin_config():\n    return {}\n{body}\n",
         config.to_string().replace("true","True").replace("false","False").replace("null","None"))).unwrap();
+    fae_agent::plugin::config::install(root, &root.join(format!("plugins/{id}.py"))).unwrap();
 }
 async fn setup(root: &Path) -> (Arc<PluginManager>, Engine, PluginAdapter) {
     let manager = Arc::new(PluginManager::new(root));
@@ -61,7 +62,217 @@ async fn prompt(adapter: &PluginAdapter, ctx: &Ctx, value: &str) -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn direct_reload_is_atomic_and_existing_runs_keep_old_source() {
+async fn install_overwrites_files_and_directories_and_uninstall_records_lifecycle() {
+    use fae_agent::plugin::config::{PluginsConfig, install, uninstall};
+    let dir = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let file = sources.path().join("demo.py");
+    std::fs::write(&file, "old").unwrap();
+    install(dir.path(), &file).unwrap();
+    let other = sources.path().join("other.py");
+    std::fs::write(&other, "other").unwrap();
+    install(dir.path(), &other).unwrap();
+    std::fs::write(&file, "new").unwrap();
+    install(dir.path(), &file).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("plugins/demo.py")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        PluginsConfig::read(dir.path()).unwrap().plugins[0].id,
+        "demo"
+    );
+    let directory = sources.path().join("demo");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("data.txt"), "directory").unwrap();
+    install(dir.path(), &directory).unwrap();
+    assert!(!dir.path().join("plugins/demo.py").exists());
+    assert!(dir.path().join("plugins/demo/data.txt").exists());
+    std::fs::remove_file(directory.join("data.txt")).unwrap();
+    std::fs::write(directory.join("new.txt"), "replacement").unwrap();
+    install(dir.path(), &directory).unwrap();
+    assert!(!dir.path().join("plugins/demo/data.txt").exists());
+    assert!(dir.path().join("plugins/demo/new.txt").exists());
+    install(dir.path(), &file).unwrap();
+    assert!(!dir.path().join("plugins/demo").exists());
+    uninstall(dir.path(), "demo").unwrap();
+    assert!(dir.path().join("plugins/demo.py").exists());
+    let config = PluginsConfig::read(dir.path()).unwrap();
+    assert!(!config.plugins[0].installed);
+    assert!(!config.plugins[0].enabled);
+    assert!(uninstall(dir.path(), "demo").is_err());
+    install(dir.path(), &file).unwrap();
+    let config = PluginsConfig::read(dir.path()).unwrap();
+    assert_eq!(
+        config
+            .plugins
+            .iter()
+            .map(|plugin| plugin.id.as_str())
+            .collect::<Vec<_>>(),
+        ["other", "demo"]
+    );
+    assert!(config.plugins[1].installed && config.plugins[1].enabled);
+    assert!(!dir.path().join("plugin-state").exists());
+}
+
+#[tokio::test]
+async fn startup_skips_disabled_plugins_and_rejects_invalid_config_and_mounts() {
+    use fae_agent::plugin::config::PluginsConfig;
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "broken",
+        "direct",
+        "SingleAgentHook",
+        "raise RuntimeError('disabled')",
+    );
+    let mut config = PluginsConfig::read(dir.path()).unwrap();
+    config.plugins[0].enabled = false;
+    config.write(dir.path()).unwrap();
+    let manager = PluginManager::new(dir.path());
+    manager.load_all().await.unwrap();
+    assert!(manager.snapshot().nodes.is_empty());
+    write(
+        dir.path(),
+        "tools",
+        "direct",
+        "ToolsHook",
+        "class Demo(ToolsHook):\n    async def desc(self,ctx,tool_name): return {}\n    async def exec(self,ctx,request): return ToolResponse.text('test')",
+    );
+    let source = dir.path().join("plugins/tools.py");
+    let code = std::fs::read_to_string(&source).unwrap().replace(
+        "\"implementation\":\"Demo\"",
+        "\"implementation\":\"Demo\",\"channel\":\"default\"",
+    );
+    std::fs::write(&source, code).unwrap();
+    let error = manager.load_all().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("plugin_mount_conflict"),
+        "{error:#}"
+    );
+    std::fs::write(dir.path().join("plugins/plugins.config"), "{bad config").unwrap();
+    assert!(manager.load_all().await.is_err());
+}
+
+#[tokio::test]
+async fn startup_executes_direct_hooks_in_installation_order() {
+    let dir = tempfile::tempdir().unwrap();
+    for (id, suffix) in [("z", "Z"), ("a", "A")] {
+        write(
+            dir.path(),
+            id,
+            "direct",
+            "SingleAgentHook",
+            &format!(
+                "class Demo(SingleAgentHook):\n    async def on_prompt(self,ctx,value):\n        return value+'{suffix}'"
+            ),
+        );
+    }
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load_all().await.unwrap();
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "alice").0, "")
+            .await
+            .unwrap(),
+        "ZA"
+    );
+}
+
+#[tokio::test]
+async fn startup_loads_only_configured_plugins_and_propagates_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = PluginManager::new(dir.path());
+    manager.load_all().await.unwrap();
+    assert!(manager.snapshot().nodes.is_empty());
+    write(
+        dir.path(),
+        "single",
+        "direct",
+        "SingleAgentHook",
+        "class Demo(SingleAgentHook): pass",
+    );
+    let directory = dir.path().join("plugins/directory");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.py"),
+        "from fae_plugin import SingleAgentHook\nclass Demo(SingleAgentHook): pass\n",
+    )
+    .unwrap();
+    fae_agent::plugin::config::install(dir.path(), &directory).unwrap();
+    std::fs::write(
+        directory.join("plugin.config"),
+        serde_json::json!({"plugin_version":"1.0.0","description":"directory","engine":"py",
+            "mounts":[{"point":"SingleAgentHook","implementation":"plugin.py:Demo"}]})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugins/broken.py"),
+        "raise RuntimeError('broken plugin')",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("plugins/notes.txt"), "not a plugin").unwrap();
+    std::fs::create_dir_all(dir.path().join("plugins/__pycache__")).unwrap();
+    manager.load_all().await.unwrap();
+    let snapshot = manager.snapshot();
+    assert_eq!(snapshot.nodes.len(), 2);
+    assert!(snapshot.nodes.contains_key("single"));
+    assert!(snapshot.nodes.contains_key("directory"));
+    assert!(manager.status("*").unwrap().get("broken").is_none());
+    fae_agent::plugin::config::install(dir.path(), &dir.path().join("plugins/broken.py")).unwrap();
+    let restarted = PluginManager::new(dir.path());
+    assert!(restarted.load_all().await.is_err());
+    assert!(restarted.snapshot().nodes.is_empty());
+    assert!(!dir.path().join("plugin-state").exists());
+}
+
+#[tokio::test]
+async fn startup_reads_current_sources_and_preserves_installation_order() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "z",
+        "chain",
+        "SingleAgentHook",
+        "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return await next(value+'Z')",
+    );
+    let manager = PluginManager::new(dir.path());
+    manager.load("z").await.unwrap();
+    write(
+        dir.path(),
+        "z",
+        "chain",
+        "SingleAgentHook",
+        "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return await next(value+'new')",
+    );
+    for (id, suffix) in [("b", "B"), ("a", "A")] {
+        write(
+            dir.path(),
+            id,
+            "chain",
+            "SingleAgentHook",
+            &format!(
+                "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return await next(value+'{suffix}')"
+            ),
+        );
+    }
+    let (restored, engine, adapter) = setup(dir.path()).await;
+    restored.load_all().await.unwrap();
+    assert_eq!(restored.snapshot().nodes.len(), 1);
+    assert_eq!(
+        restored.status("z").unwrap()["z"]["chain_order"],
+        serde_json::json!(["z", "b", "a"])
+    );
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "alice").0, "")
+            .await
+            .unwrap(),
+        "newBA"
+    );
+}
+
+#[tokio::test]
+async fn live_reinstall_keeps_running_workers_but_restart_rejects_invalid_source() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -71,7 +282,10 @@ async fn direct_reload_is_atomic_and_existing_runs_keep_old_source() {
         "class Demo(SingleAgentHook):\n    async def on_prompt(self,ctx,value):\n        return value+'old'",
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
-    manager.load("demo").await.unwrap();
+    manager
+        .install(&dir.path().join("plugins/demo.py"))
+        .await
+        .unwrap();
     let (old, _) = root(&engine, "alice");
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "old");
     write(
@@ -81,7 +295,10 @@ async fn direct_reload_is_atomic_and_existing_runs_keep_old_source() {
         "SingleAgentHook",
         "class Demo(SingleAgentHook):\n    async def on_prompt(self,ctx,value):\n        return value+'new'",
     );
-    manager.load("demo").await.unwrap();
+    manager
+        .install(&dir.path().join("plugins/demo.py"))
+        .await
+        .unwrap();
     let (new, _) = root(&engine, "bob");
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "old");
     assert_eq!(prompt(&adapter, &new, "").await.unwrap(), "new");
@@ -90,26 +307,21 @@ async fn direct_reload_is_atomic_and_existing_runs_keep_old_source() {
         "def plugin_config(): raise ValueError('invalid')",
     )
     .unwrap();
-    assert!(manager.load("demo").await.is_err());
+    assert!(
+        manager
+            .install(&dir.path().join("plugins/demo.py"))
+            .await
+            .is_err()
+    );
     assert_eq!(
         prompt(&adapter, &root(&engine, "charlie").0, "")
             .await
             .unwrap(),
         "new"
     );
-    // Restart must ignore the invalid edited file and use the last accepted version.
+    // Restart reads the edited file and propagates its configuration error.
     let restored = Arc::new(PluginManager::new(dir.path()));
-    restored.restore().await.unwrap();
-    let engine = EngineBuilder::new()
-        .build()
-        .await
-        .with_plugins(restored.clone());
-    assert_eq!(
-        prompt(&PluginAdapter::new(restored), &root(&engine, "dana").0, "")
-            .await
-            .unwrap(),
-        "new"
-    );
+    assert!(restored.load_all().await.is_err());
 }
 #[tokio::test]
 async fn chain_order_persists_and_short_circuit_preserves_onion() {
@@ -121,7 +333,7 @@ async fn chain_order_persists_and_short_circuit_preserves_onion() {
         "SingleAgentHook",
         "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return (await next(value+'Z'))+'z'",
     );
-    // Keep first-success order distinct from the Rust node's ID sort order.
+    // Keep installation order distinct from the Rust node's ID sort order.
     write(
         dir.path(),
         "a",
@@ -140,13 +352,8 @@ async fn chain_order_persists_and_short_circuit_preserves_onion() {
             .unwrap(),
         "ZAz"
     );
-    std::fs::write(
-        dir.path().join("plugins/z.py"),
-        "raise RuntimeError('unloaded edit')",
-    )
-    .unwrap();
     let restored = Arc::new(PluginManager::new(dir.path()));
-    restored.restore().await.unwrap();
+    restored.load_all().await.unwrap();
     let engine = EngineBuilder::new()
         .build()
         .await
@@ -159,12 +366,130 @@ async fn chain_order_persists_and_short_circuit_preserves_onion() {
     );
 }
 #[tokio::test]
+async fn live_install_and_uninstall_publish_snapshots_and_keep_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    for (id, mode, suffix) in [
+        ("direct", "direct", "D"),
+        ("z", "chain", "Z"),
+        ("b", "chain", "B"),
+        ("a", "chain", "A"),
+    ] {
+        let body = if mode == "direct" {
+            format!(
+                "class Demo(SingleAgentHook):\n    async def on_prompt(self,ctx,value):\n        return value+'{suffix}'"
+            )
+        } else {
+            format!(
+                "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return await next(value+'{suffix}')"
+            )
+        };
+        write(dir.path(), id, mode, "SingleAgentHook", &body);
+    }
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    for id in ["direct", "z", "b", "a"] {
+        manager
+            .install(&dir.path().join(format!("plugins/{id}.py")))
+            .await
+            .unwrap();
+    }
+    let (old, _) = root(&engine, "old");
+    assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "DZBA");
+    let direct = manager.snapshot().nodes["direct"].clone();
+    manager.uninstall("b").await.unwrap();
+    assert_eq!(manager.snapshot().order, ["direct", "z"]);
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "middle_removed").0, "")
+            .await
+            .unwrap(),
+        "DZA"
+    );
+    manager.uninstall("z").await.unwrap();
+    assert!(Arc::ptr_eq(&direct, &manager.snapshot().nodes["direct"]));
+    assert_eq!(manager.snapshot().order, ["direct", "a"]);
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "new").0, "").await.unwrap(),
+        "DA"
+    );
+    assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "DZBA");
+    manager.uninstall("a").await.unwrap();
+    assert_eq!(manager.snapshot().order, ["direct"]);
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "direct_only").0, "")
+            .await
+            .unwrap(),
+        "D"
+    );
+    manager.uninstall("direct").await.unwrap();
+    assert!(manager.snapshot().nodes.is_empty());
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "empty").0, "")
+            .await
+            .unwrap(),
+        ""
+    );
+    for id in ["direct", "z", "b", "a"] {
+        assert!(dir.path().join(format!("plugins/{id}.py")).exists());
+        let value = manager.status(id).unwrap();
+        assert_eq!(value[id]["installed"], false);
+        assert_eq!(value[id]["enabled"], false);
+        assert_eq!(value[id]["loaded"], false);
+    }
+    let restored = PluginManager::new(dir.path());
+    restored.load_all().await.unwrap();
+    assert!(restored.snapshot().nodes.is_empty());
+    manager
+        .install(&dir.path().join("plugins/a.py"))
+        .await
+        .unwrap();
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "reinstalled").0, "")
+            .await
+            .unwrap(),
+        "A"
+    );
+}
+
+#[tokio::test]
+async fn failed_chain_uninstall_keeps_configuration_and_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    for id in ["a", "b"] {
+        write(
+            dir.path(),
+            id,
+            "chain",
+            "SingleAgentHook",
+            "class Demo(ChainSingleAgentHook):\n    async def on_prompt(self,ctx,value,*,next):\n        return await next(value+'ok')",
+        );
+    }
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load_all().await.unwrap();
+    let previous = manager.snapshot();
+    let config_path = dir.path().join("plugins/plugins.config");
+    let config_before = std::fs::read(&config_path).unwrap();
+    std::fs::write(
+        dir.path().join("plugins/b.py"),
+        "raise RuntimeError('broken chain')",
+    )
+    .unwrap();
+    assert!(manager.uninstall("a").await.is_err());
+    assert!(Arc::ptr_eq(&previous, &manager.snapshot()));
+    assert_eq!(std::fs::read(config_path).unwrap(), config_before);
+    assert_eq!(
+        prompt(&adapter, &root(&engine, "alice").0, "")
+            .await
+            .unwrap(),
+        "okok"
+    );
+}
+
+#[tokio::test]
 async fn offline_show_never_imports_unloaded_sources() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
     let marker = dir.path().join("imported");
     std::fs::write(dir.path().join("plugins/offline.py"),
         format!("from pathlib import Path\nPath({:?}).touch()\ndef plugin_config(): raise RuntimeError()\n", marker)).unwrap();
+    fae_agent::plugin::config::install(dir.path(), &dir.path().join("plugins/offline.py")).unwrap();
     let status = PluginManager::show(dir.path(), "offline").unwrap();
     assert_eq!(status["offline"]["host"], "offline");
     assert!(status["offline"]["declaration"].is_null());
@@ -421,14 +746,8 @@ async fn model_predicates_route_aliases_once_and_detect_conflicts_before_exec() 
     let response = adapter.model(&old, request("family-one")).await.unwrap();
     assert!(matches!(response,ModelResponse::Completed(response)
         if response.choices[0].message.content.as_deref()==Some("family-one:3")));
-    // Read legacy persisted model metadata without breaking service restoration.
-    let state = dir.path().join("plugin-state/active.json");
-    let mut saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-    saved["records"]["alpha"]["declaration"]["mounts"][0]["model"] = "old-static-model".into();
-    std::fs::write(&state, saved.to_string()).unwrap();
     let restored = PluginManager::new(dir.path());
-    restored.restore().await.unwrap();
+    restored.load_all().await.unwrap();
     assert_eq!(restored.snapshot().nodes.len(), 2);
     assert!(
         restored.status("alpha").unwrap()["alpha"]["declaration"]["mounts"][0]

@@ -1,12 +1,14 @@
 # Plugin 示例
 
-三个独立目录插件，均为 `direct` 模式；`plugin.config` 声明挂载位置，
+四个目录插件；`single_agent`、`echo_model` 使用 `direct`，
+`table_line_chart`、`table_image` 使用 `chain`，共用工具通道。`plugin.config` 声明挂载位置，
 `plugin.py` 实现类。宿主已包含 Python 插件支持。
 
 | 目录 / 加载 ID | 接口 | 可见效果 |
 | --- | --- | --- |
 | `single_agent` | SingleAgentHook | 查询 ctx/scope/state，session 发提示消息，记录日志，清理输入及补充 prompt |
-| `table_image` | ToolsHook | Agent 调用 `fae_table_image__generate`，由 Python/Pillow 生成真实 PNG |
+| `table_image` | ChainToolsHook | 表格生成 `fae_table_image__generate`，由 Python/Pillow 生成表格 PNG |
+| `table_line_chart` | ChainToolsHook | 折线图生成 `fae_table_image__line_chart`，由 Python/Pillow 生成折线图 PNG |
 | `echo_model` | ModelHook | 最后一条用户文本前添加 `[model-plugin] `，支持完整及逐块流式响应 |
 
 ## 安装和加载
@@ -19,21 +21,30 @@ SDK 和 Pillow 必须安装到宿主实际使用的解释器。
 python3 -m venv /tmp/fae-plugin-demo-venv
 /tmp/fae-plugin-demo-venv/bin/python -m pip install -e ./python/fae-plugin-py
 /tmp/fae-plugin-demo-venv/bin/python -m pip install -r examples/plugin/table_image/requirements.txt
+# table_line_chart 同样只依赖 Pillow，上面的安装已满足其依赖。
 export FAE_PLUGIN_PYTHON=/tmp/fae-plugin-demo-venv/bin/python
 
 # 独立示例 home，不覆盖日常使用的 ~/.fae。
-export FAE_HOST=/tmp/fae-plugin-demo
+export FAE_HOST=/tmp/fae-plugin-two-tools-demo
 mkdir -p "$FAE_HOST/plugins" "$FAE_HOST/agents"
-cp -R examples/plugin/single_agent examples/plugin/table_image examples/plugin/echo_model "$FAE_HOST/plugins/"
+fae plugin install examples/plugin/single_agent
+fae plugin install examples/plugin/table_line_chart
+fae plugin install examples/plugin/table_image
+fae plugin install examples/plugin/echo_model
 cp examples/plugin/agents/* "$FAE_HOST/agents/"
 fae server start --port 26667
-fae plugin single_agent
-fae plugin table_image
-fae plugin echo_model
-fae plugin --show '*'
+fae plugin show '*'
 ```
 
-修改示例后，重新复制对应目录并执行 `fae plugin <id>` 即可重加载。
+服务按 `plugins/plugins.config` 中的安装顺序加载启用插件，任一加载错误使启动失败。
+两个绘图插件都挂在 `fae_table_image` 通道，
+通过工具名分派：每个插件在 `desc`、`exec` 中处理自己的工具，其他工具交给 `next`。
+加载顺序可以互换；一次调用只生成所选工具的一张图，由模型根据需求选择工具。
+也可以只安装其中一个插件，并在 Agent 配置中只选择它提供的工具。
+
+修改示例后，执行 `fae plugin install <对应目录>` 覆盖安装，运行中的服务即时加载。
+使用 `fae plugin uninstall <id>` 即时卸载运行时插件，保留源码并更新配置。
+服务未运行时，安装和卸载只更新文件及配置，下次启动按配置加载。
 修改 Agent 配置后，使用新 session ID 运行，避免已存在会话的冻结配置。
 环境变量需在服务启动前设置；已经运行的服务不会继承客户端的新环境变量。
 
@@ -53,29 +64,34 @@ session 可能为空，示例先检查再发送。提示消息不进入模型历
 日志使用 `logging` 写入 stderr，可在 `$FAE_HOST/server/server.log` 中查看
 `[single-agent-plugin]` 的上下文、发送回执及 `on_save` 记录。
 
-## 2. Tool：生成表格图片并挂给 Agent
+## 2. Tool：用 table_demo 选择表格生成或折线图生成
 
 `table_demo_config.json` 中的挂载配置为：
 
 ```json
 {
   "model": {"model": "gpt-4o-mini"},
-  "tools": ["fae_table_image__generate"]
+  "tools": ["fae_table_image__generate", "fae_table_image__line_chart"]
 }
 ```
 
 加载插件提供工具实现；Agent 的 `tools` 数组选择模型可调用的工具。
 已有 Agent 也可把该工具名加入自己的 `tools`。
-表格 Agent 使用支持 tool calling 的真实模型，需要配置其模型名和
+表格与折线图 Agent 使用支持 tool calling 的真实模型，需要配置其模型名和
 `OPENAI_API_KEY`（以及所用 OpenAI 兼容服务的配置），并在启动服务前设置凭据。
 已有模型配置可直接用于这个 Agent。
 
 ```bash
 fae agent --agent-id table_demo --session-id table-demo --workspace /tmp \
-  '请调用表格工具，path 为 plugin-table.png，x 为 ["Jan","Feb","Mar"]，y 为 [120,180,150]，title 为 Sales。'
+  '请生成表格，path 为 plugin-table.png，x 为 ["Jan","Feb","Mar"]，y 为 [120,180,150]，title 为 Sales。'
+
+fae agent --agent-id table_demo --session-id line-demo --workspace /tmp \
+  '请生成折线图，path 为 plugin-line.png，x 为 ["Jan","Feb","Mar"]，y 为 [120,180,150]，title 为 Sales，x_label 为 Month，y_label 为 Revenue。'
 ```
 
-工具参数示例：
+模型能看到两个工具的独立描述和参数：需要明细时选择“表格生成”，需要趋势时
+选择“折线图生成”。用户要求两种图时分别调用两个工具，并使用不同输出路径。
+两个工具使用相同的参数名称，例如：
 
 ```json
 {
@@ -88,9 +104,29 @@ fae agent --agent-id table_demo --session-id table-demo --workspace /tmp \
 }
 ```
 
-x/y 必须等长，每对数据生成一行，最多 100 行。`path` 只接受 `.png`，
+x/y 必须等长，最多 100 对。表格 x/y 都可以是文字或数字；
+折线图 x 可以是文字或有限数字，y 必须为有限数字。文字 x 等距排列，
+纯数字 x 按数值定位，连线保持输入顺序；支持单点、恒定值及负数。`path` 只接受 `.png`，
 相对路径基于实际 Agent workspace，父目录自动创建，同名文件会覆盖。
-工具返回 JSON 字符串，包含绝对路径、行数及图片宽高，并发送一条 session 提示。
+每次工具调用只生成一张图，保存到指定的 `path`，并发送对应插件的 session 提示。
+工具返回 JSON 字符串；表格结果包含 `path`、`rows`、`width`、`height`：
+
+```json
+{
+  "path": "/tmp/plugin-table.png",
+  "rows": 3,
+  "width": 408,
+  "height": 272
+}
+```
+
+折线图结果包含 `path`、`points`、`width`、`height`：
+
+```json
+{"path": "/tmp/plugin-line.png", "points": 3, "width": 1000, "height": 600}
+```
+
+表格尺寸根据文字长度计算；折线图固定为 1000 × 600。
 返回路径指向运行 FAE 服务的机器；示例不会自动上传文件。
 Pillow 使用内置英文字体；中文标题/内容需传入支持中文的 TTF/OTF/TTC
 绝对路径 `font_path`，例如安装 Noto Sans CJK 后的实际字体路径。
@@ -108,8 +144,27 @@ result = plugin["render_table"]({
     "title": "Sales",
 }, None)
 print(result)
+chart = runpy.run_path("examples/plugin/table_line_chart/plugin.py")
+print(chart["render_line_chart"]({
+    "path": "/tmp/plugin-line.png",
+    "x": ["Jan", "Feb", "Mar"], "y": [120,180,150], "title": "Sales",
+}, None))
 PY
 ```
+
+不使用真实模型凭据的完整自动测试：
+
+```bash
+cargo build -p fae
+FAE_TEST_BINARY="$PWD/target/debug/fae" \
+  "$FAE_PLUGIN_PYTHON" -B examples/plugin/test_table_demo.py
+```
+
+测试在临时 home 启动真实 FAE 服务，加载这两个插件，并通过 `table_demo` 调用工具。
+本地 OpenAI 测试服务分别根据表格和折线图请求选择工具；验证两个工具均可见、
+每次只执行所选插件、只产生对应的 session 提示及一张真实 PNG。
+单元测试还验证两种 chain 加载顺序均可分派工具，随后停止服务并清理临时目录。
+未设置 `FAE_TEST_BINARY` 时只运行绘图及 chain 单元测试。
 
 ## 3. Model：带标识回显
 

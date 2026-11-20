@@ -40,13 +40,23 @@ pub async fn handle(
                     active_rounds,
                 }
             }
-            ControlMessage::PluginLoad { id } => match registry.plugins.load(&id).await {
-                Ok(status) => ServerMessage::Plugins(status),
-                Err(error) => ServerMessage::Error(ProtocolError::new("plugin_load_failed", error)),
-            },
             ControlMessage::PluginShow { id } => match registry.plugins.status(&id) {
                 Ok(status) => ServerMessage::Plugins(status),
                 Err(error) => ServerMessage::Error(ProtocolError::new("plugin_show_failed", error)),
+            },
+            ControlMessage::PluginInstall { source } => {
+                match registry.plugins.install(&source).await {
+                    Ok(id) => ServerMessage::Plugins(serde_json::json!({"id": id})),
+                    Err(error) => {
+                        ServerMessage::Error(ProtocolError::new("plugin_install_failed", error))
+                    }
+                }
+            }
+            ControlMessage::PluginUninstall { id } => match registry.plugins.uninstall(&id).await {
+                Ok(()) => ServerMessage::Plugins(serde_json::json!({"id": id})),
+                Err(error) => {
+                    ServerMessage::Error(ProtocolError::new("plugin_uninstall_failed", error))
+                }
             },
             ControlMessage::Initialize(args) => {
                 match super::init::initialize(&registry.home, &args).await {

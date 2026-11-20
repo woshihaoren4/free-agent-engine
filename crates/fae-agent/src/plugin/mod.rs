@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod adapter;
 pub mod codec;
+pub mod config;
 pub mod manager;
 pub use manager::{PluginManager, PluginRun, PluginSnapshot};
 

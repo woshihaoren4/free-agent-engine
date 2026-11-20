@@ -9,6 +9,7 @@ mod sdk;
 mod session;
 mod store;
 mod thread;
+pub mod whitelist;
 
 use crate::server::lifecycle::{FileLock, atomic_write};
 use larksuite_oapi_sdk_rs::{EventDispatcher, LarkError};
@@ -37,6 +38,7 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let gateway = Arc::new(session::Gateway {
         home: home.clone(),
         config: config.clone(),
+        whitelist: whitelist::Policy::new(config.user_id_whitelist.clone()),
         store: store.clone(),
         sdk: sdk.clone(),
         stopping: stopping.clone(),
@@ -110,7 +112,8 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
     let dispatcher = EventDispatcher::new("", "").on_p2_im_message_receive_v1(move |event| {
         let gateway = event_gateway.clone();
         let store = event_store.clone();
-        let config = event_config.clone();
+        let mut config = event_config.clone();
+        config.user_id_whitelist = gateway.whitelist.snapshot();
         let bot = bot.clone();
         let stopping = event_shutdown.clone();
         async move {
@@ -153,7 +156,9 @@ pub async fn run(home: PathBuf) -> anyhow::Result<()> {
         });
     let ws_task = tokio::spawn(async move { ws.start().await });
     let mut runtime = lifecycle::Runtime::new();
-    let (control, mut stop_rx) = lifecycle::control_server(&home, &runtime, store.clone()).await?;
+    let (control, mut stop_rx) =
+        lifecycle::control_server(&home, &runtime, store.clone(), gateway.whitelist.clone())
+            .await?;
     runtime.port = control;
     atomic_write(
         &home.join("lark/runtime.json"),

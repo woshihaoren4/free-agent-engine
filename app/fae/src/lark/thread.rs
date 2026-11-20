@@ -212,6 +212,7 @@ mod tests {
         Arc::new(Gateway {
             home: home.clone(),
             config: config.clone(),
+            whitelist: super::super::whitelist::Policy::new(config.user_id_whitelist.clone()),
             store: Arc::new(Store::open(&home, 7).unwrap()),
             sdk: Sdk::for_test(config, base),
             stopping,

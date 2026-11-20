@@ -1,10 +1,10 @@
 {
   "agent": {
     "name": "table_demo",
-    "desc": "调用 Python 表格图片工具",
+    "desc": "由模型按用户需求选择表格生成或折线图生成工具",
     "user_id": "master",
     "session_id": "default"
   },
   "model": {"model": "gpt-4o-mini"},
-  "tools": ["fae_table_image__generate"]
+  "tools": ["fae_table_image__generate", "fae_table_image__line_chart"]
 }

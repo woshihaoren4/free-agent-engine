@@ -172,10 +172,38 @@ fae --fae-home /path/to/fae-home lark stop
 | `fae lark start --foreground` | 前台运行，用于直接观察日志；不可与已有网关并行启动 |
 | `fae lark status` | 查看状态，不启动网关 |
 | `fae lark stop` | 停止网关，保留共享主服务 |
+| `fae lark whitelist add <open_id>...` | 添加用户并去重，保存配置并热更新白名单 |
+| `fae lark whitelist remove <open_id>...` | 从受限白名单中删除用户，保存配置并热更新 |
+| `fae lark whitelist set [open_id...]` | 替换白名单；不传用户表示拒绝所有用户 |
+| `fae lark whitelist reload` | 从 `lark.config` 加载白名单并热更新，不加载其他配置字段 |
 | `fae server status`、`fae server show` | 检查同一 home 的主服务及连接信息 |
 
 `lark start` 自动发现或启动主服务，默认监听 `127.0.0.1:6666`。
-修改 `lark.config` 后校验并重启网关：
+更新白名单优先使用管理命令，例如：
+
+```bash
+fae lark whitelist add ou_alice ou_bob
+fae lark whitelist remove ou_bob
+fae lark whitelist set ou_alice ou_carol
+# 已手工修改 lark.config 中的 user_id_whitelist：
+fae lark whitelist reload
+```
+
+命令返回 `user_id_whitelist` 和 `gateway_running`。网关运行时，成功返回表示配置已保存、
+当前白名单已生效；网关未运行时仅更新配置，下次启动生效，不自动启动网关。
+`reload` 只读取已有配置。`fae lark status` 显示运行中的白名单，
+`fae lark show` 显示磁盘配置。自定义 home 时仍需指定同一个 `--fae-home`。
+
+`add` 在原白名单为省略或 `null` 时，会将“允许所有用户”改为“仅允许所添加用户”。
+`remove` 不支持从“允许所有用户”中排除个别人，此时应使用 `set` 定义允许名单。
+`set` 不传用户会保存 `[]` 并拒绝所有用户。
+名单必须填写飞书 `open_id`（`ou_...`），不能使用姓名或员工 `user_id`。
+
+热更新约束后续消息及恢复时的权限检查，不取消已经接受的执行。
+已拒绝的消息不会自动重放，新增用户应重新发送消息。
+旧版本网关不支持此控制命令，升级后需要重启一次；之后更新名单无需重启。
+
+修改 `lark.config` 的其他字段后校验并重启网关：
 
 ```bash
 fae lark check
@@ -216,6 +244,7 @@ fae server stop
 | `/session clean`、`/clean` | 清理当前话题历史和 todos，保留话题绑定及用户记忆 |
 | `/todo <message>` | 规划并执行任务，目标 Agent 必须配置 `todo` 工具 |
 | `/steer <message>` | 补充正在执行的轮次；空闲时失败 |
+| `/stop` | 停止当前话题正在执行的轮次；空闲时忽略 |
 | `/session new` | 提示在话题外发送消息开始新会话 |
 | `/session id=<id>` | 提示在对应话题回复，不直接切换会话 |
 
@@ -223,7 +252,7 @@ fae server stop
 `/todo <message>` 可创建话题并启动任务。
 
 会话执行中，后续输入自动成为当前轮次的补充，包括 `/clean`、`/status` 等命令文本；
-会话切换命令仍只返回话题操作提示。需要实际清理或查询时，等任务完成再发送命令。
+`/stop` 会停止当前轮次，会话切换命令仍只返回话题操作提示。需要实际清理或查询时，等任务完成再发送命令。
 同一会话没有等待执行的消息队列；达到并发上限时拒绝新轮次并提示稍后重试。
 给正在执行的轮次补充输入不占用新的并发名额。
 
@@ -255,7 +284,7 @@ fae server show
 | `--workspace conflicts with lark.config workspace` | 修改配置中的工作区并重启；不要通过启动参数覆盖 |
 | 认证失败 | 检查应用 ID/密钥、应用发布状态及网络；使用 `check --online` 定位 |
 | 私聊或群聊无回复 | 检查事件订阅、长连接、权限、租户、文本类型、群成员资格及真实 @mention |
-| `权限不足` | 检查白名单是否误设为空、是否填写发送者 `open_id`；修改后重启 |
+| `权限不足` | 检查白名单是否误设为空、是否填写发送者 `open_id`；使用 `fae lark whitelist add <open_id>`，或修改后执行 `fae lark whitelist reload` |
 | 缺少 `open_id` | 检查飞书事件发送者身份；不使用其他 ID 作为回退 |
 | 无法创建话题 | 检查消息/话题权限及飞书返回的真实 thread ID；不能用 message ID 代替 |
 | `runtime.ready=false` 或启动超时 | 检查主服务状态、长连接和后台日志；前台运行可观察具体错误 |
