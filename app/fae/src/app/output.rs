@@ -7,6 +7,7 @@ use std::io::{self, Write};
 pub struct AgentOutputStream {
     line_open: bool,
     nested_output_active: bool,
+    plugin_messages: std::collections::HashSet<String>,
 }
 impl AgentOutputStream {
     pub fn write_event(
@@ -16,6 +17,26 @@ impl AgentOutputStream {
     ) -> anyhow::Result<()> {
         let nested = event.parament_plan_id.is_some();
         match event.event_data()? {
+            SessionEventData::Custom {
+                event_type,
+                content: data,
+            } if event_type == "plugin_message" => {
+                if let (Some(id), Some(text)) = (data["message_id"].as_str(), data["text"].as_str())
+                {
+                    if self.plugin_messages.insert(id.into()) {
+                        if self.line_open {
+                            writer.write_all(b"\n")?;
+                            self.line_open = false;
+                        }
+                        writeln!(
+                            writer,
+                            "[plugin:{}] {text}",
+                            data["plugin_id"].as_str().unwrap_or("unknown")
+                        )?;
+                        writer.flush()?;
+                    }
+                }
+            }
             SessionEventData::ModelOutput { content, .. } => {
                 writer.write_all(content.as_bytes())?;
                 writer.flush()?;
@@ -51,7 +72,7 @@ pub async fn stream(client: &mut Client, workflow: bool) -> anyhow::Result<()> {
                 }
             }
             event = client.next() => match event? {
-                ServerMessage::Event { output: event, .. } if !workflow => output.write_event(&mut io::stdout().lock(), &event)?,
+                ServerMessage::Event { output: event, .. } if !workflow || event.input_type=="plugin_message" => output.write_event(&mut io::stdout().lock(), &event)?,
                 ServerMessage::Finished { outcome, .. } => {
                     output.finish(&mut io::stdout().lock())?;
                     let result = outcome.result()?;

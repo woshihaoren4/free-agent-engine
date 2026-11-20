@@ -4,6 +4,7 @@ pub mod client;
 pub mod daemon;
 mod output;
 pub mod paths;
+mod plugin;
 mod restart;
 mod workflow;
 
@@ -13,6 +14,7 @@ use args::{Cli, Command, ServerCommand};
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let home = paths::home(cli.fae_home)?;
     match cli.command {
+        Some(Command::Plugin(args)) => plugin::run(&home, args).await,
         Some(Command::Restart) => restart::run(&home).await,
         Some(Command::Lark(args)) => {
             use args::LarkCommand;
@@ -22,7 +24,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             if explicit_workspace
                 && !matches!(
                     args.command,
-                    LarkCommand::Init { .. } | LarkCommand::Stop | LarkCommand::Status
+                    LarkCommand::Init { .. }
+                        | LarkCommand::Stop
+                        | LarkCommand::Status
+                        | LarkCommand::Whitelist { .. }
                 )
             {
                 let config = crate::lark::config::Config::load(&home)?;
@@ -76,6 +81,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     Some(status) => println!("{}", serde_json::to_string_pretty(&status)?),
                     None => println!("Lark gateway not running"),
                 },
+                LarkCommand::Whitelist { command } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &crate::lark::lifecycle::update_whitelist(&home, command.into()).await?
+                    )?
+                ),
                 LarkCommand::Stop => println!(
                     "{}",
                     if crate::lark::lifecycle::stop(&home).await? {

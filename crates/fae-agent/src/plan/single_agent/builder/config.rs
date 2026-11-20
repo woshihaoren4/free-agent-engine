@@ -91,13 +91,14 @@ pub(in crate::plan::single_agent) fn expand_home(path: PathBuf) -> PathBuf {
 
 pub(in crate::plan::single_agent) async fn resolve_tools(
     rt: &RT,
+    ctx: &Ctx,
     tools: &[String],
 ) -> anyhow::Result<(Vec<ChatCompletionTools>, HashMap<String, CallableRoute>)> {
     let mut definitions = Vec::with_capacity(tools.len());
     let mut routes = HashMap::with_capacity(tools.len());
     for tool_name in tools {
         let value = rt
-            .select::<_, Value>(TaskType::Tool, tool_name.clone())
+            .select_with_context::<_, Value>(ctx, TaskType::Tool, tool_name.clone())
             .await?;
         let function = serde_json::from_value::<FunctionObject>(value).map_err(|error| {
             anyhow::anyhow!("invalid description for tool `{tool_name}`: {error}")

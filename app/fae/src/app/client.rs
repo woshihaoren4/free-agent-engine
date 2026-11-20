@@ -289,6 +289,23 @@ impl Client {
             self.pending.push_back(envelope);
         }
     }
+    /// Cancel the observed round, ignoring idle sessions and rounds that just finished.
+    pub async fn stop_round(&mut self, round_id: Option<String>) -> anyhow::Result<bool> {
+        let Some(round_id) = round_id else {
+            return Ok(false);
+        };
+        match self.request(ClientMessage::Cancel { round_id }).await {
+            Ok(_) => Ok(true),
+            Err(error)
+                if error
+                    .downcast_ref::<ProtocolError>()
+                    .is_some_and(|error| error.code == "round_not_active") =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn network_receive(&mut self) -> anyhow::Result<ServerEnvelope> {
         let envelope = self.socket.receive().await?;
         anyhow::ensure!(

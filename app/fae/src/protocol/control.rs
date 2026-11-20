@@ -36,6 +36,9 @@ pub enum ControlMessage {
     Hello,
     Initialize(InitArgsDto),
     Status,
+    PluginInstall { source: PathBuf },
+    PluginUninstall { id: String },
+    PluginShow { id: String },
     Shutdown,
 }
 

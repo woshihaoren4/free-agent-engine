@@ -13,6 +13,7 @@ pub struct Engine {
     plan_builders: Arc<HashMap<String, Box<dyn PlanBuilder>>>,
     plan_hooks: Arc<Vec<Box<dyn PlanHookBuilder>>>,
     rt: RT,
+    plugins: Option<Arc<fae_agent::plugin::PluginManager>>,
 }
 
 impl Debug for Engine {
@@ -39,11 +40,25 @@ impl Engine {
             plan_builders: Arc::new(plan_builders),
             plan_hooks: Arc::new(plan_hooks),
             rt,
+            plugins: None,
         }
     }
 
     pub fn ctx(&self) -> Ctx {
-        Ctx::new(EngineContext::into_arc(self.clone()))
+        let ctx = Ctx::new(EngineContext::into_arc(self.clone()));
+        if let Some(manager) = &self.plugins {
+            ctx.bind_plugin_run(Arc::new(fae_agent::plugin::PluginRun {
+                snapshot: manager.snapshot(),
+                root: ctx.downgrade(),
+                run_id: wd_tools::uuid::v4(),
+            }));
+        }
+        ctx
+    }
+
+    pub fn with_plugins(mut self, plugins: Arc<fae_agent::plugin::PluginManager>) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 
     pub fn ctx_with_scope(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
@@ -82,13 +97,15 @@ impl Engine {
     }
 
     pub async fn launch_with_scope<Env>(&self, scope: ContextScope, env: Env) -> anyhow::Result<Ctx>
-    where Env: std::fmt::Debug + Send + Sync + 'static,
+    where
+        Env: std::fmt::Debug + Send + Sync + 'static,
     {
         self.launch_context(self.ctx_with_scope(scope)?, env).await
     }
 
     async fn launch_context<Env>(&self, ctx: Ctx, env: Env) -> anyhow::Result<Ctx>
-    where Env: std::fmt::Debug + Send + Sync + 'static,
+    where
+        Env: std::fmt::Debug + Send + Sync + 'static,
     {
         let ty = to_plan_ty::<Env>();
         let plan = self.call(ctx.clone(), ty, env).await?;

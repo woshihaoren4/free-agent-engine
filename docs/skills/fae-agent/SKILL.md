@@ -124,7 +124,11 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
   `ARK_WEB_SEARCH_APIKEY`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。
 - 增减 MCP：修改 `mcp_servers`，名称必须与 home 下 MCP 配置一致。
-- 改飞书应用、接入 Agent、工作区、用户白名单或网关执行参数：编辑 `lark.config`，
+- 更新飞书用户白名单：使用 `fae lark whitelist add <open_id>...`、
+  `remove <open_id>...` 或 `set [open_id...]`，保存配置并立即更新运行中的网关，无需重启。
+  手工修改 `user_id_whitelist` 后执行 `fae lark whitelist reload`；
+  完整模式与生效范围见 [references/lark-gateway.md](references/lark-gateway.md)。
+- 改飞书应用、接入 Agent、工作区或网关执行参数：编辑 `lark.config`，
   按 Lark 参考文件校验并重启网关。
 - 增减子 Agent：修改 `sub_agents`，使用 `<FAE_HOST>/agents` 下的 Agent ID，并确保每个子
   Agent 的 config 都包含非空 `agent.desc`。

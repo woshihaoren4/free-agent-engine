@@ -56,7 +56,7 @@ impl Tools for ExecutePythonTool {
                     "file": { "type": "string", "description": "Python file to execute. Relative paths are resolved from cwd." },
                     "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
                     "python": { "type": "string", "description": "Python executable. Defaults to python3." },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional timeout in seconds. Defaults to 60." }
+                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Set the Python execution timeout in seconds based on the expected execution time. No timeout is applied if omitted." }
                 }
             }
         }))
@@ -105,11 +105,17 @@ impl Tools for ExecutePythonTool {
             command.current_dir(cwd);
         }
 
-        let timeout_secs = args.timeout_secs.unwrap_or(60);
-        let output = match timeout(Duration::from_secs(timeout_secs), command.output()).await {
+        let output = if let Some(timeout_secs) = args.timeout_secs {
+            timeout(Duration::from_secs(timeout_secs), command.output())
+                .await
+                .map_err(|_| timeout_secs)
+        } else {
+            Ok(command.output().await)
+        };
+        let output = match output {
             Ok(Ok(output)) => output,
             Ok(Err(err)) => return Ok(ToolResponse::with_error(500, err.to_string())),
-            Err(_) => {
+            Err(timeout_secs) => {
                 return ok_json(ExecutePythonResult {
                     python,
                     cwd: args.cwd.map(|cwd| cwd.display().to_string()),
@@ -148,6 +154,43 @@ mod tests {
             panic!("expected completed response");
         };
         serde_json::from_str(&output).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execution_timeout_is_not_applied_when_omitted() {
+        let request = ToolRequest::new(
+            EXECUTE_PYTHON.to_string(),
+            json!({ "script": "import time; time.sleep(0.1); print('done')" }).to_string(),
+        );
+        let task = tokio::spawn(async move {
+            ExecutePythonTool
+                .exec(&Ctx::new(Arc::new(ContextNull)), request)
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let result = completed_json(task.await.unwrap()).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["stdout"], "done\n");
+        assert_eq!(result["timed_out"], false);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execution_timeout_uses_supplied_seconds() {
+        let request = ToolRequest::new(
+            EXECUTE_PYTHON.to_string(),
+            json!({ "script": "import time; time.sleep(30)", "timeout_secs": 1 }).to_string(),
+        );
+        let response = ExecutePythonTool
+            .exec(&Ctx::new(Arc::new(ContextNull)), request)
+            .await
+            .unwrap();
+        let result = completed_json(response).await;
+        assert_eq!(result["success"], false);
+        assert_eq!(result["timed_out"], true);
+        assert_eq!(result["stderr"], "python execution timed out after 1s");
     }
 
     #[tokio::test]

@@ -33,6 +33,17 @@ CLI 会自动连接当前 FAE home 的后台服务，默认监听 `127.0.0.1:666
 `fae server stop` 停止并等待清理；自定义端口可用 `fae server start --port 2666`。
 端口冲突会直接报错。更多服务、会话和重连说明见 [CLI 文档](app/fae/README.md)。
 
+支持 Python Agent、工具和流式模型插件。先安装 SDK，使用
+`fae plugin install <文件或目录>` 安装，`fae plugin show <id>` 查看详情，
+`fae plugin show`（等同于 `fae plugin show '*'`）简洁列出插件，
+`fae plugin uninstall <id>` 卸载。
+安装记录保存在 `<fae_home>/plugins/plugins.config`；服务启动按安装顺序加载
+已安装且启用的插件当前源码，任何加载错误都会导致启动失败。服务运行时安装、覆盖和卸载即时生效，
+卸载保留源码并更新配置；服务未运行时仅更新文件及配置，下次启动按配置加载。
+支持 Rust 逐插件调用的 direct 模式和 Python 洋葱链 chain 模式，
+配置、完整 API 和可运行样例见
+[Python 插件 SDK](python/fae-plugin-py/README.md)。
+
 ## 快速开始
 
 完成上面的 `fae init` 后，新建 Rust 项目并添加依赖：

@@ -173,6 +173,28 @@ impl Writer {
     }
     pub async fn flush(&self, id: &str) -> anyhow::Result<()> {
         let record = self.store.get(id);
+        for index in 0..record.plugin_messages.len() {
+            let message = self.store.get(id).plugin_messages[index].clone();
+            if message.closed {
+                continue;
+            }
+            let now = chrono::Utc::now().timestamp_millis();
+            anyhow::ensure!(
+                message.reply_attempt.is_none_or(|t| now - t < 3_600_000),
+                "Plugin message delivery acceptance unknown beyond dedup window"
+            );
+            self.store.update(id, |r| {
+                r.plugin_messages[index].reply_attempt.get_or_insert(now);
+            })?;
+            let reply = self
+                .sdk
+                .text_record(&self.store, id, &message.text, &message.reply_uuid)
+                .await?;
+            self.store.update(id, |r| {
+                r.plugin_messages[index].reply_id = Some(reply);
+                r.plugin_messages[index].closed = true;
+            })?;
+        }
         // Tool preambles and provisional answers stay local until the round completes.
         if record.outcome.is_none() {
             return Ok(());
@@ -413,6 +435,90 @@ fn display_page(cards: &[Card], index: usize) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn plugin_message_delivers_before_model_and_survives_cancel_and_replay() {
+        let (base, requests, task) = super::super::sdk::tests::mock(|_, _| {
+            json!({"code":0,"data":{"message_id":"om_plugin","thread_id":"omt_plugin",
+                "chat_id":"chat","root_id":"om_input"}})
+        })
+        .await;
+        let home = std::env::temp_dir().join(format!("fae-plugin-card-{}", wd_tools::uuid::v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant",
+            "agent_id":"fae","workspace":home
+        }))
+        .unwrap();
+        let store = Arc::new(Store::open(&home, 7).unwrap());
+        let binding = serde_json::from_value(json!({
+            "session_mapping_version":2,"thread_id":"omt_plugin","channel":"lark",
+            "app_id":"app","tenant_key":"tenant","user_id":"u","chat_id":"chat","chat_type":"p2p"
+        }))
+        .unwrap();
+        let id = super::super::identity::receipt_id("app", "tenant", "om_input");
+        let mut record = super::super::store::Record::new(
+            id.clone(),
+            "omt_plugin".into(),
+            binding,
+            "om_input".into(),
+            "q".into(),
+            None,
+        );
+        let event = |seq| crate::protocol::ServerMessage::Event {
+            seq,
+            round_id: "r".into(),
+            output: fae_agent::SessionOutput {
+                parament_plan_id: Some("parent".into()),
+                node_id: None,
+                plan_id: None,
+                agent_name: Some("child".into()),
+                runtime_id: None,
+                input_type: "plugin_message".into(),
+                output: json!({"message_id":"stable-id","plugin_id":"b","text":"开始处理"}),
+            },
+        };
+        super::super::output::ingest(&mut record, &event(1));
+        assert!(record.outcome.is_none());
+        store.insert(record).unwrap();
+        let writer = Writer {
+            sdk: Sdk::for_test(config, base),
+            store: store.clone(),
+        };
+        writer.flush(&id).await.unwrap();
+        assert!(store.get(&id).plugin_messages[0].closed);
+        store
+            .update(&id, |record| {
+                super::super::output::ingest(record, &event(2));
+                super::super::output::ingest(
+                    record,
+                    &crate::protocol::ServerMessage::Finished {
+                        seq: 3,
+                        round_id: "r".into(),
+                        outcome: crate::protocol::RoundOutcome::Cancelled {
+                            reason: "stop".into(),
+                        },
+                    },
+                );
+            })
+            .unwrap();
+        writer.flush(&id).await.unwrap();
+        assert_eq!(store.get(&id).plugin_messages.len(), 1);
+        let requests = requests.lock().unwrap();
+        let plugin_sends = requests
+            .iter()
+            .filter(|(_, body)| {
+                body["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("开始处理"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(plugin_sends.len(), 1);
+        assert_eq!(plugin_sends[0].1["reply_in_thread"], true);
+        drop(requests);
+        task.abort();
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[tokio::test]
     async fn waits_for_finished_then_retries_final_reply_without_placeholder() {

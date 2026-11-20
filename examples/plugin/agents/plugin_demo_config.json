@@ -1,0 +1,10 @@
+{
+  "agent": {
+    "name": "plugin_demo",
+    "desc": "体验 single_agent 与 echo_model 插件",
+    "user_id": "master",
+    "session_id": "default"
+  },
+  "model": {"model": "plugin:echo_model/default"},
+  "tools": []
+}

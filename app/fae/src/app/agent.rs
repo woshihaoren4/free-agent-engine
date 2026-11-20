@@ -96,8 +96,14 @@ pub async fn run(
                 return Ok(());
             }
             "/clear" => ui.clear_transcript(),
+            "/stop" => {
+                let round_id = client.info.status.round_id.clone();
+                if let Err(error) = client.stop_round(round_id).await {
+                    ui.push_error(format!("{error:#}"));
+                }
+            }
             "/help" | "/session -h" | "/session --help" => ui.push_system(
-                "/status  show session state\n/todo <message>  plan and execute with todos\n/session new  start a new session\n/session id=<id>  switch sessions\n/session clean, /clean  clear history and todos\n/clear  clear display\n/steer <message>  supplement a running agent\n/exit  leave the session"),
+                "/status  show session state\n/todo <message>  plan and execute with todos\n/session new  start a new session\n/session id=<id>  switch sessions\n/session clean, /clean  clear history and todos\n/clear  clear display\n/steer <message>  supplement a running agent\n/stop  stop the current round; ignored when idle\n/exit  leave the session"),
             "/status" => match client.request(ClientMessage::Status).await {
                 Ok(status) => ui.push_system(format!("model: {}\nsession: {}\n{}", client.info.model, client.info.session_id, serde_json::to_string_pretty(&status)?)),
                 Err(error) => ui.push_error(format!("{error:#}")),
@@ -155,9 +161,10 @@ pub async fn run_round(
     can_steer: bool,
 ) -> anyhow::Result<bool> {
     let mut exiting = false;
+    let mut stopping = false;
     loop {
         tokio::select! {
-            action = ui.running_action(can_steer), if !exiting => match action? {
+            action = ui.running_action(can_steer), if !exiting && !stopping => match action? {
                 UiAction::Exit => {
                     let _ = client.request(ClientMessage::Close { cancel_active: false }).await;
                     return Ok(false);
@@ -166,6 +173,13 @@ pub async fn run_round(
                     exiting = true;
                     if let Some(round_id) = client.info.status.round_id.clone() {
                         if let Err(error) = client.request(ClientMessage::Cancel { round_id }).await { ui.push_error(format!("{error:#}")); }
+                    }
+                }
+                UiAction::Stop => {
+                    let round_id = client.info.status.round_id.clone();
+                    match client.stop_round(round_id).await {
+                        Ok(_) => stopping = true,
+                        Err(error) => ui.push_error(format!("{error:#}")),
                     }
                 }
                 UiAction::Steer(text) => {
@@ -178,6 +192,10 @@ pub async fn run_round(
             event = client.next() => match event? {
                 ServerMessage::Event { output, .. } => { ui.apply_session_output(output)?; }
                 ServerMessage::Finished { outcome, .. } => {
+                    if stopping && matches!(outcome, RoundOutcome::Cancelled { .. }) {
+                        ui.push_notice("Stopped");
+                        return Ok(true);
+                    }
                     match outcome.result() {
                         Ok(result) if !can_steer => ui.workflow_result(&result),
                         Ok(_) => {},

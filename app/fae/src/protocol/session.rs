@@ -102,6 +102,7 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
+    Plugins(serde_json::Value),
     Hello(HelloInfo),
     Initialized {
         config_path: PathBuf,

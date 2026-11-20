@@ -26,3 +26,10 @@ dirs = "6.0.0"
 chrono = "0.4"
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
+semver = "1"
+fs2 = "0.4"
+futures-util = "0.3"
+
+[features]
+default = []
+python = []

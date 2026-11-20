@@ -1,0 +1,10 @@
+{
+  "agent": {
+    "name": "model_demo",
+    "desc": "独立验证 echo_model 插件",
+    "user_id": "master",
+    "session_id": "default"
+  },
+  "model": {"model": "plugin:echo_model/default"},
+  "tools": []
+}

@@ -35,4 +35,5 @@ http = "1"
 tokio = { workspace = true, features = ["test-util"] }
 
 [features]
+python = ["fae-agent/python"]
 #openaiapi = ["async-openai"]

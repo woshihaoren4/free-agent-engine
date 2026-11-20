@@ -81,14 +81,26 @@ pub enum PromptAction {
 enum RunningAction {
     None,
     Interrupt,
+    Stop,
     Steer(String),
     InvalidSteer,
 }
 
 pub enum UiAction {
     Cancel,
+    Stop,
     Steer(String),
     Exit,
+}
+
+fn parse_running_command(input: &str) -> RunningAction {
+    if input.trim() == "/stop" {
+        RunningAction::Stop
+    } else {
+        parse_steer(input)
+            .map(ToOwned::to_owned)
+            .map_or(RunningAction::InvalidSteer, RunningAction::Steer)
+    }
 }
 
 pub struct TerminalUi {
@@ -107,6 +119,7 @@ pub struct TerminalUi {
     cwd: String,
     messages: Vec<Message>,
     child_streams: HashMap<String, Vec<BufferedMessage>>,
+    plugin_messages: std::collections::HashSet<String>,
     composer: Composer,
     attachments: Vec<String>,
     file_browser: Option<FileBrowser>,
@@ -228,6 +241,7 @@ impl TerminalUi {
             cwd: display_cwd(),
             messages: Vec::new(),
             child_streams: HashMap::new(),
+            plugin_messages: std::collections::HashSet::new(),
             composer: Composer::default(),
             attachments: Vec::new(),
             file_browser: None,
@@ -405,12 +419,13 @@ impl TerminalUi {
                                     self.draw()?;
                                     return Ok(UiAction::Cancel);
                                 }
+                                RunningAction::Stop => return Ok(UiAction::Stop),
                                 RunningAction::Steer(content) => {
                                     return Ok(UiAction::Steer(content));
                                 }
                                 RunningAction::InvalidSteer => {
                                     self.push_system(
-                                        "Invalid steer command\nUse `/steer <message>` while the agent is running.",
+                                        "Invalid running command\nUse `/steer <message>` or `/stop` while the agent is running.",
                                     );
                                 }
                             }
@@ -548,12 +563,23 @@ impl TerminalUi {
                 event_type,
                 content,
             } => {
+                if event_type == "plugin_message" {
+                    if let Some(id) = content["message_id"].as_str() {
+                        if !self.plugin_messages.insert(id.into()) {
+                            return Ok(false);
+                        }
+                    }
+                }
                 self.flush_child_streams(&run_id, None);
                 self.finish_stream();
                 self.messages.push(Message::new(
                     MessageKind::System,
                     title(&event_type),
-                    compact_value(&content),
+                    if event_type == "plugin_message" {
+                        content["text"].as_str().unwrap_or_default().to_owned()
+                    } else {
+                        compact_value(&content)
+                    },
                     None,
                 ));
             }
@@ -832,11 +858,10 @@ impl TerminalUi {
                 self.composer.insert("\n");
                 RunningAction::None
             }
-            (KeyCode::Enter, _) => self.composer.take().map_or(RunningAction::None, |input| {
-                parse_steer(&input)
-                    .map(ToOwned::to_owned)
-                    .map_or(RunningAction::InvalidSteer, RunningAction::Steer)
-            }),
+            (KeyCode::Enter, _) => self
+                .composer
+                .take()
+                .map_or(RunningAction::None, |input| parse_running_command(&input)),
             (KeyCode::Char(character), modifiers)
                 if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
@@ -1241,7 +1266,7 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, view: &ViewModel<'_>) {
             if view.mode == Mode::Agent {
                 if view.composer.text.is_empty() {
                     format!(
-                        "{} Running... /steer <message>",
+                        "{} Running... /steer <message> or /stop",
                         SPINNER[view.spinner % SPINNER.len()]
                     )
                 } else {
@@ -1887,6 +1912,19 @@ mod tests {
         assert_eq!(parse_steer("/steer"), None);
         assert_eq!(parse_steer("/steering elsewhere"), None);
         assert_eq!(parse_steer(" /steer too late"), None);
+    }
+
+    #[test]
+    fn running_stop_command_is_distinct_from_steering_and_interrupting() {
+        assert_eq!(parse_running_command("/stop"), RunningAction::Stop);
+        assert_eq!(parse_running_command(" /stop\n"), RunningAction::Stop);
+        for input in ["/stop now", "/stopping", "/stop\nextra"] {
+            assert_eq!(parse_running_command(input), RunningAction::InvalidSteer);
+        }
+        assert_eq!(
+            parse_running_command("/steer /stop"),
+            RunningAction::Steer("/stop".into())
+        );
     }
 
     #[test]

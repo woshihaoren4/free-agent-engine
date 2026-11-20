@@ -102,7 +102,8 @@ retention and actor eviction. Old chat histories and selection files are retaine
 but are not used for newly received messages.
 
 While the current session runs, every incoming message is immediately treated
-as steering input, including slash-command text except session switching. `/steer <message>` explicitly
+as steering input, including slash-command text except `/stop` and session switching.
+`/stop` cancels the current round and is silently ignored when idle. `/steer <message>` explicitly
 supplements that round and fails when the session is idle. There is no ingress
 or per-session pending-round queue: at the concurrency limit, new rounds are
 rejected with a retry notice; steering an active round bypasses that limit.
@@ -134,7 +135,21 @@ Set `"user_id_whitelist": ["ou_alice", "ou_bob"]` in `lark.config` to restrict
 Agent interactions to those senders' Feishu `open_id` values. Omit the field
 or set it to `null` to allow all users; an explicit empty list `[]` denies
 everyone. Users outside the whitelist receive the text `权限不足` without
-opening an Agent session or executing commands. Restart the gateway after editing.
+opening an Agent session or executing commands. Update the whitelist without
+restarting the gateway:
+
+```bash
+fae lark whitelist add ou_alice ou_bob
+fae lark whitelist remove ou_bob
+fae lark whitelist set ou_alice  # No IDs means deny everyone
+fae lark whitelist reload       # Apply a manually edited user_id_whitelist
+```
+
+Updates are saved to `lark.config` and applied immediately when the gateway is
+running; otherwise they take effect on the next start. `add` changes an
+unrestricted whitelist into a list containing the supplied users. `remove`
+requires a restricted list. Updates affect subsequent admission checks without
+cancelling accepted rounds. `status` shows the active whitelist.
 
 Enable bot capability, publish the application, select long-connection delivery
 and subscribe to `im.message.receive_v1`. Grant
@@ -215,6 +230,55 @@ both text and tool calls, a failed Agent round, duplicate message delivery,
 concurrent users and gateway/service restarts. The repository checks use local
 mocks; real Feishu permissions, streaming behavior and network recovery require
 deployment verification.
+
+## Plugins
+
+Install the Python SDK in the interpreter used by the service:
+
+```bash
+python3 -m pip install -e ./python/fae-plugin-py
+# Set this before starting the service when using a virtual environment.
+export FAE_PLUGIN_PYTHON=/path/to/venv/bin/python
+fae plugin install /path/to/project_context.py
+fae plugin show project_context
+fae plugin show '*'
+fae plugin uninstall project_context
+```
+
+Install single files or directories into `<fae_home>/plugins/`. Python single files
+provide `plugin_config()`; directories provide JSON `plugin.config`. Plugins
+support Agent hooks, tool channels and complete/streaming model responses.
+`direct` registers separate Rust execution nodes; `chain` runs one Python onion
+chain in installation order.
+
+`<fae_home>/plugins/plugins.config` is the fixed JSON installation manifest.
+The `plugins` array records order, source filename, installation and enablement:
+
+```json
+{
+  "plugins": [
+    {"id": "project_context", "source": "project_context.py", "installed": true, "enabled": true}
+  ]
+}
+```
+
+Startup loads current sources for installed, enabled entries in array order.
+Unlisted sources are not loaded. Any configuration, import, worker or mount
+error fails service startup. Edit `enabled` to disable an installed plugin.
+Install replaces the same ID, including file/directory changes, and preserves
+its position. Uninstall retains its files and records both flags as false;
+reinstalling an uninstalled plugin appends it to the end.
+When the service is running, install activates the plugin immediately and uninstall
+removes its runtime registrations without restarting the service. Chain changes
+rebuild the remaining chain; active runs retain their original worker snapshot.
+When offline, these commands update files and configuration for the next startup
+without starting the service. Manual enablement edits apply at the next startup.
+An activation error is reported and leaves the current runtime snapshot intact;
+the copied source and installation record remain, so startup will validate them again.
+Inspection does not start the service or execute plugin code; offline single-file
+declarations are unknown. JavaScript is not available in this release.
+`fae plugin show` defaults to the same compact list as `fae plugin show '*'`.
+See the [SDK API and runnable examples](../../python/fae-plugin-py/README.md).
 
 ## Single agent
 
@@ -419,7 +483,9 @@ cargo run -p fae -- agent \
 
 Use `/todo <message>` to run that message in single-agent todo mode. Available
 session commands also include `/help`, `/status`, `/clear`, `/exit`,
-`/session new`, `/session id=<id>` and `/session clean` (also `/clean`).
+`/session new`, `/session id=<id>`, `/stop` and `/session clean` (also `/clean`).
+`/stop` cancels the active round and returns to the prompt without leaving the session;
+it is ignored when idle.
 Cleaning removes this session's history and the agent/user's shared todos;
 it is rejected while any related session has an active round.
 

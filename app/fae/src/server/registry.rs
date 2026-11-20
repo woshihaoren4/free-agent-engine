@@ -153,6 +153,7 @@ pub struct Registry {
     pub instance: String,
     pub state: Mutex<State>,
     pub timer: Option<fae_engine::TimerHandle>,
+    pub plugins: Arc<fae_agent::plugin::PluginManager>,
 }
 impl Registry {
     fn persist_lark_binding(&self, open: &OpenSession, key: &Key) -> Result<(), ProtocolError> {
@@ -211,6 +212,7 @@ impl Registry {
     }
     pub fn new(home: PathBuf, instance: String) -> Arc<Self> {
         Arc::new(Self {
+            plugins: Arc::new(fae_agent::plugin::PluginManager::new(home.clone())),
             home,
             instance,
             state: Mutex::new(State::default()),
@@ -223,6 +225,7 @@ impl Registry {
         timer: fae_engine::TimerHandle,
     ) -> Arc<Self> {
         Arc::new(Self {
+            plugins: Arc::new(fae_agent::plugin::PluginManager::new(home.clone())),
             home,
             instance,
             state: Mutex::new(State::default()),

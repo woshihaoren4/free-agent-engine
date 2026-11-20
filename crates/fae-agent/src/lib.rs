@@ -7,12 +7,13 @@ mod mcp;
 mod memory;
 mod model;
 mod plan;
+pub mod plugin;
 mod runtime;
 mod session;
 mod skill;
 mod task;
-mod tool;
 mod timer;
+mod tool;
 mod workflow;
 
 pub use common::*;
@@ -28,8 +29,8 @@ pub use runtime::*;
 pub use session::*;
 pub use skill::*;
 pub use task::*;
-pub use tool::*;
 pub use timer::*;
+pub use tool::*;
 pub use workflow::*;
 
 #[cfg(test)]

@@ -1,8 +1,10 @@
 mod context;
 mod engine;
 mod engine_rt;
-mod tools;
+#[cfg(all(test, feature = "python"))]
+mod plugin_tests;
 mod timer;
+mod tools;
 
 pub use context::*;
 pub use engine::*;

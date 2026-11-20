@@ -10,6 +10,25 @@ pub fn ingest(record: &mut Record, message: &ServerMessage) {
             if *seq <= record.seq {
                 return;
             }
+            if output.input_type == "plugin_message" {
+                if let (Some(id), Some(text)) = (
+                    output.output["message_id"].as_str(),
+                    output.output["text"].as_str(),
+                ) {
+                    if !record
+                        .plugin_messages
+                        .iter()
+                        .any(|c| c.response_id.starts_with(&format!("{id}:")))
+                    {
+                        for (index, page) in pages(text).into_iter().enumerate() {
+                            let mut card = Card::new(format!("{id}:{index}"));
+                            card.text = page;
+                            card.ended = true;
+                            record.plugin_messages.push(card);
+                        }
+                    }
+                }
+            }
             if output.parament_plan_id.is_none() && output.node_id.is_none() {
                 match output.input_type.as_str() {
                     "model_response_started" => {

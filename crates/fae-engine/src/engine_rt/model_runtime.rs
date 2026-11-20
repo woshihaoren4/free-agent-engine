@@ -34,6 +34,7 @@ pub struct ModelRuntime<C: Config + Debug = OpenAIConfig> {
     retry_owner: ModelRetryOwner,
     event_sender: Sender<Event>,
     event_receiver: Receiver<Event>,
+    plugins: Option<fae_agent::plugin::adapter::PluginAdapter>,
 }
 
 impl Default for ModelRuntime<OpenAIConfig> {
@@ -75,11 +76,35 @@ where
             retry_owner,
             event_sender,
             event_receiver,
+            plugins: None,
         }
     }
 
     pub fn client(&self) -> &Client<C> {
         self.client.as_ref()
+    }
+
+    pub fn with_plugins(mut self, manager: Arc<fae_agent::plugin::PluginManager>) -> Self {
+        self.plugins = Some(fae_agent::plugin::adapter::PluginAdapter::new(manager));
+        self
+    }
+
+    async fn routed_request(
+        client: &Client<C>,
+        req: CreateChatCompletionRequest,
+        retry_owner: ModelRetryOwner,
+        plugins: Option<&fae_agent::plugin::adapter::PluginAdapter>,
+        ctx: &fae_agent::Ctx,
+    ) -> fae_agent::Result<ModelResponse> {
+        if let Some(plugins) = plugins {
+            if let Some(response) = plugins.try_model(ctx, req.clone()).await? {
+                return Ok(response);
+            }
+        }
+        if req.model.starts_with("plugin:") {
+            return Err(anyhow::anyhow!("plugin_model_not_found: {}", req.model).into());
+        }
+        Self::request(client, req, retry_owner).await
     }
 
     async fn request_once(
@@ -147,7 +172,7 @@ where
     ) -> fae_agent::Result<TaskResp<ModelResponse>> {
         let TaskReq { ctx, mut meta, req } = task;
         let resp = tokio::select! {
-            result = Self::request(self.client.as_ref(), req, self.retry_owner) => result?,
+            result = Self::routed_request(self.client.as_ref(), req, self.retry_owner, self.plugins.as_ref(), &ctx) => result?,
             reason = ctx.cancellation() => return Err(anyhow::anyhow!("{}", reason).into()),
         };
         meta.publisher = Self::ID.to_string();
@@ -184,6 +209,7 @@ where
         let client = Arc::clone(&self.client);
         let retry_owner = self.retry_owner;
         let event_sender = self.event_sender.clone();
+        let plugins = self.plugins.clone();
 
         tokio::spawn(async move {
             let TaskReq { ctx, mut meta, req } = task;
@@ -197,7 +223,7 @@ where
             let response_ctx = ctx.clone();
             let error_meta = meta.clone();
             let result = tokio::select! {
-                result = Self::request(client.as_ref(), req, retry_owner) => result,
+                result = Self::routed_request(client.as_ref(), req, retry_owner, plugins.as_ref(), &ctx) => result,
                 reason = ctx.cancellation() => Err(anyhow::anyhow!("{}", reason).into()),
             }
             .map(|resp| Event {
@@ -286,6 +312,65 @@ mod tests {
                 .into();
             async move { Ok::<_, async_openai::error::OpenAIError>(response) }
         }))
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "python")]
+    async fn model_predicates_select_plugin_and_native_fallback_for_exec_and_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("plugins")).unwrap();
+        std::fs::write(dir.path().join("plugins/model.py"), r#"from fae_plugin import *
+def plugin_config():
+    return {"plugin_version":"1.0.0","description":"Dynamic model",
+        "mounts":[{"point":"ModelHook","implementation":"Demo"}]}
+class Demo(ModelHook):
+    async def match_model(self,ctx,model):
+        return model == 'offline-plugin'
+    async def exec(self,ctx,request):
+        return ModelResponse.completed({"id":"plugin","object":"chat.completion","created":0,
+            "model":request.model,"choices":[{"index":0,"message":{"role":"assistant","content":"plugin"},
+            "finish_reason":"stop"}]})
+"#).unwrap();
+        let manager = Arc::new(fae_agent::plugin::PluginManager::new(dir.path()));
+        manager.load("model").await.unwrap();
+        let engine = crate::EngineBuilder::new()
+            .build()
+            .await
+            .with_plugins(manager.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let native = serde_json::json!({"id":"native","object":"chat.completion","created":0,
+            "model":"offline-model","choices":[{"index":0,"message":{"role":"assistant","content":"native"},
+            "finish_reason":"stop"}]}).to_string();
+        let runtime = ModelRuntime::with_client(fake_client(200, native, calls.clone()))
+            .with_plugins(manager);
+        let events = runtime.watch().await.unwrap();
+        for spawned in [false, true] {
+            for (model, expected) in [("offline-plugin", "plugin"), ("offline-model", "native")] {
+                let ctx = engine
+                    .ctx_with_scope(fae_agent::ContextScope::root("alice"))
+                    .unwrap();
+                ctx.set_state(fae_agent::ContextState::Running).unwrap();
+                let mut req = offline_request(false);
+                req.model = model.into();
+                let task = TaskReq {
+                    ctx,
+                    meta: TaskMeta::default(),
+                    req,
+                };
+                if spawned {
+                    runtime.spawn(task).await.unwrap();
+                    assert!(matches!(
+                        events.recv().await.unwrap().event_type,
+                        EventType::TaskResult(_)
+                    ));
+                } else {
+                    let response = runtime.exec(task).await.unwrap().resp;
+                    assert!(matches!(response,ModelResponse::Completed(response)
+                        if response.choices[0].message.content.as_deref()==Some(expected)));
+                }
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

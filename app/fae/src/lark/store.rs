@@ -50,6 +50,8 @@ pub struct Record {
     pub completion_receipt: Option<String>,
     pub seq: u64,
     pub responses: Vec<Card>,
+    #[serde(default)]
+    pub plugin_messages: Vec<Card>,
     pub outcome: Option<String>,
     pub notice: Option<String>,
     pub notice_uuid: String,
@@ -221,6 +223,7 @@ impl Record {
             completion_receipt: None,
             seq: 0,
             responses: Vec::new(),
+            plugin_messages: Vec::new(),
             outcome: None,
             notice: None,
             notice_uuid: wd_tools::uuid::v4(),

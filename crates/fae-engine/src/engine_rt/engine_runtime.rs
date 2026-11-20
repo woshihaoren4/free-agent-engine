@@ -478,6 +478,21 @@ impl Runtime for EngineRuntime {
         rt.select(ty, cond).await
     }
 
+    async fn select_with_context(
+        &self,
+        ctx: &fae_agent::Ctx,
+        ty: TaskType,
+        cond: &mut Box<dyn Any + Send>,
+    ) -> fae_agent::Result<Box<dyn Any + Send>> {
+        let rt = self
+            .runtimes_for_task(&ty, None)
+            .await
+            .into_iter()
+            .next()
+            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
+        rt.select_with_context(ctx, ty, cond).await
+    }
+
     async fn spawn(&self, task: &mut TaskRequest) -> fae_agent::Result<()> {
         if task.ctx.state().current().is_cancelled() {
             return Err(fae_agent::Error::ContextAborted);

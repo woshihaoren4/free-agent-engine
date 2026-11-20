@@ -54,7 +54,7 @@ impl Tools for ExecuteCommandTool {
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute." },
                     "cwd": { "type": "string", "description": "Working directory. Defaults to the session workspace; relative paths use that workspace." },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Optional command timeout in seconds. Defaults to 60." }
+                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Set the command timeout in seconds based on the expected execution time. No timeout is applied if omitted." }
                 },
                 "required": ["command"]
             }
@@ -211,11 +211,17 @@ async fn run_shell_command(
         child.current_dir(cwd);
     }
 
-    let timeout_secs = timeout_secs.unwrap_or(60);
-    let output = match timeout(Duration::from_secs(timeout_secs), child.output()).await {
+    let output = if let Some(timeout_secs) = timeout_secs {
+        timeout(Duration::from_secs(timeout_secs), child.output())
+            .await
+            .map_err(|_| timeout_secs)
+    } else {
+        Ok(child.output().await)
+    };
+    let output = match output {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return Ok(ToolResponse::with_error(500, err.to_string())),
-        Err(_) => {
+        Err(timeout_secs) => {
             return ok_json(CommandResult {
                 command,
                 cwd: cwd.map(|cwd| cwd.display().to_string()),
@@ -611,6 +617,42 @@ fn segment_is_destructive(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test(start_paused = true)]
+    async fn execution_timeout_is_not_applied_when_omitted() {
+        let task = tokio::spawn(run_shell_command(
+            "sleep 0.1; printf done".to_string(),
+            None,
+            None,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+
+        let mut response = task.await.unwrap().unwrap();
+        let fae_agent::ToolRespItem::Completed(output) = response.next().await.unwrap() else {
+            panic!("expected completed response");
+        };
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["stdout"], "done");
+        assert_eq!(result["timed_out"], false);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test(start_paused = true)]
+    async fn execution_timeout_uses_supplied_seconds() {
+        let mut response = run_shell_command("exec sleep 30".to_string(), None, Some(1))
+            .await
+            .unwrap();
+        let fae_agent::ToolRespItem::Completed(output) = response.next().await.unwrap() else {
+            panic!("expected completed response");
+        };
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["success"], false);
+        assert_eq!(result["timed_out"], true);
+        assert_eq!(result["stderr"], "command timed out after 1s");
+    }
 
     fn roots() -> Vec<PathBuf> {
         vec![

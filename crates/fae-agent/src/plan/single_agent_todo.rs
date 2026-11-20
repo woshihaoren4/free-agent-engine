@@ -184,6 +184,7 @@ pub(super) struct SingleAgentTodoPlan {
     turn_id: u64,
     session: CommonSession,
     todo: SingleAgentTodo,
+    query_prepared: bool,
     images: Vec<String>,
     stage: TodoPlanStage,
     child: Option<SingleAgentPlan>,
@@ -223,6 +224,7 @@ impl SingleAgentTodoPlan {
             turn_id,
             session,
             todo: SingleAgentTodo::new(input),
+            query_prepared: false,
             images,
             stage: TodoPlanStage::Initialize,
             child: None,
@@ -266,6 +268,7 @@ impl SingleAgentTodoPlan {
             session,
         );
         plan.id = todo_scope.plan_id.clone();
+        plan.query_prepared = true;
         plan.todo_ctx = Some(todo_ctx);
         plan.todo.chat_history.extend([
             SessionMessage::user_with_images(input, images),
@@ -557,6 +560,22 @@ impl Plan for SingleAgentTodoPlan {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
+        if !self.query_prepared {
+            self.todo.requirement = self
+                .template
+                .hook
+                .on_query(&self.hook_context(None), self.todo.requirement.clone())
+                .await?;
+            anyhow::ensure!(
+                !self.ctx.state().current().is_terminal(),
+                "input context finished"
+            );
+            anyhow::ensure!(
+                !self.todo.requirement.trim().is_empty() || !self.images.is_empty(),
+                "query is empty and has no input attachments"
+            );
+            self.query_prepared = true;
+        }
         if self.todo_ctx.is_none() {
             self.todo_ctx = Some(
                 self.ctx
@@ -715,6 +734,76 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SingleAgentHook for TestHook {}
+
+    #[derive(Debug)]
+    struct NormalizeQuery(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl SingleAgentHook for NormalizeQuery {
+        async fn on_query(
+            &self,
+            _: &SingleAgentHookContext<'_>,
+            query: String,
+        ) -> anyhow::Result<String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(query.trim().into())
+        }
+    }
+    #[tokio::test]
+    async fn todo_query_normalizes_requirement_event_scope_and_saved_message_once() {
+        let hook = Arc::new(NormalizeQuery(std::sync::atomic::AtomicUsize::new(0)));
+        let mut template = test_template();
+        template.hook = hook.clone();
+        let mut scope = crate::ContextScope::root("alice");
+        scope.agent_id = Some("test-agent".into());
+        let ctx = crate::context::test_context(Some(scope));
+        ctx.set_state(crate::ContextState::Running).unwrap();
+        let session = CommonSession::new_with_user_id("alice");
+        session.activate_turn().unwrap();
+        let images = vec!["https://example.com/todo.png".to_owned()];
+        let mut plan = SingleAgentTodoPlan::new_with_images(
+            ctx,
+            template,
+            "  ship release  ".into(),
+            images.clone(),
+            1,
+            session.clone(),
+        );
+        let PlanNext::Tasks(mut tasks) = plan.init().await.unwrap() else {
+            panic!("initialize task")
+        };
+        let request = TaskReq::<ToolRequest>::try_from_request(&mut tasks[0]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(request.req.get_arguments()).unwrap()["user_input"],
+            "ship release"
+        );
+        assert_eq!(
+            request
+                .ctx
+                .scope()
+                .unwrap()
+                .todo
+                .as_ref()
+                .unwrap()
+                .user_input,
+            "ship release"
+        );
+        assert_eq!(
+            session.drain_outputs().await[0].output["input"],
+            "ship release"
+        );
+        let PlanNext::Tasks(mut tasks) = plan.save_task("done".into()).await.unwrap() else {
+            panic!("save task")
+        };
+        let saved = TaskReq::<SessionRequest>::try_from_request(&mut tasks[0]).unwrap();
+        let SessionRequest::Add { messages, .. } = saved.req else {
+            panic!("add request")
+        };
+        assert_eq!(
+            messages[0],
+            SessionMessage::user_with_images("ship release", images)
+        );
+        assert_eq!(hook.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     fn tool_definition(name: &str) -> ChatCompletionTools {
         ChatCompletionTools::Function(ChatCompletionTool {

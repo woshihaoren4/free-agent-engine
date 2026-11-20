@@ -1,9 +1,14 @@
+#[cfg(feature = "python")]
+#[path = "hook-py/mod.rs"]
+pub mod hook_py;
+pub mod model_hook;
 pub mod plan_hook;
 pub mod runtime_hook;
 pub mod single_agent_hook;
 pub mod tools_hook;
 pub mod workflow_hook;
 
+pub use model_hook::*;
 pub use plan_hook::*;
 pub use runtime_hook::*;
 pub use single_agent_hook::*;
