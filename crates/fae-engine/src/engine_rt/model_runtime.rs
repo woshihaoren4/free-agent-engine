@@ -98,12 +98,20 @@ where
     ) -> fae_agent::Result<ModelResponse> {
         if let Some(plugins) = plugins {
             if let Some(response) = plugins.try_model(ctx, req.clone()).await? {
+                ctx.invocation_model(fae_agent::ModelRef {
+                    provider: "plugin".into(),
+                    model: req.model.clone(),
+                })?;
                 return Ok(response);
             }
         }
         if req.model.starts_with("plugin:") {
             return Err(anyhow::anyhow!("plugin_model_not_found: {}", req.model).into());
         }
+        ctx.invocation_model(fae_agent::ModelRef {
+            provider: client.config().api_base().to_string(),
+            model: req.model.clone(),
+        })?;
         Self::request(client, req, retry_owner).await
     }
 

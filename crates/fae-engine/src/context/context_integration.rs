@@ -116,6 +116,17 @@ async fn fixture() -> anyhow::Result<(
     FAEWorkflowMetadataLoader,
     Arc<Mutex<Vec<ObservedCall>>>,
 )> {
+    fixture_with_hook(None).await
+}
+
+async fn fixture_with_hook(
+    hook: Option<Arc<dyn SingleAgentHookBuilder>>,
+) -> anyhow::Result<(
+    Engine,
+    PathBuf,
+    FAEWorkflowMetadataLoader,
+    Arc<Mutex<Vec<ObservedCall>>>,
+)> {
     let home =
         std::env::temp_dir().join(format!("fae-context-integration-{}", wd_tools::uuid::v4()));
     tokio::fs::create_dir_all(home.join("agents")).await?;
@@ -143,22 +154,179 @@ async fn fixture() -> anyhow::Result<(
     let mut tools = ToolsRuntime::new();
     tools.add_tool(Box::new(DefaultTools::with_host_dir(&home)));
     builder.add_runtime(tools);
-    builder.add_plan_builder(SingleAgentPlanBuilder::with_home_dir(&home));
+    let mut agent = SingleAgentPlanBuilder::with_home_dir(&home);
+    if let Some(hook) = hook {
+        agent.add_hook_arc(hook);
+    }
+    builder.add_plan_builder(agent);
     builder.add_plan_builder(WorkflowPlanBuilder::new(loader.clone()));
     Ok((builder.build().await, home, loader, calls))
+}
+
+#[derive(Debug)]
+struct SteerGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    first: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl SingleAgentHookBuilder for SteerGateBuilder {
+    async fn build(&self) -> Arc<dyn SingleAgentHook> {
+        self.0.clone()
+    }
+}
+
+struct SteerGateBuilder(Arc<SteerGate>);
+
+#[async_trait::async_trait]
+impl SingleAgentHook for SteerGate {
+    async fn on_query(
+        &self,
+        _ctx: &SingleAgentHookContext<'_>,
+        query: String,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(query != "reject", "query rejected");
+        Ok(query)
+    }
+    async fn on_model_req(
+        &self,
+        _ctx: &SingleAgentHookContext<'_>,
+        request: CreateChatCompletionRequest,
+    ) -> anyhow::Result<CreateChatCompletionRequest> {
+        if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(request)
+    }
+}
+
+#[tokio::test]
+async fn coordinated_agent_steer_records_application_and_rejection() -> anyhow::Result<()> {
+    for (query, expected) in [
+        ("constraint", InputStatus::Applied),
+        ("reject", InputStatus::NotApplied),
+    ] {
+        let gate = Arc::new(SteerGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            first: std::sync::atomic::AtomicBool::new(true),
+        });
+        let (engine, home, _, calls) =
+            fixture_with_hook(Some(Arc::new(SteerGateBuilder(gate.clone())))).await?;
+        let target = PlanTarget::Agent {
+            agent_id: "worker".into(),
+        };
+        let session = SessionCoordinator::new(
+            engine.clone(),
+            ContextData {
+                user_info: UserInfo {
+                    user_id: UserId::new("alice")?,
+                    name: None,
+                },
+                session_config: SessionConfig {
+                    session_id: SessionId::new("chat")?,
+                    name: "test".into(),
+                    lifecycle: SessionLifecycle::Open,
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
+                    target: target.clone(),
+                    workspace: WorkspaceBinding {
+                        root: home.to_string_lossy().into_owned(),
+                        project_files: vec![],
+                    },
+                    options: ExecutionOptions::default(),
+                    channels: vec![],
+                },
+                memory_view: MemoryView::default(),
+                latest_execution_view: None,
+            },
+        )?;
+        let execution = session.prepare(ExecutionSettings {
+            target,
+            workspace: home.to_string_lossy().into_owned(),
+            options: ExecutionOptions::default(),
+            definitions: vec![],
+        })?;
+        let execution_id = execution.execution_id.clone();
+        let (env, _) = SingleAgentEnv::from_agent_id_with_user_id("worker", "first", "alice");
+        let env = env.with_session_id("chat");
+        let runner = engine.clone();
+        let job = tokio::spawn(async move { runner.execute_session(execution, env).await });
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified()).await?;
+        let request_id = RequestId::new("steer")?;
+        session.steer(
+            &execution_id,
+            request_id.clone(),
+            vec![protocol::ContentBlock::Text { text: query.into() }],
+        )?;
+        tokio::fs::write(
+            home.join("agents/worker_prompt.txt"),
+            "Next execution prompt",
+        )
+        .await?;
+        gate.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(3), job).await??;
+        assert_eq!(result.is_ok(), expected == InputStatus::Applied);
+        let view = session.execution(Some(&execution_id))?;
+        assert_eq!(view.inputs[0].status, expected);
+        assert_eq!(view.inputs[0].request_id, request_id);
+        assert!(session.read_summary().active_execution.is_none());
+        assert!(!view.effective.definitions.is_empty());
+        if expected == InputStatus::Applied {
+            assert_eq!(calls.lock().unwrap().len(), 2);
+            assert!(calls.lock().unwrap()[1].messages.contains("constraint"));
+            assert!(
+                !calls.lock().unwrap()[1]
+                    .messages
+                    .contains("Next execution prompt")
+            );
+            let mut settings = view.effective.clone();
+            settings.definitions.clear();
+            let next = session.prepare(settings)?;
+            let (env, _) = SingleAgentEnv::from_agent_id_with_user_id("worker", "next", "alice");
+            engine
+                .execute_session(next, env.with_session_id("chat"))
+                .await?;
+            assert!(
+                calls.lock().unwrap()[2]
+                    .messages
+                    .contains("Next execution prompt")
+            );
+            assert_ne!(
+                session.execution(None)?.effective.definitions[0].content_fingerprint,
+                view.effective.definitions[0].content_fingerprint,
+            );
+        } else {
+            assert!(
+                view.inputs[0]
+                    .reason
+                    .as_ref()
+                    .unwrap()
+                    .contains("query rejected")
+            );
+        }
+        engine.exit().await?;
+        tokio::fs::remove_dir_all(home).await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn normal_todo_and_normal_turns_keep_task_contexts_independent() -> anyhow::Result<()> {
     let (engine, home, _, calls) = fixture().await?;
-    let (env, session) = SingleAgentEnv::from_agent_id_with_user_id("poet", "hello", "alice");
-    let first_ctx = engine.launch(env).await?;
+    let mut first_ctx = None;
     for (index, mode) in [None, Some("todo"), None].into_iter().enumerate() {
-        if index > 0 {
-            session.set_mode(mode).await?;
-            session
-                .call(SessionInput::NewChat("write a poem".into()))
-                .await?;
+        let (mut env, session) = SingleAgentEnv::from_agent_id_with_user_id(
+            "poet",
+            if index == 0 { "hello" } else { "write a poem" },
+            "alice",
+        );
+        env.mode = mode.map(str::to_owned);
+        let ctx = engine.launch(env).await?;
+        if index == 0 {
+            first_ctx = Some(ctx);
         }
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(3), session.result()).await??,
@@ -173,7 +341,7 @@ async fn normal_todo_and_normal_turns_keep_task_contexts_independent() -> anyhow
             }
         }
     }
-    assert_eq!(first_ctx.result::<Value>().await?, json!("done"));
+    assert_eq!(first_ctx.unwrap().result::<Value>().await?, json!("done"));
     let observed = calls.lock().unwrap();
     assert_eq!(observed.len(), 4);
     assert!(observed[0].ctx.scope()?.todo.is_none());
@@ -334,6 +502,7 @@ async fn dedicated_agent_invocation_and_next_turn_preserve_session_and_identity(
         session: session.clone(),
     });
     scope.turn_id = Some(1);
+    let next_scope = scope.clone();
     let ctx = engine.launch_with_scope(scope, env).await?;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(3), session.result()).await??,
@@ -358,11 +527,14 @@ async fn dedicated_agent_invocation_and_next_turn_preserve_session_and_identity(
         }
     }
     assert!(forwarded_child);
-    session
-        .call(SessionInput::NewChat(SessionInputData::text("again")))
-        .await?;
+    let (env, next_session) =
+        SingleAgentEnv::from_agent_id_with_user_id("parent", "again", "alice");
+    let mut next_scope = next_scope;
+    next_scope.session.as_mut().unwrap().session = next_session.clone();
+    next_scope.turn_id = Some(2);
+    let next_ctx = engine.launch_with_scope(next_scope, env).await?;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(3), session.result()).await??,
+        tokio::time::timeout(Duration::from_secs(3), next_session.result()).await??,
         json!("done")
     );
     let observed = calls.lock().unwrap();
@@ -388,11 +560,11 @@ async fn dedicated_agent_invocation_and_next_turn_preserve_session_and_identity(
         })
         .collect::<Vec<_>>();
     assert!(parent_turns.iter().any(|turn| turn.0 == Some(1)));
-    assert!(parent_turns.iter().any(|turn| turn.0 == Some(2)));
     assert!(parent_turns.iter().all(|turn| turn.2 == "configured"));
     let first = parent_turns.iter().find(|turn| turn.0 == Some(1)).unwrap();
-    let second = parent_turns.iter().find(|turn| turn.0 == Some(2)).unwrap();
+    let second = parent_turns.iter().find(|turn| turn.1 != first.1).unwrap();
     assert_ne!(first.1, second.1);
+    assert_eq!(next_ctx.result::<Value>().await?, json!("done"));
     assert!(matches!(
         &*ctx.state().current(),
         ContextState::Succeeded { .. }

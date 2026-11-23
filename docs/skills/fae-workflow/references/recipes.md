@@ -5,6 +5,8 @@
 
 示例命令默认以非交互模式运行，并将最终 JSON 写入 stdout。需要观察实时节点和 action 事件时，
 在 workflow ID 后添加 `--interactive`。
+每次命令创建新 Session 与 Execution；执行固定本次依赖定义和工作区。
+父子流程共享 Session/Execution，并以独立 Invocation 区分事件。
 
 ## 1. 串行 Tool Workflow
 
@@ -378,7 +380,8 @@ workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
         "type": "session",
         "request": {
           "Query": {
-            "user": "{$input.user}",
+            "agent_id": "{$input.agent_id}",
+            "user_id": "{$input.user_id}",
             "session_id": "{$input.session_id}",
             "limit": 20,
             "offset": null
@@ -407,7 +410,8 @@ workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
         "type": "session",
         "request": {
           "Add": {
-            "user": "{$input.user}",
+            "agent_id": "{$input.agent_id}",
+            "user_id": "{$input.user_id}",
             "session_id": "{$input.session_id}",
             "messages": [
               {
@@ -435,6 +439,11 @@ workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
 `single_agent.input` 可以是任意 JSON 值，但对象最终会按 JSON 文本交给 Agent。需要精确控制
 提示词时，使用一个字符串模板。
 
+输入需包含 `agent_id`、`user_id`、`session_id` 和 `message`。
+这些定位字段只选择 Query/Add 的历史分区，不改变 Workflow 的可信用户或当前 Session。
+此配方显式复制对话到指定分区；Single Agent 自身也会保存其绑定分区的历史，
+避免把两者设为同一分区造成重复追加。`session` action 不替代公共 Session 控制接口。
+
 ## 8. 使用隔离目录测试
 
 准备目录：
@@ -452,10 +461,11 @@ workflow TUI 中；省略 `--interactive` 时只向 stdout 输出最终 JSON。
 
 ```bash
 jq empty /tmp/fae-workflow-test/workflows/example.json
-fae --fae-home /tmp/fae-workflow-test workflow example --input @input.json
+fae --fae-home /tmp/fae-workflow-test --workspace /tmp/fae-workflow-test workflow example --input @input.json
 ```
 
-隔离目录能避免读取用户真实配置，也能限制 workflow 测试产生的 session 或文件副作用。若配置
+隔离 home 能分开配置与持久化数据；工具仍可访问执行工作区及运行环境允许的文件。
+同时使用 `--workspace` 指向测试目录，并选择适当的测试输入。若配置
 使用 Agent、Skill 或 MCP，必须同时把对应依赖放入隔离目录。
 
 ## 9. 排错清单

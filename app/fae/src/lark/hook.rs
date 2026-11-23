@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::store::Record;
-use crate::protocol::SessionBinding;
+use crate::session_host::LarkPrincipal as SessionBinding;
 
 /// Event metadata retained separately from the user's query.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex, RwLock as StdRwLock,
@@ -21,21 +21,40 @@ use async_openai::types::chat::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
 use tokio_stream::StreamExt;
 use wd_tools::Base64StdEncode;
 
 use super::single_agent_todo::{SingleAgentMode, SingleAgentTodoPlan};
 use crate::{
     CompositeSingleAgentHook, Ctx, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
-    Plan, PlanBuilderWithEnv, PlanNext, RT, Session, SessionEvent, SessionEventData, SessionInput,
-    SessionInputData, SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel,
-    SessionRequest, SessionResponse, SingleAgentHook, SingleAgentHookBuilder,
-    SingleAgentHookContext, SkillInfo, SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp,
-    TaskResponse, TaskType, ToolInvocation, ToolRequest, ToolRespItem, ToolResponse, UserMemory,
-    UserMemoryRequest, UserMemoryResponse, WorkflowActionRequest, WorkflowActionResponse,
-    WorkflowMetadata,
+    Plan, PlanBuilderWithEnv, PlanNext, RT, SessionEvent, SessionEventData, SessionIo,
+    SessionMessage, SessionMessageRole, SessionOutput, SessionOutputChannel, SessionRequest,
+    SessionResponse, SingleAgentHook, SingleAgentHookBuilder, SingleAgentHookContext, SkillInfo,
+    SkillQuery, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse, TaskType, ToolInvocation,
+    ToolRequest, ToolRespItem, ToolResponse, UserMemory, UserMemoryRequest, UserMemoryResponse,
+    WorkflowActionRequest, WorkflowActionResponse, WorkflowMetadata,
 };
+
+/// Prepared local Agent input. Public requests use protocol::Content.
+#[derive(Debug, Clone, Default)]
+pub struct AgentInput {
+    pub text: String,
+    pub images: Option<Vec<String>>,
+}
+
+impl AgentInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: None,
+        }
+    }
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = (!images.is_empty()).then_some(images);
+        self
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SingleAgentInfo {
@@ -161,6 +180,15 @@ impl AgentToolInvocation {
             self.agent_id == agent_id,
             "agent `{agent_id}` is not configured"
         );
+        let scope = ctx.scope()?;
+        if let Some(binding) = &scope.execution {
+            let (env, session) =
+                SingleAgentEnv::new_with_user_id(self.source, input, scope.user.user_id.clone());
+            let env = env
+                .with_session_id(binding.session.key().session_id.to_string())
+                .with_ancestor_agents(self.ancestor_agents);
+            return Ok((env, session));
+        }
         let (env, session) = SingleAgentEnv::new_with_parent_agent(
             self.source,
             input,

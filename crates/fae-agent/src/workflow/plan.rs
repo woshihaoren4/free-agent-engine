@@ -6,12 +6,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    CommonSession, Ctx, Plan, PlanBuilderWithEnv, PlanNext, Session, SessionEvent,
-    SessionEventData, SessionResponse, SingleAgentEnv, TaskMeta, TaskReq, TaskRequest, TaskResp,
-    TaskResponse, TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction,
-    WorkflowActionRequest, WorkflowActionResponse, WorkflowEnv, WorkflowHook, WorkflowHookBuilder,
-    WorkflowHookContext, WorkflowHookPhase, WorkflowMetadata, WorkflowNode, WorkflowValues,
-    to_plan_ty,
+    CommonSession, Ctx, Plan, PlanBuilderWithEnv, PlanNext, SessionEvent, SessionEventData,
+    SessionResponse, SingleAgentEnv, TaskMeta, TaskReq, TaskRequest, TaskResp, TaskResponse,
+    TaskType, ToolRequest, ToolRespItem, ToolResponse, WorkflowAction, WorkflowActionRequest,
+    WorkflowActionResponse, WorkflowEnv, WorkflowHook, WorkflowHookBuilder, WorkflowHookContext,
+    WorkflowHookPhase, WorkflowMetadata, WorkflowNode, WorkflowValues, to_plan_ty,
 };
 
 use crate::hook::workflow_hook::CompositeWorkflowHook;
@@ -216,7 +215,16 @@ impl PlanBuilderWithEnv<WorkflowEnv> for WorkflowPlanBuilder {
         ctx: Ctx,
         env: WorkflowEnv,
     ) -> anyhow::Result<Box<dyn Plan>> {
-        let metadata = self.metadata_loader.load(&env.workflow_id).await?;
+        let metadata = ctx
+            .definition(
+                format!("workflow:{}", env.workflow_id),
+                crate::PlanTarget::Workflow {
+                    workflow_id: env.workflow_id.clone(),
+                },
+                Some(env.workflow_id.clone()),
+                self.metadata_loader.load(&env.workflow_id),
+            )
+            .await?;
         let hook = self.build_hook().await;
         build_workflow_plan(metadata, ctx, env, hook)
     }
@@ -238,13 +246,15 @@ fn build_workflow_plan(
             scope.workflow_id.as_deref() == Some(&env.workflow_id),
             "workflow ownership does not match context"
         );
-        anyhow::ensure!(
-            scope
-                .session
-                .as_ref()
-                .is_some_and(|s| s.session.same_session(&env.session)),
-            "workflow session does not match context"
-        );
+        if scope.execution.is_none() {
+            anyhow::ensure!(
+                scope
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.session.same_session(&env.session)),
+                "workflow session does not match context"
+            );
+        }
     } else {
         let mut scope = crate::ContextScope::root(env.user_id.clone());
         scope.workflow_id = Some(env.workflow_id.clone());
@@ -307,7 +317,7 @@ enum PendingAction {
     Workflow,
     Tool,
     Session,
-    SingleAgent(CommonSession),
+    SingleAgent,
     Extension,
 }
 
@@ -621,19 +631,26 @@ impl WorkflowPlan {
             }
             WorkflowAction::SingleAgent { source, input } => {
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (env, session) = SingleAgentEnv::new_with_session(
+                let (env, _) = SingleAgentEnv::new_with_user_id(
                     source,
                     input,
-                    self.session.clone(),
-                    self.metadata.id.clone(),
-                    self.current.clone(),
+                    self.ctx.scope()?.user.user_id.clone(),
                 );
+                let env = if let Some(binding) = &self.ctx.scope()?.execution {
+                    env.with_session_id(binding.session.key().session_id.to_string())
+                } else {
+                    env
+                };
+                let node_ctx = self.ctx.fork(crate::ContextChildSpec {
+                    node_id: Some(self.current.clone()),
+                    ..Default::default()
+                })?;
                 let (child_ctx, child) = self
                     .ctx
                     .get_engine()
-                    .fork_call(&self.ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
+                    .fork_call(&node_ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
                     .await?;
-                self.pending = Some(PendingAction::SingleAgent(session));
+                self.pending = Some(PendingAction::SingleAgent);
                 TaskReq {
                     ctx: child_ctx,
                     meta: TaskMeta {
@@ -717,20 +734,14 @@ impl WorkflowPlan {
                     .ok_or_else(|| anyhow::anyhow!("workflow expected a SessionResponse"))?;
                 Ok(serde_json::to_value(response.resp)?)
             }
-            PendingAction::SingleAgent(session) => {
-                TaskResp::<()>::try_from_response(&mut response)
+            PendingAction::SingleAgent => {
+                let response = TaskResp::<()>::try_from_response(&mut response)
                     .ok_or_else(|| anyhow::anyhow!("workflow expected a child plan response"))?;
-                loop {
-                    let event = session.answer().await?.ok_or_else(|| {
-                        anyhow::anyhow!("single-agent session ended without a final event")
-                    })?;
-                    match event.event_data()? {
-                        SessionEventData::Completed { content } => {
-                            break Ok(Value::String(content));
-                        }
-                        SessionEventData::Failed { error } => anyhow::bail!(error),
-                        _ => {}
-                    }
+                match &*response.ctx.state().current() {
+                    crate::ContextState::Succeeded { output } => output.json_snapshot(),
+                    crate::ContextState::Failed { error } => anyhow::bail!("{}", error.message),
+                    crate::ContextState::Cancelled { reason } => anyhow::bail!("{reason}"),
+                    _ => anyhow::bail!("child plan is not terminal"),
                 }
             }
             PendingAction::Extension => {
@@ -749,6 +760,7 @@ impl Plan for WorkflowPlan {
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
+        self.ctx.initial_input_applied()?;
         self.advance().await
     }
 
@@ -950,17 +962,24 @@ impl DagWorkflowPlan {
             }
             WorkflowAction::SingleAgent { source, input } => {
                 let input = resolved_string(&self.values().resolve(&input)?)?;
-                let (env, session) = SingleAgentEnv::new_with_session(
+                let (env, _) = SingleAgentEnv::new_with_user_id(
                     source,
                     input,
-                    self.session.clone(),
-                    self.metadata.id.clone(),
-                    node_id.to_string(),
+                    self.ctx.scope()?.user.user_id.clone(),
                 );
+                let env = if let Some(binding) = &self.ctx.scope()?.execution {
+                    env.with_session_id(binding.session.key().session_id.to_string())
+                } else {
+                    env
+                };
+                let node_ctx = self.ctx.fork(crate::ContextChildSpec {
+                    node_id: Some(node_id.to_string()),
+                    ..Default::default()
+                })?;
                 let (child_ctx, child) = self
                     .ctx
                     .get_engine()
-                    .fork_call(&self.ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
+                    .fork_call(&node_ctx, to_plan_ty::<SingleAgentEnv>(), Box::new(env))
                     .await?;
                 (
                     TaskReq {
@@ -972,7 +991,7 @@ impl DagWorkflowPlan {
                         req: child,
                     }
                     .into_request(),
-                    PendingAction::SingleAgent(session),
+                    PendingAction::SingleAgent,
                 )
             }
             WorkflowAction::Python {
@@ -1212,6 +1231,7 @@ impl Plan for DagWorkflowPlan {
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
+        self.ctx.initial_input_applied()?;
         self.advance().await
     }
 
@@ -1250,20 +1270,14 @@ impl Plan for DagWorkflowPlan {
                     .ok_or_else(|| anyhow::anyhow!("workflow expected a SessionResponse"))?;
                 serde_json::to_value(response.resp)?
             }
-            PendingAction::SingleAgent(session) => {
-                TaskResp::<()>::try_from_response(&mut response)
+            PendingAction::SingleAgent => {
+                let response = TaskResp::<()>::try_from_response(&mut response)
                     .ok_or_else(|| anyhow::anyhow!("workflow expected a child plan response"))?;
-                loop {
-                    let event = session.answer().await?.ok_or_else(|| {
-                        anyhow::anyhow!("single-agent session ended without a final event")
-                    })?;
-                    match event.event_data()? {
-                        SessionEventData::Completed { content } => {
-                            break Value::String(content);
-                        }
-                        SessionEventData::Failed { error } => anyhow::bail!(error),
-                        _ => {}
-                    }
+                match &*response.ctx.state().current() {
+                    crate::ContextState::Succeeded { output } => output.json_snapshot()?,
+                    crate::ContextState::Failed { error } => anyhow::bail!("{}", error.message),
+                    crate::ContextState::Cancelled { reason } => anyhow::bail!("{reason}"),
+                    _ => anyhow::bail!("child plan is not terminal"),
                 }
             }
             PendingAction::Extension => {
@@ -1379,6 +1393,7 @@ fn only_target(node_id: &str, field: &str, targets: &[String]) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionIo;
     use crate::{WorkflowCondition, WorkflowMetadataBuilder};
     use serde_json::json;
     use std::sync::{Arc, Mutex};

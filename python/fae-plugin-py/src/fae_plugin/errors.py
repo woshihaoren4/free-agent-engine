@@ -1,96 +1,75 @@
-"""Stable errors returned by the host and the plugin dispatcher."""
+"""Integer response codes are independent of structured execution failures."""
+from enum import IntEnum
 from typing import Any
 
 
-class PluginHostError(Exception):
-    code = "plugin_error"
+class ResponseCode(IntEnum):
+    SUCCESS = 0
+    BAD_REQUEST = 400
+    FORBIDDEN = 403
+    NOT_FOUND = 404
+    CONFLICT = 409
+    INTERNAL_ERROR = 500
+    UNAVAILABLE = 503
+    STORAGE_ERROR = 507
 
-    def __init__(self, message: str, **details: Any) -> None:
+
+class PluginHostError(Exception):
+    code = ResponseCode.INTERNAL_ERROR
+
+    def __init__(self, message: str, **details: Any):
         super().__init__(message)
-        self.message = message
-        self.details = details
+        self.message, self.details = message, details
 
 
 class ContextUnavailable(PluginHostError):
-    code = "context_unavailable"
+    code = ResponseCode.NOT_FOUND
 
 
 class ContextFinished(PluginHostError):
-    code = "context_finished"
-
-
-class InvalidStateTransition(PluginHostError):
-    code = "invalid_state_transition"
-
-
-class ScopeAlreadyBound(PluginHostError):
-    code = "scope_already_bound"
-
-
-class InvalidScope(PluginHostError):
-    code = "invalid_scope"
-
-
-class InvalidHandle(PluginHostError):
-    code = "invalid_handle"
+    code = ResponseCode.CONFLICT
 
 
 class HandleExpired(PluginHostError):
-    code = "handle_expired"
-
-
-class StateViewClosed(PluginHostError):
-    code = "state_view_closed"
-
-
-class UnsupportedOutputType(PluginHostError):
-    code = "unsupported_output_type"
+    code = ResponseCode.NOT_FOUND
 
 
 class UnsupportedValueType(PluginHostError):
-    code = "unsupported_value_type"
-
-
-class StackCapacityExceeded(PluginHostError):
-    code = "stack_capacity_exceeded"
-
-
-class InvalidStackEntry(PluginHostError):
-    code = "invalid_stack_entry"
+    code = ResponseCode.BAD_REQUEST
 
 
 class SessionBusy(PluginHostError):
-    code = "session_busy"
+    code = ResponseCode.CONFLICT
 
 
 class SessionUnavailable(PluginHostError):
-    code = "session_unavailable"
+    code = ResponseCode.NOT_FOUND
 
 
 class InvalidMessage(PluginHostError):
-    code = "invalid_message"
+    code = ResponseCode.BAD_REQUEST
 
 
 class HostCallTimeout(PluginHostError):
-    code = "host_call_timeout"
+    code = ResponseCode.UNAVAILABLE
 
 
 class HookCancelled(PluginHostError):
-    code = "hook_cancelled"
+    code = ResponseCode.CONFLICT
 
 
 class InvalidHookNext(PluginHostError):
-    code = "invalid_hook_next"
+    code = ResponseCode.CONFLICT
 
 
 class MissingChainHandler(PluginHostError):
-    code = "missing_chain_handler"
+    code = ResponseCode.BAD_REQUEST
 
 
 def from_wire(error: dict[str, Any]) -> PluginHostError:
-    cls = next((c for c in PluginHostError.__subclasses__()
-                if c.code == error.get("code")), PluginHostError)
-    result = cls(error.get("message", "Plugin host error"),
-                 **{k: v for k, v in error.items() if k not in ("code", "message")})
-    result.code = error.get("code", result.code)
+    code = ResponseCode(error["code"])
+    cls = {ResponseCode.NOT_FOUND: HandleExpired, ResponseCode.CONFLICT: ContextFinished,
+           ResponseCode.BAD_REQUEST: InvalidMessage, ResponseCode.UNAVAILABLE: HostCallTimeout}.get(code, PluginHostError)
+    result = cls(error["msg"])
+    result.code = code
     return result

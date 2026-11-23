@@ -4,7 +4,8 @@ use super::{
     sdk::Sdk,
     store::{State, Store},
 };
-use crate::{app::client::Client, protocol::*};
+use crate::app::client::{Client, text_content};
+use fae_agent::{AgentMode, ExecutionOptions, PlanTarget, RequestId, protocol::*};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
 
@@ -229,29 +230,37 @@ impl Gateway {
             );
         }
         if live.client.is_none() {
-            let client = Client::open(
-                &self.home,
-                &server,
-                OpenSession {
-                    target: SessionTarget::Agent {
-                        source: fae_agent::SingleAgentSource::AgentId(self.config.agent_id.clone()),
+            let client =
+                Client::open(
+                    &self.home,
+                    &server,
+                    SessionCreateRequest {
+                        name: self.config.agent_id.clone(),
+                        target: PlanTarget::Agent {
+                            agent_id: self.config.agent_id.clone(),
+                        },
+                        workspace: Some(self.config.workspace.to_string_lossy().into()),
+                        options: Default::default(),
+                        channels: vec![fae_agent::ChannelBinding::Lark {
+                            app_id: record.binding.app_id.clone(),
+                            chat_id: record.binding.chat_id.clone(),
+                            thread_id: Some(record.binding.thread_id.clone()),
+                        }],
                     },
-                    session_id: Some(record.session_id.clone()),
-                    workspace: Some(self.config.workspace.clone()),
-                    binding: Some(record.binding.clone()),
-                    resume: if recovering {
-                        Some(Resume {
-                            stream_id: record.stream_id.clone().ok_or_else(|| {
+                    Some(record.session_id.clone()),
+                    Some(record.binding.clone()),
+                    if recovering {
+                        Some(SubscribeRequest {
+                            stream_id: Some(record.stream_id.clone().ok_or_else(|| {
                                 anyhow::anyhow!("接受状态不确定；本次不会自动重跑")
-                            })?,
-                            after_seq: record.seq,
+                            })?),
+                            after_seq: Some(record.seq),
                         })
                     } else {
                         None
                     },
-                },
-            )
-            .await?;
+                )
+                .await?;
             live.client = Some(client);
         }
         if !live.monitoring {
@@ -263,15 +272,17 @@ impl Gateway {
             });
         }
         let client = live.client.as_mut().unwrap();
-        let selected = client.info.session_id.clone();
+        let selected = client.sid().to_string();
         anyhow::ensure!(
             selected == record.session_id,
             "会话不匹配；本次不会自动重跑"
         );
-        let ServerMessage::Status(status) = request(client, ClientMessage::Status).await? else {
+        let ResponsePayload::SessionGet(status) =
+            request(client, RequestPayload::SessionGet(Empty {})).await?
+        else {
             anyhow::bail!("Invalid session status");
         };
-        let busy = status.round_id.is_some();
+        let busy = status.active_execution.is_some();
         // Status may overtake the local monitor after Finished was buffered by
         // request(). Commit that output and release its slot before idle commands.
         if !busy {
@@ -282,13 +293,6 @@ impl Gateway {
                 )
                 .await
                 .map_err(|_| anyhow::anyhow!("正在保存上一轮结果，请稍后重试"))??;
-                if let ServerMessage::Error(error) = &message {
-                    if error.code == "resume_gap" {
-                        self.recover_gap(&mut live).await;
-                        continue;
-                    }
-                    anyhow::bail!("{error}");
-                }
                 self.ingest(&mut live, &message)?;
             }
         }
@@ -298,9 +302,12 @@ impl Gateway {
             // Never replay a cancellation after a crash: a newer round may be running.
             let stopped = if !recovering {
                 self.store.update(id, |r| r.state = State::Submitting)?;
-                tokio::time::timeout(Duration::from_secs(10), client.stop_round(status.round_id))
-                    .await
-                    .map_err(|_| anyhow::anyhow!("停止状态不确定：服务请求超时"))??
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.stop_round(status.active_execution.clone().map(|id| id.to_string())),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("停止状态不确定：服务请求超时"))??
             } else {
                 false
             };
@@ -322,8 +329,8 @@ impl Gateway {
                     return self.notice(
                         id,
                         format!(
-                            "session: {selected}\nmodel: {}\nstate: {}",
-                            client.info.model, status.state
+                            "session: {selected}\nstate: {}",
+                            if busy { "running" } else { "idle" }
                         ),
                     );
                 }
@@ -333,7 +340,7 @@ impl Gateway {
                         r.state = State::Submitting;
                         r.session_id = selected.clone();
                     })?;
-                    request(client, ClientMessage::Clean).await?;
+                    request(client, RequestPayload::SessionConversationClear(Empty {})).await?;
                     live.client = None;
                     return self.notice(
                         id,
@@ -361,101 +368,97 @@ impl Gateway {
             None
         };
         let client = live.client.as_mut().unwrap();
-        let accepted = if recovering {
-            request(
-                client,
-                ClientMessage::Acceptance {
-                    external_request_id: id.into(),
-                },
-            )
-            .await?
+        let steer = if recovering {
+            record.completion_receipt.is_some()
         } else {
-            let (input, mode) = if let Some(text) = command.strip_prefix("/steer ") {
+            busy || command.starts_with("/steer ")
+        };
+        let round = if recovering {
+            accepted_execution(client, id).await?
+        } else {
+            let text = if let Some(text) = command.strip_prefix("/steer ") {
                 anyhow::ensure!(!text.trim().is_empty(), "/steer 需要补充内容");
-                (fae_agent::SessionInput::Supplement(text.into()), None)
-            } else if busy {
-                (
-                    fae_agent::SessionInput::Supplement(record.text.clone().into()),
-                    None,
-                )
-            } else if let Some(text) = command.strip_prefix("/todo ") {
-                anyhow::ensure!(!text.trim().is_empty(), "/todo 需要任务内容");
-                (
-                    fae_agent::SessionInput::NewChat(text.into()),
-                    Some("todo".into()),
-                )
+                text.to_string()
+            } else if !busy {
+                command
+                    .strip_prefix("/todo ")
+                    .unwrap_or(&record.text)
+                    .to_string()
             } else {
-                (
-                    fae_agent::SessionInput::NewChat(record.text.clone().into()),
-                    None,
-                )
+                record.text.clone()
             };
+            let payload = if steer {
+                let execution_id = status
+                    .active_execution
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("没有可补充的执行"))?;
+                RequestPayload::SessionExecutionSteer(ExecutionSteerRequest {
+                    execution_id,
+                    input: text_content(text),
+                })
+            } else {
+                RequestPayload::SessionExecutionStart(ExecutionStartRequest {
+                    input: text_content(text),
+                    target: None,
+                    workspace: None,
+                    options: Some(ExecutionOptions {
+                        mode: command.starts_with("/todo ").then_some(AgentMode::Todo),
+                    }),
+                })
+            };
+            // Persist the explicit operation choice before sending, so recovery never changes start into steer.
+            let completion = if steer {
+                status
+                    .active_execution
+                    .as_ref()
+                    .and_then(|round| self.store.round_receipt(&record, round.as_str()))
+            } else {
+                None
+            };
+            anyhow::ensure!(
+                !steer || completion.is_some(),
+                "找不到原执行记录，补充未发送"
+            );
             self.store.update(id, |r| {
                 r.session_id = selected.clone();
                 r.stream_id = Some(client.stream.clone());
                 r.service_instance = Some(server.instance_id.clone());
                 r.state = State::Submitting;
+                r.completion_receipt = completion.clone();
             })?;
-            match request(
-                client,
-                ClientMessage::ExternalInput {
-                    external_request_id: id.into(),
-                    input,
-                    mode,
-                    auto_steer: true,
-                },
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                client.request_with_id(payload, RequestId::new(id.to_string())?),
             )
             .await
             {
-                Ok(response) => response,
-                Err(error) => {
-                    match request(
-                        client,
-                        ClientMessage::Acceptance {
-                            external_request_id: id.into(),
-                        },
-                    )
-                    .await
-                    {
-                        Ok(
-                            response @ ServerMessage::Acceptance {
-                                round_id: Some(_),
-                                uncertain: false,
-                                ..
-                            },
-                        ) => response,
-                        _ => {
+                Ok(Ok(ResponsePayload::SessionExecutionStart(accepted))) => {
+                    accepted.execution_id.to_string()
+                }
+                Ok(Ok(ResponsePayload::SessionExecutionSteer(accepted))) => {
+                    accepted.execution_id.to_string()
+                }
+                _ => {
+                    // Query only; no automatic resubmission after an ambiguous transport failure.
+                    if client.reconnect().await.is_err() {
+                        self.store
+                            .update(id, |r| r.state = State::AcceptanceUnknown)?;
+                        anyhow::bail!("输入未确认；本次不会自动重跑");
+                    }
+                    match accepted_execution(client, id).await {
+                        Ok(round) => round,
+                        Err(error) => {
                             self.store
                                 .update(id, |r| r.state = State::AcceptanceUnknown)?;
-                            return Err(error.context("输入未确认；本次不会自动重跑"));
+                            return Err(error);
                         }
                     }
                 }
             }
         };
-        if let ServerMessage::Acceptance {
-            supplemented: true,
-            uncertain: false,
-            round_id,
-            ..
-        } = &accepted
-        {
-            let round = round_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("补充已接受，但未返回原执行 ID"))?;
-            return self.supplement(id, round, &live, recovering);
+        if steer {
+            return self.supplement(id, &round, &live, recovering);
         }
-        let round = match accepted {
-            ServerMessage::Ack {
-                round_id: Some(round),
-            }
-            | ServerMessage::Acceptance {
-                round_id: Some(round),
-                uncertain: false,
-                ..
-            } => round,
-            _ => anyhow::bail!("输入接受状态不确定；本次不会自动重跑"),
-        };
         // A recovered steering receipt needs no execution slot. Reserve a slot
         // only after acceptance identifies a round whose output we must monitor.
         let permit = match permit {
@@ -496,7 +499,7 @@ impl Gateway {
                 let rounds: Vec<_> = live.owners.keys().cloned().collect();
                 for round in rounds {
                     if let Some(client) = &mut live.client {
-                        let _ = request(client, ClientMessage::Cancel { round_id: round }).await;
+                        let _ = client.stop_round(Some(round)).await;
                     }
                 }
                 for (_, owner) in live.owners.drain() {
@@ -509,13 +512,7 @@ impl Gateway {
             if live.owners.is_empty() {
                 if idle.elapsed().as_secs() >= self.config.execution.session_idle_secs {
                     if let Some(client) = &mut live.client {
-                        let _ = request(
-                            client,
-                            ClientMessage::Close {
-                                cancel_active: false,
-                            },
-                        )
-                        .await;
+                        let _ = client.close().await;
                     }
                     live.client = None;
                     live.monitoring = false;
@@ -542,6 +539,9 @@ impl Gateway {
                         .await
                         .is_ok_and(|result| result.is_ok())
                     {
+                        if client.take_replay_gap() {
+                            self.recover_gap(&mut live).await;
+                        }
                         continue;
                     }
                     for (_, owner) in live.owners.drain() {
@@ -552,15 +552,6 @@ impl Gateway {
                     return;
                 }
             };
-            if let ServerMessage::Error(error) = &message {
-                if error.code == "resume_gap" {
-                    self.recover_gap(&mut live).await;
-                    continue;
-                }
-                for (_, owner) in live.owners.drain() {
-                    self.fail(&owner.receipt, &error.to_string());
-                }
-            }
             if let Err(error) = self.ingest(&mut live, &message) {
                 for (_, owner) in live.owners.drain() {
                     self.fail(&owner.receipt, &format!("无法保存执行输出：{error}"));
@@ -571,18 +562,21 @@ impl Gateway {
             }
         }
     }
-    fn ingest(&self, live: &mut LiveSession, message: &ServerMessage) -> anyhow::Result<()> {
-        let round = match message {
-            ServerMessage::Event { round_id, .. } | ServerMessage::Finished { round_id, .. } => {
-                round_id
+    fn ingest(&self, live: &mut LiveSession, message: &Message) -> anyhow::Result<()> {
+        let round = match &message.payload {
+            MessagePayload::Event(EventPayload::OutputDelta(delta)) => delta.execution_id.as_str(),
+            MessagePayload::Event(EventPayload::ExecutionFinished(finished)) => {
+                finished.execution_id.as_str()
             }
             _ => return Ok(()),
         };
         if let Some(owner) = live.owners.get(round) {
             self.store.update(&owner.receipt, |r| {
                 if owner.incomplete {
-                    if let ServerMessage::Finished { outcome, .. } = message {
-                        output::recover_terminal(r, round, outcome.clone());
+                    if let MessagePayload::Event(EventPayload::ExecutionFinished(finished)) =
+                        &message.payload
+                    {
+                        output::recover_terminal(r, round, finished.outcome.clone());
                     }
                 } else {
                     output::ingest(r, message);
@@ -591,7 +585,10 @@ impl Gateway {
                     r.notice = Some(self.sdk.sanitize(text));
                 }
             })?;
-            if matches!(message, ServerMessage::Finished { .. }) {
+            if matches!(
+                message.payload,
+                MessagePayload::Event(EventPayload::ExecutionFinished(_))
+            ) {
                 live.owners.remove(round);
             }
         }
@@ -611,14 +608,19 @@ impl Gateway {
                     card.ended = true;
                 }
             });
-            if let Ok(ServerMessage::Acceptance {
-                outcome: Some(outcome),
+            if let Ok(ResponsePayload::SessionExecutionGet(ExecutionGetResult {
+                acceptance:
+                    Some(AcceptanceFact {
+                        outcome: Some(outcome),
+                        ..
+                    }),
                 ..
-            }) = request(
+            })) = request(
                 live.client.as_mut().unwrap(),
-                ClientMessage::Acceptance {
-                    external_request_id: receipt.clone(),
-                },
+                RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+                    execution_id: None,
+                    input_request_id: RequestId::new(receipt.clone()).ok(),
+                }),
             )
             .await
             {
@@ -638,16 +640,41 @@ impl Gateway {
         }
     }
 }
-async fn request(client: &mut Client, message: ClientMessage) -> anyhow::Result<ServerMessage> {
+async fn request(client: &mut Client, message: RequestPayload) -> anyhow::Result<ResponsePayload> {
     tokio::time::timeout(Duration::from_secs(10), client.request(message))
         .await
         .map_err(|_| anyhow::anyhow!("接受状态不确定：服务请求超时"))?
+}
+async fn accepted_execution(client: &mut Client, id: &str) -> anyhow::Result<String> {
+    let ResponsePayload::SessionExecutionGet(result) = request(
+        client,
+        RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+            execution_id: None,
+            input_request_id: Some(RequestId::new(id.to_string())?),
+        }),
+    )
+    .await?
+    else {
+        anyhow::bail!("Invalid acceptance response");
+    };
+    let fact = result
+        .acceptance
+        .ok_or_else(|| anyhow::anyhow!("接受状态不确定"))?;
+    anyhow::ensure!(
+        fact.certainty == AcceptanceCertainty::Known,
+        "输入未确认；本次不会自动重跑"
+    );
+    Ok(fact
+        .execution_id
+        .ok_or_else(|| anyhow::anyhow!("缺少执行 ID"))?
+        .to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::store::Record;
     use super::*;
+    use crate::session_host::LarkPrincipal as SessionBinding;
     use serde_json::json;
 
     fn feedback_gateway(base: String) -> Arc<Gateway> {
@@ -969,7 +996,7 @@ mod tests {
         let home = home.canonicalize().unwrap();
         crate::server::init::initialize(
             &home,
-            &InitArgsDto {
+            &fae_agent::protocol::InitializeRequest {
                 agent_id: "fae".into(),
                 model: "unused".into(),
                 force: false,
@@ -998,8 +1025,12 @@ mod tests {
         });
         let service = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if let Ok(Some(service)) = crate::app::daemon::discover(&home).await {
-                    break service;
+                // Wait for publication before discovery probes the service lock;
+                // otherwise this test can acquire it before the spawned server.
+                if crate::app::daemon::read_config(&home).is_ok() {
+                    if let Ok(Some(service)) = crate::app::daemon::discover(&home).await {
+                        break service;
+                    }
                 }
                 tokio::task::yield_now().await;
             }
@@ -1136,9 +1167,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gateway.shutdown())
             .await
             .unwrap();
-        crate::app::client::control(&home, &service, ControlMessage::Shutdown)
-            .await
-            .unwrap();
+        crate::app::client::control(
+            &home,
+            &service,
+            fae_agent::protocol::RequestPayload::EngineShutdown(fae_agent::protocol::Empty {}),
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(5), server)
             .await
             .unwrap()

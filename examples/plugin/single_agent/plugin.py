@@ -2,7 +2,7 @@
 import logging
 import sys
 
-from fae_plugin import Context, SessionMessage, SingleAgentHook
+from fae_plugin import Context, SessionMessage, SingleAgentHook, TextContent
 
 
 class DemoAgentHook(SingleAgentHook):
@@ -16,27 +16,29 @@ class DemoAgentHook(SingleAgentHook):
             self.log.addHandler(handler)
 
     async def on_query(self, ctx: Context, query: str) -> str:
-        scope = await ctx.scope()
-        view = ctx.state()
-        try:
-            state = await view.current()
-        finally:
-            await view.aclose()
+        summary = await ctx.read_summary()
+        data = await ctx.export_context()
+        execution = data.latest_execution_view
+        invocation = next((item for item in execution.invocations
+                           if item.invocation_id == ctx.invocation_id), None) if execution else None
+        agent_id = invocation.agent_id if invocation else None
         self.log.info(
-            "agent=%s run=%s user=%s state=%s workspace=%s",
-            ctx.agent_id, ctx.run_id, ctx.user_id, state.kind.value, scope.workspace,
+            "agent=%s execution=%s invocation=%s user=%s state=%s workspace=%s",
+            agent_id, ctx.execution_id, ctx.invocation_id, summary.user_info.user_id,
+            execution.status.value if execution else None,
+            execution.effective.workspace if execution else summary.session_config.workspace.root,
         )
         if ctx.session is not None:
-            receipt = await ctx.session.send(
-                f"[single-agent-plugin] agent={ctx.agent_id}，已收到请求，开始处理。"
-            )
-            self.log.info("session=%s message=%s", ctx.session.session_id, receipt.message_id)
+            receipt = await ctx.session.send([
+                TextContent(f"[single-agent-plugin] agent={agent_id}，已收到请求，开始处理。")
+            ])
+            self.log.info("session=%s output=%s", ctx.session.session_id, receipt.output_id)
         return query.strip()
 
     async def on_prompt(self, ctx: Context, prompt: str) -> str:
-        self.log.info("on_prompt agent=%s", ctx.agent_id)
+        self.log.info("on_prompt invocation=%s", ctx.invocation_id)
         return prompt + "\n回答保持简洁，使用用户输入的语言。"
 
     async def on_save(self, ctx: Context, messages: list[SessionMessage]) -> list[SessionMessage]:
-        self.log.info("on_save agent=%s messages=%d", ctx.agent_id, len(messages))
+        self.log.info("on_save invocation=%s messages=%d", ctx.invocation_id, len(messages))
         return messages

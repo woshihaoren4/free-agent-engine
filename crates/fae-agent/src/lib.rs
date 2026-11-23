@@ -1,5 +1,6 @@
 mod common;
 mod context;
+pub mod context_data;
 mod error;
 mod event;
 pub mod hook;
@@ -8,8 +9,9 @@ mod memory;
 mod model;
 mod plan;
 pub mod plugin;
+pub mod protocol;
 mod runtime;
-mod session;
+pub mod session;
 mod skill;
 mod task;
 mod timer;
@@ -18,6 +20,7 @@ mod workflow;
 
 pub use common::*;
 pub use context::*;
+pub use context_data::*;
 pub use error::*;
 pub use event::*;
 pub use hook::*;

@@ -22,36 +22,3 @@ impl ServerConfig {
         format!("ws://{}{route}", std::net::SocketAddr::new(ip, self.port))
     }
 }
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct InitArgsDto {
-    pub agent_id: String,
-    pub model: String,
-    pub force: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum ControlMessage {
-    Hello,
-    Initialize(InitArgsDto),
-    Status,
-    PluginInstall { source: PathBuf },
-    PluginUninstall { id: String },
-    PluginShow { id: String },
-    Shutdown,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ControlEnvelope {
-    pub version: u16,
-    pub request_id: String,
-    #[serde(flatten)]
-    pub body: ControlMessage,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct HelloInfo {
-    pub config: ServerConfig,
-    pub home: PathBuf,
-}

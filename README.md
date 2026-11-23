@@ -44,6 +44,13 @@ CLI 会自动连接当前 FAE home 的后台服务，默认监听 `127.0.0.1:666
 配置、完整 API 和可运行样例见
 [Python 插件 SDK](python/fae-plugin-py/README.md)。
 
+会话使用公共 v4 协议，Python 插件 API 为 `0.2.0`，升级时需同步更新服务、
+客户端和 SDK。逻辑 Session 以可信用户和 session ID 标识，每次 start 创建独立
+Execution；同一会话最多一个活跃执行，steer 可查询 Applied/NotApplied，
+stop 检查 execution ID 并等待子调用和插件资源清理。多个客户端可以订阅同一
+会话，断线保留执行。Agent/Workflow 定义与 workspace 在每次 Execution 固定，
+下一次执行重新加载定义；历史和用户记忆沿用已有分区、文件路径及格式。
+
 ## 快速开始
 
 完成上面的 `fae init` 后，新建 Rust 项目并添加依赖：
@@ -60,27 +67,49 @@ cargo add tokio --features macros,rt-multi-thread
 将 `src/main.rs` 替换为：
 
 ```rust
-use fae_agent::{Session, SessionEventData, SingleAgentEnv};
-use fae_engine::Engine;
+use fae_agent::{protocol::ContentBlock, *};
+use fae_engine::{Engine, SessionCoordinator};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let engine = Engine::default().await;
-    let (agent, session) = SingleAgentEnv::from_agent_id("fae", "用一句话介绍 FAE");
-    let task = engine.launch(agent).await?;
-
-    while let Some(event) = session.answer().await? {
-        match event.event_data()? {
-            SessionEventData::Completed { content } => {
-                println!("{content}");
-                break;
+    let target = PlanTarget::Agent { agent_id: "fae".into() };
+    let workspace = std::env::current_dir()?.to_string_lossy().into_owned();
+    let session = SessionCoordinator::new(engine.clone(), ContextData {
+        user_info: UserInfo { user_id: UserId::new("master")?, name: None },
+        session_config: SessionConfig {
+            session_id: SessionId::new("demo")?,
+            name: "Demo".into(),
+            lifecycle: SessionLifecycle::Open,
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            target: target.clone(),
+            workspace: WorkspaceBinding { root: workspace.clone(), project_files: vec![] },
+            options: ExecutionOptions::default(),
+            channels: vec![],
+        },
+        memory_view: MemoryView::default(),
+        latest_execution_view: None,
+    })?;
+    let execution = session.prepare(ExecutionSettings {
+        target, workspace, options: ExecutionOptions::default(), definitions: vec![],
+    })?;
+    let execution_id = execution.execution_id.clone();
+    let (agent, _) = SingleAgentEnv::from_agent_id("fae", "用一句话介绍 FAE");
+    engine.execute_session(execution, agent.with_session_id("demo")).await?;
+    let outcome = session.execution(Some(&execution_id))?.outcome
+        .ok_or_else(|| anyhow::anyhow!("Execution is still cleaning up"))?;
+    match outcome {
+        ExecutionOutcome::Succeeded { result } => {
+            for block in result {
+                if let ContentBlock::Text { text } = block { println!("{text}"); }
             }
-            SessionEventData::Failed { error } => anyhow::bail!("{error}"),
-            _ => {}
         }
+        ExecutionOutcome::Failed { error } => eprintln!("{}", error.message),
+        ExecutionOutcome::Cancelled { reason } => eprintln!("{reason}"),
     }
-
-    task.result::<()>().await?;
+    // 结果可重复查询；下一次 prepare 会创建新的 Execution。
+    assert!(session.execution(Some(&execution_id))?.outcome.is_some());
     engine.exit().await?;
     Ok(())
 }

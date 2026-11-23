@@ -189,6 +189,7 @@ pub(super) struct SingleAgentTodoPlan {
     stage: TodoPlanStage,
     child: Option<SingleAgentPlan>,
     child_session: Option<CommonSession>,
+    child_ctx: Option<Ctx>,
     current_prompt: Option<String>,
     last_execution_output: Option<String>,
     final_output: Option<String>,
@@ -229,6 +230,7 @@ impl SingleAgentTodoPlan {
             stage: TodoPlanStage::Initialize,
             child: None,
             child_session: None,
+            child_ctx: None,
             current_prompt: None,
             last_execution_output: None,
             final_output: None,
@@ -430,6 +432,13 @@ impl SingleAgentTodoPlan {
                 self.todo.chat_history.clone(),
             )
         };
+        child_ctx.invocation_started(&TaskMeta {
+            id: child.id().to_string(),
+            plan_id: child.id().to_string(),
+            ty: TaskType::Plan,
+            ..Default::default()
+        })?;
+        self.child_ctx = Some(child_ctx);
         let next = child.init().await?;
         self.child = Some(child);
         self.child_session = Some(child_session);
@@ -440,12 +449,20 @@ impl SingleAgentTodoPlan {
 
     async fn finish_child(&mut self) -> anyhow::Result<String> {
         let child = self.child.take();
-        let child_session = self
-            .child_session
+        self.child_session.take();
+        let ctx = self
+            .child_ctx
             .take()
-            .expect("running todo agent requires a child session");
-        let output = child_session.result().await?;
+            .expect("running todo agent requires a child context");
+        let output = match &*ctx.state().current() {
+            crate::ContextState::Succeeded { output } => output.json_snapshot(),
+            crate::ContextState::Failed { error } => Err(anyhow::anyhow!("{}", error.message)),
+            crate::ContextState::Cancelled { reason } => Err(anyhow::anyhow!("{reason}")),
+            _ => Err(anyhow::anyhow!("todo child is not terminal")),
+        };
         drop(child);
+        ctx.invocation_finished()?;
+        let output = output?;
         let output = output
             .as_str()
             .map(str::to_owned)
@@ -556,7 +573,7 @@ impl Plan for SingleAgentTodoPlan {
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
-        if self.session.cancel_requested() {
+        if self.ctx.cancel_requested() {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
@@ -575,6 +592,7 @@ impl Plan for SingleAgentTodoPlan {
                 "query is empty and has no input attachments"
             );
             self.query_prepared = true;
+            self.ctx.initial_input_applied()?;
         }
         if self.todo_ctx.is_none() {
             self.todo_ctx = Some(
@@ -600,7 +618,7 @@ impl Plan for SingleAgentTodoPlan {
     }
 
     async fn next(&mut self, mut task_result: TaskResponse) -> anyhow::Result<PlanNext> {
-        if self.session.cancel_requested() {
+        if self.ctx.cancel_requested() {
             self.child.take();
             self.child_session.take();
             self.finish_on_drop = true;
@@ -691,6 +709,9 @@ impl Plan for SingleAgentTodoPlan {
         }
         self.child.take();
         self.child_session.take();
+        if let Some(ctx) = self.child_ctx.take() {
+            let _ = ctx.invocation_finished();
+        }
         self.session.abort_turn();
         self.owns_active_turn = false;
         let _ = self.session.emit_agent(
@@ -704,6 +725,15 @@ impl Plan for SingleAgentTodoPlan {
 
 impl Drop for SingleAgentTodoPlan {
     fn drop(&mut self) {
+        self.child.take();
+        if let Some(ctx) = self.child_ctx.take() {
+            if !ctx.state().current().is_terminal() {
+                let _ = ctx.set_state(crate::ContextState::failed(
+                    "todo child dropped before completion",
+                ));
+            }
+            let _ = ctx.invocation_finished();
+        }
         if self.owns_active_turn {
             if self.finish_on_drop {
                 self.session.finish_turn();
@@ -725,7 +755,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ModelResponse, Session, SessionResponse, SingleAgentHook, SingleAgentInfo,
+        ModelResponse, SessionIo, SessionResponse, SingleAgentHook, SingleAgentInfo,
         SingleAgentModelConfig, UserMemoryRequest, UserMemoryResponse,
     };
 

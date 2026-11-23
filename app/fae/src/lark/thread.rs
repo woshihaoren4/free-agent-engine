@@ -195,7 +195,7 @@ mod tests {
             sdk::{Sdk, tests::mock},
             store::Store,
         },
-        protocol::SessionBinding,
+        session_host::LarkPrincipal as SessionBinding,
     };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::{Mutex, Semaphore, watch};

@@ -1,8 +1,9 @@
-"""Candidate-only helper. stdout is reserved for one framed configuration result."""
+"""Candidate-only helper using the shared v4 inspect request and response."""
 import sys
 import json
 import struct
 from pathlib import Path
+from ._protocol import MAX_FRAME, validate, response, reject_constant
 from .config import inspect_config, normalize
 from .registration import ModuleLoader
 
@@ -10,18 +11,29 @@ from .registration import ModuleLoader
 def main() -> None:
     output = sys.stdout.buffer
     sys.stdout = sys.stderr
-    source = Path(sys.argv[2])
+    size = struct.unpack(">I", sys.stdin.buffer.read(4))[0]
+    if not 0 < size <= MAX_FRAME:
+        raise ValueError("Invalid inspect frame length")
+    message = validate(json.loads(sys.stdin.buffer.read(size), parse_constant=reject_constant))
+    if message["path"] != "/request/plugin/inspect" or message.get("session_id") is not None:
+        raise ValueError("Expected an execution-free inspect request")
+    payload = message["payload"]
+    if set(payload) != {"id", "source"} or payload["id"] != sys.argv[1] or payload["source"] != sys.argv[2]:
+        raise ValueError("Inspect source mismatch")
+    source = Path(payload["source"])
     try:
         if source.is_file():
-            loader = ModuleLoader(sys.argv[1], source.parent)
-            config = inspect_config(loader.load(source), sys.argv[1], source)
+            loader = ModuleLoader(payload["id"], source.parent)
+            config = inspect_config(loader.load(source), payload["id"], source)
         else:
             config = normalize(json.loads((source / "plugin.config").read_text(encoding="utf-8")),
-                               sys.argv[1], source)
-        result = {"result": config}
+                               payload["id"], source)
+        result = response(message, config)
     except Exception as error:
-        result = {"error": {"code": "plugin_config_invalid", "message": str(error)}}
+        result = response(message, code=400, msg=str(error))
     data = json.dumps(result, allow_nan=False).encode()
+    if len(data) > MAX_FRAME:
+        raise ValueError("Inspect response exceeds frame limit")
     output.write(struct.pack(">I", len(data)) + data)
     output.flush()
 

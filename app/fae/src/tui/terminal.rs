@@ -119,7 +119,7 @@ pub struct TerminalUi {
     cwd: String,
     messages: Vec<Message>,
     child_streams: HashMap<String, Vec<BufferedMessage>>,
-    plugin_messages: std::collections::HashSet<String>,
+    output_receipts: std::collections::HashSet<String>,
     composer: Composer,
     attachments: Vec<String>,
     file_browser: Option<FileBrowser>,
@@ -241,7 +241,7 @@ impl TerminalUi {
             cwd: display_cwd(),
             messages: Vec::new(),
             child_streams: HashMap::new(),
-            plugin_messages: std::collections::HashSet::new(),
+            output_receipts: std::collections::HashSet::new(),
             composer: Composer::default(),
             attachments: Vec::new(),
             file_browser: None,
@@ -319,6 +319,17 @@ impl TerminalUi {
 
     pub fn set_subject(&mut self, subject: impl Into<String>) {
         self.subject = subject.into();
+    }
+
+    pub fn set_execution_model(&mut self, model: Option<&fae_agent::ModelRef>) {
+        self.model = model
+            .map(|model| format!("{}/{}", model.provider, model.model))
+            .unwrap_or_else(|| "—".into());
+    }
+
+    pub fn finish_execution(&mut self) {
+        finalize_execution_messages(&mut self.messages);
+        self.state = RunState::Completed;
     }
 
     pub fn workflow_result(&mut self, output: &Value) {
@@ -563,23 +574,12 @@ impl TerminalUi {
                 event_type,
                 content,
             } => {
-                if event_type == "plugin_message" {
-                    if let Some(id) = content["message_id"].as_str() {
-                        if !self.plugin_messages.insert(id.into()) {
-                            return Ok(false);
-                        }
-                    }
-                }
                 self.flush_child_streams(&run_id, None);
                 self.finish_stream();
                 self.messages.push(Message::new(
                     MessageKind::System,
                     title(&event_type),
-                    if event_type == "plugin_message" {
-                        content["text"].as_str().unwrap_or_default().to_owned()
-                    } else {
-                        compact_value(&content)
-                    },
+                    compact_value(&content),
                     None,
                 ));
             }
@@ -598,6 +598,71 @@ impl TerminalUi {
         }
         self.scroll_from_bottom = 0;
         Ok(terminal)
+    }
+
+    pub fn apply_output_delta(
+        &mut self,
+        delta: &fae_agent::protocol::OutputDelta,
+    ) -> anyhow::Result<()> {
+        use fae_agent::protocol::{ContentBlock, OutputSource};
+        let stream_id = format!(
+            "{}:{}:{}",
+            delta.execution_id, delta.invocation_id, delta.output_id
+        );
+        if matches!(
+            delta.source,
+            OutputSource::Plugin { .. } | OutputSource::Runtime
+        ) && !self.output_receipts.insert(stream_id.clone())
+        {
+            return Ok(());
+        }
+        for block in &delta.content {
+            match block {
+                ContentBlock::Text { text } if delta.source == OutputSource::Model => {
+                    self.append_stream(
+                        MessageKind::Assistant,
+                        &format!("Assistant [{}]", delta.invocation_id),
+                        stream_id.clone(),
+                        text.clone(),
+                    );
+                }
+                ContentBlock::Json { value } if delta.source == OutputSource::Tool => {
+                    let event: fae_agent::SessionEventData = serde_json::from_value(value.clone())?;
+                    if let fae_agent::SessionEventData::ToolOutput {
+                        output, completed, ..
+                    } = event
+                    {
+                        self.finish_stream();
+                        self.messages.push(Message::new(
+                            MessageKind::Tool,
+                            format!(
+                                "{} tool [{}]",
+                                if completed { "Completed" } else { "Running" },
+                                delta.invocation_id
+                            ),
+                            pretty_json_text(&output),
+                            None,
+                        ));
+                    }
+                }
+                _ => {
+                    self.finish_stream();
+                    let title = match &delta.source {
+                        OutputSource::Plugin { plugin_id } => format!("Plugin {plugin_id}"),
+                        _ => format!("Output [{}]", delta.invocation_id),
+                    };
+                    let text = match block {
+                        ContentBlock::Text { text } => text.clone(),
+                        ContentBlock::Json { value } => pretty_value(value),
+                        ContentBlock::Resource { resource } => resource.uri.clone(),
+                    };
+                    self.messages
+                        .push(Message::new(MessageKind::System, title, text, None));
+                }
+            }
+        }
+        self.scroll_from_bottom = 0;
+        Ok(())
     }
 
     fn append_stream(
@@ -1779,6 +1844,15 @@ fn finalize_assistant_message(messages: &mut Vec<Message>, title: &str, content:
     }
 }
 
+fn finalize_execution_messages(messages: &mut [Message]) {
+    for message in messages {
+        message.stream_id = None;
+        if message.kind == MessageKind::Assistant {
+            message.render_markdown = true;
+        }
+    }
+}
+
 fn pretty_json_text(text: &str) -> String {
     serde_json::from_str::<Value>(text)
         .map(|value| pretty_value(&value))
@@ -2088,6 +2162,69 @@ mod tests {
         assert_eq!(messages[1].title, "researcher: Assistant");
         assert_eq!(messages[1].content, "partial");
         assert!(messages.iter().all(|message| message.stream_id.is_none()));
+    }
+
+    #[test]
+    fn execution_completion_removes_output_status_and_preserves_content() {
+        let mut messages = Vec::new();
+        append_stream_message(
+            &mut messages,
+            MessageKind::Assistant,
+            "Assistant [invocation]",
+            "execution:invocation:response".into(),
+            "**你好**".into(),
+        );
+        assert!(message_heading(&messages[0], true).contains(OUTPUT_STATUS));
+
+        finalize_execution_messages(&mut messages);
+
+        assert!(!message_heading(&messages[0], true).contains(OUTPUT_STATUS));
+        assert_eq!(messages[0].content, "**你好**");
+        assert!(messages[0].render_markdown);
+        assert_eq!(
+            message_content_lines(&messages[0], false)[0].to_string(),
+            " 你好"
+        );
+
+        append_stream_message(
+            &mut messages,
+            MessageKind::Assistant,
+            "Assistant [next-invocation]",
+            "next-execution:next-invocation:response".into(),
+            "下一轮".into(),
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "**你好**");
+        assert!(!message_heading(&messages[0], true).contains(OUTPUT_STATUS));
+        assert!(message_heading(&messages[1], true).contains(OUTPUT_STATUS));
+    }
+
+    #[test]
+    fn execution_completion_finalizes_all_branches_without_changing_plugin_notifications() {
+        let mut messages = vec![
+            Message::new(
+                MessageKind::Assistant,
+                "Assistant [first]",
+                "**first**",
+                None,
+            ),
+            Message::new(MessageKind::System, "Plugin progress", "任务进度", None),
+            Message::new(
+                MessageKind::Assistant,
+                "Assistant [second]",
+                "partial",
+                Some("execution:second:response".into()),
+            ),
+        ];
+
+        finalize_execution_messages(&mut messages);
+
+        assert!(messages.iter().all(|message| message.stream_id.is_none()));
+        assert!(messages[0].render_markdown);
+        assert!(messages[2].render_markdown);
+        assert_eq!(messages[2].content, "partial");
+        assert_eq!(messages[1].content, "任务进度");
+        assert!(!messages[1].render_markdown);
     }
 
     #[test]

@@ -375,13 +375,14 @@ struct Local {
     scope: Option<Arc<ContextScope>>,
     state: watch::Sender<Arc<ContextState>>,
     children: Vec<Weak<EngineContext>>,
+    cancellation: watch::Sender<Option<Arc<str>>>,
 }
 #[derive(Debug)]
 pub struct EngineContext {
     engine: EngineRef,
     local: Mutex<Local>,
     stacks: Arc<Mutex<StackStore>>,
-    plugins: Mutex<Option<Arc<fae_agent::plugin::PluginRun>>>,
+    plugins: Mutex<Option<Arc<fae_agent::plugin::PluginExecutionBinding>>>,
 }
 impl EngineContext {
     pub fn new(engine: Engine) -> Self {
@@ -405,6 +406,7 @@ impl EngineContext {
                 scope,
                 state,
                 children: Vec::new(),
+                cancellation: watch::channel(None).0,
             }),
         }
     }
@@ -443,15 +445,44 @@ impl EngineContext {
     }
 }
 impl Context for EngineContext {
+    fn cancellation_signal(&self) -> Option<watch::Receiver<Option<Arc<str>>>> {
+        let local = self.local.lock().unwrap();
+        local
+            .scope
+            .as_ref()
+            .filter(|s| s.execution.is_some())
+            .map(|_| local.cancellation.subscribe())
+    }
+    fn request_cancel(&self, reason: Arc<str>) -> anyhow::Result<()> {
+        if self.scope()?.execution.is_none() {
+            self.set_state(ContextState::Cancelled { reason })?;
+            return Ok(());
+        }
+        let children = {
+            let local = self.local.lock().unwrap();
+            if local.cancellation.borrow().is_none() {
+                local.cancellation.send_replace(Some(reason.clone()));
+            }
+            local
+                .children
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
+        for child in children {
+            child.request_cancel(reason.clone())?;
+        }
+        Ok(())
+    }
     fn with_active(&self, action: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
         let local = self.local.lock().unwrap();
         anyhow::ensure!(!local.state.borrow().is_terminal(), "ContextFinished");
         action()
     }
-    fn plugin_run(&self) -> Option<Arc<fae_agent::plugin::PluginRun>> {
+    fn plugin_execution(&self) -> Option<Arc<fae_agent::plugin::PluginExecutionBinding>> {
         self.plugins.lock().unwrap().clone()
     }
-    fn bind_plugin_run(&self, run: Arc<fae_agent::plugin::PluginRun>) {
+    fn bind_plugin_execution(&self, run: Arc<fae_agent::plugin::PluginExecutionBinding>) {
         let mut slot = self.plugins.lock().unwrap();
         if slot.is_none() {
             *slot = Some(run);
@@ -491,7 +522,7 @@ impl Context for EngineContext {
     fn fork(&self, spec: ContextChildSpec) -> anyhow::Result<Ctx> {
         let mut local = self.local.lock().unwrap();
         anyhow::ensure!(
-            !local.state.borrow().is_terminal(),
+            !local.state.borrow().is_terminal() && local.cancellation.borrow().is_none(),
             "parent context is already terminal"
         );
         let parent = local
@@ -500,16 +531,37 @@ impl Context for EngineContext {
             .ok_or_else(|| anyhow::anyhow!("context scope is not bound"))?;
         let timer_execution = spec.timer_binding(parent);
         let scope = ContextScope {
+            execution: parent.execution.as_ref().map(|binding| ExecutionBinding {
+                session: binding.session.clone(),
+                execution_id: binding.execution_id.clone(),
+                invocation_id: InvocationId::new(wd_tools::uuid::v4()).unwrap(),
+                parent_invocation_id: binding
+                    .session
+                    .execution(Some(&binding.execution_id))
+                    .ok()
+                    .filter(|view| {
+                        view.invocations
+                            .iter()
+                            .any(|v| v.invocation_id == binding.invocation_id)
+                    })
+                    .map(|_| binding.invocation_id.clone())
+                    .or_else(|| binding.parent_invocation_id.clone()),
+                definitions: binding.definitions.clone(),
+            }),
             scope_id: wd_tools::uuid::v4(),
             parent_scope_id: Some(parent.scope_id.clone()),
             user: parent.user.clone(),
-            session: spec.session.or_else(|| {
-                if spec.execution {
-                    None
-                } else {
-                    parent.session.clone()
-                }
-            }),
+            session: if parent.execution.is_some() {
+                parent.session.clone()
+            } else {
+                spec.session.or_else(|| {
+                    if spec.execution {
+                        None
+                    } else {
+                        parent.session.clone()
+                    }
+                })
+            },
             agent_id: spec.agent_id.or_else(|| {
                 if spec.execution {
                     None
@@ -550,8 +602,13 @@ impl Context for EngineContext {
             self.stacks.clone(),
             Some(Arc::new(scope)),
         ));
-        if let Some(run) = self.plugin_run() {
-            child.bind_plugin_run(run);
+        if parent.execution.is_some() {
+            // Invocation scopes may outlive intermediate debug scopes. Execution
+            // cancellation must not depend on those intermediate weak links.
+            child.local.lock().unwrap().cancellation = local.cancellation.clone();
+        }
+        if let Some(run) = self.plugin_execution() {
+            child.bind_plugin_execution(run);
         }
         local.children.retain(|child| child.strong_count() > 0);
         local.children.push(Arc::downgrade(&child));

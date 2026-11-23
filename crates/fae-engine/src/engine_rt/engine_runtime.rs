@@ -188,6 +188,9 @@ impl EngineRuntime {
                             result.meta.clone(),
                             fae_agent::ContextStackPhase::Succeeded,
                         ));
+                        if result.meta.ty != TaskType::Plan {
+                            let _ = result.ctx.invocation_finished();
+                        }
                     }
                     EventType::TaskError(error) => {
                         let _ = error
@@ -202,6 +205,9 @@ impl EngineRuntime {
                             error.meta.clone(),
                             phase,
                         ));
+                        if error.meta.ty != TaskType::Plan {
+                            let _ = error.ctx.invocation_finished();
+                        }
                     }
                     _ => {}
                 }
@@ -494,7 +500,7 @@ impl Runtime for EngineRuntime {
     }
 
     async fn spawn(&self, task: &mut TaskRequest) -> fae_agent::Result<()> {
-        if task.ctx.state().current().is_cancelled() {
+        if task.ctx.cancel_requested() {
             return Err(fae_agent::Error::ContextAborted);
         }
         if task.ctx.state().current().is_terminal() {
@@ -538,7 +544,7 @@ impl Runtime for EngineRuntime {
     }
 
     async fn exec(&self, task: &mut TaskRequest) -> fae_agent::Result<TaskResponse> {
-        if task.ctx.state().current().is_cancelled() {
+        if task.ctx.cancel_requested() {
             return Err(fae_agent::Error::ContextAborted);
         }
         if task.ctx.state().current().is_terminal() {
@@ -552,15 +558,9 @@ impl Runtime for EngineRuntime {
 
         for rt in runtimes {
             task.meta.executor = rt.id().to_string();
-            let ctx = task.ctx.clone();
-            let result = if ty == TaskType::Plan {
-                rt.exec(task).await
-            } else {
-                tokio::select! {
-                    result = rt.exec(task) => result,
-                    _ = ctx.cancellation() => Err(fae_agent::Error::ContextAborted),
-                }
-            };
+            // The Runtime owns cancellation and teardown. Dropping its future here
+            // can abandon subprocesses before Invocation cleanup is reported.
+            let result = rt.exec(task).await;
             match result {
                 Err(fae_agent::Error::RuntimeNoSupport) => continue,
                 result => return result,

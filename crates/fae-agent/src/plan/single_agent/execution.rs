@@ -1,14 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub(super) struct SingleAgentBinding {
-    pub(super) rt: RT,
-    pub(super) engine: crate::EngineRef,
-    pub(super) template: SingleAgentTemplate,
-    pub(super) mode: Option<SingleAgentMode>,
-}
-
-#[derive(Debug, Clone)]
 pub(in crate::plan) struct SingleAgentTemplate {
     pub(in crate::plan) agent: SingleAgentInfo,
     pub(in crate::plan) prompt: String,
@@ -82,6 +74,7 @@ pub(in crate::plan) struct SingleAgentPlan {
     unsaved_messages: Vec<SessionMessage>,
     final_output: String,
     response_id: String,
+    model_output_ctx: Option<Ctx>,
     tool_iterations: usize,
     empty_model_retries: usize,
     task_sequence: u64,
@@ -263,6 +256,7 @@ impl SingleAgentPlan {
             unsaved_messages: vec![initial_message],
             final_output: String::new(),
             response_id: String::new(),
+            model_output_ctx: None,
             tool_iterations: 0,
             empty_model_retries: 0,
             task_sequence: 0,
@@ -289,6 +283,57 @@ impl SingleAgentPlan {
     }
 
     async fn emit(&self, source: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
+        if let Some(binding) = self
+            .ctx
+            .scope()
+            .ok()
+            .and_then(|scope| scope.execution.clone())
+        {
+            let output_ctx = if matches!(data, SessionEventData::ModelOutput { .. }) {
+                self.model_output_ctx.as_ref().unwrap_or(&self.ctx)
+            } else {
+                &self.ctx
+            };
+            let output_binding = output_ctx
+                .scope()?
+                .execution
+                .clone()
+                .unwrap_or(binding.clone());
+            let (content, output_id) = match &data {
+                SessionEventData::ModelOutput {
+                    content,
+                    response_id,
+                } => (
+                    vec![crate::protocol::ContentBlock::Text {
+                        text: content.clone(),
+                    }],
+                    response_id
+                        .clone()
+                        .unwrap_or_else(|| self.response_id.clone()),
+                ),
+                SessionEventData::ToolOutput { call_id, .. } => (
+                    vec![crate::protocol::ContentBlock::Json {
+                        value: serde_json::to_value(&data)?,
+                    }],
+                    call_id.clone(),
+                ),
+                _ => return Ok(()),
+            };
+            binding.session.report(
+                &binding.execution_id,
+                crate::ExecutionReport::Output {
+                    invocation_id: output_binding.invocation_id,
+                    output_id,
+                    source: if matches!(data, SessionEventData::ModelOutput { .. }) {
+                        crate::protocol::OutputSource::Model
+                    } else {
+                        crate::protocol::OutputSource::Tool
+                    },
+                    content,
+                },
+            )?;
+            return Ok(());
+        }
         self.session
             .emit_agent(self.turn_id, self.template.agent.name.clone(), source, data)
     }
@@ -372,8 +417,7 @@ impl SingleAgentPlan {
     }
 
     async fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
-        let pending = self.session.take_pending_inputs();
-        self.append_user_inputs(pending).await?;
+        self.apply_execution_inputs().await?;
 
         let request = self.model_request();
         let estimated_tokens = estimated_tokens(&request);
@@ -472,7 +516,58 @@ impl SingleAgentPlan {
         ))
     }
 
-    async fn append_user_inputs(&mut self, inputs: Vec<SessionInputData>) -> anyhow::Result<()> {
+    async fn apply_execution_inputs(&mut self) -> anyhow::Result<usize> {
+        let Some(binding) = self.ctx.scope().ok().and_then(|s| s.execution.clone()) else {
+            return Ok(0);
+        };
+        // Delegated agents cannot consume the top-level Agent's steer mailbox.
+        if binding.parent_invocation_id.is_some() || !self.persist_session {
+            return Ok(0);
+        }
+        let inputs = binding.session.take_inputs(&binding.execution_id)?;
+        let count = inputs.len();
+        for input in inputs {
+            let result = async {
+                let mut text = String::new();
+                let mut images = Vec::new();
+                for block in input.content {
+                    match block {
+                        crate::protocol::ContentBlock::Text { text: part } => text.push_str(&part),
+                        crate::protocol::ContentBlock::Resource { resource }
+                            if resource.media_type.starts_with("image/") =>
+                        {
+                            images.push(
+                                resource
+                                    .uri
+                                    .strip_prefix("file://")
+                                    .unwrap_or(&resource.uri)
+                                    .to_string(),
+                            )
+                        }
+                        _ => anyhow::bail!("Agent input requires text or image resources"),
+                    }
+                }
+                self.append_user_inputs(vec![AgentInput {
+                    text,
+                    images: Some(images),
+                }])
+                .await
+            }
+            .await;
+            binding.session.report(
+                &binding.execution_id,
+                crate::ExecutionReport::InputProcessed {
+                    request_id: input.request_id,
+                    applied: result.is_ok(),
+                    reason: result.as_ref().err().map(ToString::to_string),
+                },
+            )?;
+            result?;
+        }
+        Ok(count)
+    }
+
+    async fn append_user_inputs(&mut self, inputs: Vec<AgentInput>) -> anyhow::Result<()> {
         for mut input in inputs {
             let images = input.images.unwrap_or_default();
             input.text = self

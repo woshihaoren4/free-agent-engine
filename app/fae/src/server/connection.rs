@@ -1,4 +1,4 @@
-use crate::protocol::{MAX_FRAME, ProtocolError, ServerEnvelope, ServerMessage};
+use crate::protocol::MAX_FRAME;
 use futures_util::{SinkExt, StreamExt};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -17,6 +17,7 @@ use tokio_tungstenite::{
 pub struct Queued {
     pub text: String,
     _permit: OwnedSemaphorePermit,
+    written: Option<tokio::sync::oneshot::Sender<()>>,
 }
 #[derive(Clone)]
 pub struct Outbound {
@@ -26,16 +27,28 @@ pub struct Outbound {
     close: watch::Sender<bool>,
 }
 impl Outbound {
-    pub fn send(&self, mut envelope: ServerEnvelope) -> bool {
-        let Ok(mut text) = serde_json::to_string(&envelope) else {
+    pub fn send(&self, envelope: fae_agent::protocol::ServerFrame) -> bool {
+        self.enqueue(envelope, None)
+    }
+    pub async fn send_confirmed(&self, envelope: fae_agent::protocol::ServerFrame) -> bool {
+        let (written, receipt) = tokio::sync::oneshot::channel();
+        self.enqueue(envelope, Some(written))
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(10), receipt).await,
+                Ok(Ok(()))
+            )
+    }
+    fn enqueue(
+        &self,
+        envelope: fae_agent::protocol::ServerFrame,
+        written: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> bool {
+        let Ok(text) = serde_json::to_string(&envelope) else {
             return false;
         };
         if text.len() > MAX_FRAME {
-            envelope.body = ServerMessage::Error(ProtocolError::new(
-                "resource_exhausted",
-                "Response exceeds the 8 MiB frame limit",
-            ));
-            text = serde_json::to_string(&envelope).unwrap();
+            self.close();
+            return false;
         }
         let permit = self.bytes.clone().try_acquire_many_owned(text.len() as u32);
         if let Ok(permit) = permit {
@@ -44,6 +57,7 @@ impl Outbound {
                 .try_send(Queued {
                     text,
                     _permit: permit,
+                    written,
                 })
                 .is_ok()
             {
@@ -71,16 +85,22 @@ pub async fn upgrade(
     stream: TcpStream,
     token: String,
     lark_token: String,
-) -> anyhow::Result<(WebSocketStream<TcpStream>, String)> {
+) -> anyhow::Result<(
+    WebSocketStream<TcpStream>,
+    String,
+    Option<crate::session_host::LarkPrincipal>,
+)> {
     let route = Arc::new(std::sync::Mutex::new(String::new()));
     let selected = route.clone();
+    let principal = Arc::new(std::sync::Mutex::new(None));
+    let authenticated = principal.clone();
     let ws = tokio::time::timeout(
         Duration::from_secs(5),
         tokio_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
                 let authorization = format!("Bearer {token}");
-                let lark = request.uri().path() == "/v3/lark/session";
+                let lark = request.uri().path() == "/v4/lark/session";
                 let authorization = if lark {
                     format!("Bearer {lark_token}")
                 } else {
@@ -93,12 +113,33 @@ pub async fn upgrade(
                     && !request.headers().contains_key("origin")
                     && matches!(
                         request.uri().path(),
-                        "/v1/control" | "/v1/session" | "/v3/lark/session"
+                        "/v4/control" | "/v4/session" | "/v4/lark/session"
                     );
                 if !accepted {
                     return Err(Response::builder()
                         .status(401)
                         .body(Some("unauthorized".into()))
+                        .unwrap());
+                }
+                if lark {
+                    let parsed = request
+                        .headers()
+                        .get("x-fae-lark-principal")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| serde_json::from_str(v).ok());
+                    if parsed.is_none() {
+                        return Err(Response::builder()
+                            .status(403)
+                            .body(Some("Lark principal required".into()))
+                            .unwrap());
+                    }
+                    *authenticated.lock().unwrap() = parsed;
+                } else if request.headers().contains_key("x-fae-lark-principal") {
+                    return Err(Response::builder()
+                        .status(403)
+                        .body(Some(
+                            "Lark principal requires gateway authentication".into(),
+                        ))
                         .unwrap());
                 }
                 *selected.lock().unwrap() = request.uri().path().into();
@@ -113,7 +154,8 @@ pub async fn upgrade(
     )
     .await??;
     let path = route.lock().unwrap().clone();
-    Ok((ws, path))
+    let principal = principal.lock().unwrap().clone();
+    Ok((ws, path, principal))
 }
 
 pub fn transport(
@@ -144,6 +186,9 @@ pub fn transport(
                     Some(item) => {
                         if !matches!(tokio::time::timeout(Duration::from_secs(10), sink.send(Message::Text(item.text.clone().into()))).await, Ok(Ok(())))
                             { break; }
+                        if let Some(written) = item.written {
+                            let _ = written.send(());
+                        }
                         continue;
                     }
                     None => break,
@@ -197,6 +242,18 @@ pub fn transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fae_agent::protocol::*;
+    fn frame(message: String) -> ServerFrame {
+        let request = fae_agent::protocol::Message::request(
+            fae_agent::RequestId::new("r").unwrap(),
+            None,
+            RequestPayload::EngineStatus(Empty {}),
+        )
+        .unwrap();
+        ServerFrame::Response(
+            ResponseMessage::error(&request, ResponseCode::InternalError, message).unwrap(),
+        )
+    }
     fn outbound() -> (Outbound, mpsc::Receiver<Queued>, watch::Receiver<bool>) {
         let (tx, rx) = mpsc::channel(256);
         let (close, closed) = watch::channel(false);
@@ -215,30 +272,12 @@ mod tests {
     fn slow_client_queue_is_bounded_and_signals_disconnect() {
         let (out, _rx, closed) = outbound();
         for _ in 0..256 {
-            assert!(out.send(ServerEnvelope::new(
-                "instance",
-                None,
-                None,
-                ServerMessage::Closed
-            )));
+            assert!(out.send(frame("closed".into())));
         }
-        assert!(!out.send(ServerEnvelope::new(
-            "instance",
-            None,
-            None,
-            ServerMessage::Closed
-        )));
+        assert!(!out.send(frame("closed".into())));
         assert!(*closed.borrow());
         let (out, _rx, closed) = outbound();
-        let envelope = ServerEnvelope::new(
-            "instance",
-            None,
-            None,
-            ServerMessage::Error(ProtocolError::new(
-                "execution_failed",
-                "x".repeat(MAX_FRAME / 2),
-            )),
-        );
+        let envelope = frame("x".repeat(MAX_FRAME / 2));
         assert!(out.send(envelope.clone()));
         assert!(!out.send(envelope));
         assert!(*closed.borrow());

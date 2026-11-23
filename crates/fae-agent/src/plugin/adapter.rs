@@ -16,10 +16,16 @@ impl PluginAdapter {
     pub fn new(manager: Arc<PluginManager>) -> Self {
         Self { manager }
     }
-    fn snapshot(&self, ctx: &Ctx) -> Arc<PluginSnapshot> {
-        ctx.plugin_run()
-            .map(|r| r.snapshot.clone())
-            .unwrap_or_else(|| self.manager.snapshot())
+    fn snapshot(&self, ctx: &Ctx) -> anyhow::Result<Arc<PluginSnapshot>> {
+        if let Some(binding) = ctx.plugin_execution() {
+            return Ok(binding.snapshot.clone());
+        }
+        anyhow::ensure!(
+            ctx.scope().ok().is_none_or(|s| s.execution.is_none()),
+            "execution plugin snapshot is not bound"
+        );
+        // Definition inspection outside an Execution uses the current manager snapshot.
+        Ok(self.manager.snapshot())
     }
     async fn invoke(
         &self,
@@ -30,12 +36,12 @@ impl PluginAdapter {
         metadata: Value,
         mut value: PluginValue,
     ) -> anyhow::Result<PluginValue> {
-        let run = ctx.plugin_run();
+        let run = ctx.plugin_execution();
         let root = run
             .as_ref()
             .and_then(|r| r.root.upgrade())
             .unwrap_or_else(|| ctx.clone());
-        for node in self.snapshot(ctx).matching(point, location) {
+        for node in self.snapshot(ctx)?.matching(point, location) {
             value = node
                 .executor
                 .invoke(ctx, &root, point, method, location, metadata.clone(), value)
@@ -69,13 +75,13 @@ impl PluginAdapter {
         ctx: &Ctx,
         model: &str,
     ) -> anyhow::Result<Option<(Arc<manager::PluginNode>, Vec<String>)>> {
-        let run = ctx.plugin_run();
+        let run = ctx.plugin_execution();
         let root = run
             .as_ref()
             .and_then(|r| r.root.upgrade())
             .unwrap_or_else(|| ctx.clone());
         let mut selected = None;
-        for node in self.snapshot(ctx).matching("ModelHook", None) {
+        for node in self.snapshot(ctx)?.matching("ModelHook", None) {
             let PluginValue::Json(value) = node
                 .executor
                 .invoke(
@@ -107,7 +113,7 @@ impl PluginAdapter {
         let Some((node, members)) = self.select_model(ctx, &request.model).await? else {
             return Ok(None);
         };
-        let run = ctx.plugin_run();
+        let run = ctx.plugin_execution();
         let root = run
             .as_ref()
             .and_then(|r| r.root.upgrade())
@@ -143,6 +149,7 @@ impl PluginAdapter {
         let channel = name.split_once("__").map(|(c, _)| c).unwrap_or(name);
         if self
             .snapshot(ctx)
+            .ok()?
             .matching("ToolsHook", Some(channel))
             .is_empty()
         {

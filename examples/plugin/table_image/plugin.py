@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
-from fae_plugin import ChainToolsHook, Context, HookNext, ToolRequest, ToolResponse
+from fae_plugin import ChainToolsHook, Context, HookNext, TextContent, ToolRequest, ToolResponse
 
 
 def render_table(arguments: dict[str, Any], workspace: str | None) -> dict[str, Any]:
@@ -102,8 +102,10 @@ class TableImageTool(ChainToolsHook):
         arguments = request.arguments_json()
         if not isinstance(arguments, dict):
             raise ValueError("Tool arguments must be an object")
-        scope = await ctx.scope()
-        result = await asyncio.to_thread(render_table, arguments, scope.workspace)
+        data = await ctx.export_context()
+        execution = data.latest_execution_view
+        workspace = execution.effective.workspace if execution else data.session_config.workspace.root
+        result = await asyncio.to_thread(render_table, arguments, workspace)
         if ctx.session is not None:
-            await ctx.session.send(f"[table-image-plugin] 已生成表格图片：{result['path']}")
+            await ctx.session.send([TextContent(f"[table-image-plugin] 已生成表格图片：{result['path']}")])
         return ToolResponse.completed(json.dumps(result, ensure_ascii=False))

@@ -29,6 +29,7 @@ iana-time-zone = "0.1"
 semver = "1"
 fs2 = "0.4"
 futures-util = "0.3"
+sha2 = "0.10"
 
 [features]
 default = []

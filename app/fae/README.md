@@ -58,7 +58,10 @@ Before upgrading from the old root-level lock/token layout, stop the service
 using the old executable, then start it with the new executable. Lock files
 must not be moved while the service is running.
 
-Each logical session has its own connection and frozen Agent configuration.
+Logical sessions are keyed by the trusted user and session ID. Multiple
+connections may subscribe to one session. Each Execution loads and fixes its
+Agent/Workflow definitions, fingerprints and workspace; later executions reload
+the definitions.
 Its workspace can be changed when opening or resuming it: an explicit caller
 workspace overrides the saved session workspace. Omitting the protocol `workspace`
 field reuses that saved directory, including after a service restart. New sessions
@@ -68,7 +71,7 @@ value of `--workspace`. Changes apply to subsequent rounds; a running round
 retains its original workspace. Conversation history stays with the session.
 Session workspace defaults are saved in `session/<agent>/<user>/<session>.json`,
 alongside the corresponding `<session>.jsonl` conversation history.
-An active session cannot be opened by a second client. Clients can resume
+An active session can be observed by multiple clients. Clients can resume
 within the same service instance using ordered event replay (up to 4096
 events or 16 MiB). A replay gap is reported explicitly. A service restart
 does not rerun interrupted work, and unacknowledged writes are never
@@ -76,8 +79,19 @@ automatically repeated. The service allows 32 retained sessions and 8 active
 rounds; disconnected idle sessions expire after 30 minutes.
 
 The implementation is split into `src/app` (CLI and transport), `src/server`
-(execution and lifecycle), `src/protocol` (shared wire types) and `src/tui`
+(host operations and subscriptions), `src/protocol` (transport settings) and `src/tui`
 (terminal presentation).
+
+Shared wire types live in `fae-agent::protocol`; only v4 is supported.
+Create/get/subscribe do not start work, including Workflows. Start creates a new
+Execution and returns a conflict while busy. Steer acknowledges acceptance;
+execution/get exposes Queued/Applied/NotApplied input records. Stop checks the
+expected Execution ID, and finished follows cleanup of all Invocations and
+plugin calls. The Engine coordinator owns ContextData and reusable results.
+Idle configuration changes, conversation clearing and archiving use standard
+Session operations; archived sessions remain readable. Workspace paths use the
+existing JSON files, and history remains in the existing target/user/session
+partition. Update the service, clients and Python SDK together (plugin API 0.2.0).
 
 ## Feishu gateway
 
@@ -182,9 +196,10 @@ final answer has been delivered, even if the gateway restarts after confirmation
 New threads are created with a `Typing` emoji reply without an extra reaction.
 Once all final output has
 been delivered, the gateway withdraws that reply and removes the reaction.
-Only the final answer is delivered after the complete Agent round, including
-history saving. Intermediate model messages, tool execution, reasoning and
-child-Agent internals are hidden. Long final replies are paginated on Unicode
+Model output is grouped by Invocation and response; plugin Content is delivered
+as independent notifications and retained when execution succeeds or is cancelled.
+Final results follow the complete Execution, including history saving and cleanup.
+Long final replies are paginated on Unicode
 boundaries. Completed cards show only the answer without a generating status.
 Final cards are created with their full answer and summary, without a placeholder
 or follow-up streaming updates. Failures discard unsent intermediate answers.
@@ -192,8 +207,9 @@ Failures are sent with `ERROR`; CardKit failures fall back to
 text with an explicit degradation notice. Outbound failures remain in the
 receipt store and appear in status.
 
-History partitions use a stable application/tenant/user/chat hash.
-The same user's private chat and different groups have separate histories;
+New history partitions use the real thread ID as session ID and sender open_id
+as user ID. Legacy chat hashes are retained only for recovery.
+The same user's distinct threads have separate histories;
 user memory and the configured workspace remain shared. Todo routes are allowed:
 todo state is isolated by plan ID under
 `<home>/session/<agent>/<user>/todo/<plan_id>.json`, and mutations require
@@ -208,9 +224,9 @@ Completed receipts are kept for seven days by default. The server persists
 external request acceptance separately under `<home>/requests`; these records
 are retained conservatively to prevent accidental repeated execution.
 Reconnect uses the original service instance, stream and sequence.
-Resuming an existing actor keeps its frozen Agent configuration even if the
-source files have changed or disappeared. Available replay is consumed through
-the round's `Finished` event before the outcome is recorded.
+Resuming an active Execution keeps its fixed definitions. The next Execution
+reloads them and can fail if a source has disappeared. Available replay is consumed
+through the Execution's finished event before the outcome is recorded.
 An uncertain submission or a restarted service is reported without blindly
 rerunning tools. Replay gaps use the final result to replace the buffered answer.
 There is no transaction guarantee for external tool side effects.
@@ -221,8 +237,9 @@ deadline; records that remain undelivered are retried on the next start.
 The gateway has a private loopback control socket and instance handshake.
 Its start/stop lock is `lark/lark.lock`; `lark/gateway.lock` protects the running
 process.
-Its service credential (`lark/lark.token`) only opens `/v3/lark/session` and cannot
-initialize agents, clean user data or stop the service. Wire protocol v3
+Its service credential (`lark/lark.token`) only opens `/v4/lark/session` and cannot
+initialize agents or stop the service. Session operations are constrained by the
+authenticated Lark binding. Wire protocol v4
 requires restarting previously running services after upgrading.
 
 For live acceptance, test private chat and @bot group chat, a response containing
@@ -463,12 +480,13 @@ files from that workspace and appends them to the system prompt:
 cargo run -p fae -- --workspace ~/projects/example "review this project"
 ```
 
-Use `--session-id` to select the conversation history for either interactive
-or direct mode:
+Omit `--session-id` to create a new Session with a host-generated ID. Use the
+ID shown by the TUI with `--session-id` to select an existing Session in
+interactive or direct mode; an unknown ID returns 404:
 
 ```bash
 cargo run -p fae -- agent --agent-id reviewer \
-  --session-id issue-42 \
+  --session-id "<existing-session-id>" \
   "review this workspace"
 ```
 

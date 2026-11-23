@@ -46,7 +46,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
         pid: std::process::id(),
         address,
         port,
-        protocol_version: VERSION,
+        protocol_version: fae_agent::protocol::VERSION,
         app_version: env!("CARGO_PKG_VERSION").into(),
         started_at: chrono::Utc::now().to_rfc3339(),
         executable: std::env::current_exe()?,
@@ -87,78 +87,70 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                 let lark_token = lark_token.clone();
                 let shutdown = shutdown.clone();
                 connections.spawn(async move {
-                    let Ok((ws, route)) = connection::upgrade(stream, token, lark_token).await else { return };
-                    if route == "/v3/lark/session" && !peer.ip().is_loopback() { return; }
+                    let Ok((ws, route, principal)) = connection::upgrade(stream, token, lark_token).await else { return };
+                    if route == "/v4/lark/session" && !peer.ip().is_loopback() { return; }
                     let (out, mut input, transport) = connection::transport(ws);
                     let _guard = connection::ConnectionGuard(out.clone());
-                    let mut binding = None;
+                    let mut attached = std::collections::HashMap::new();
                     while let Some(text) = input.recv().await {
-                        if route == "/v1/control" {
+                        if route == "/v4/control" {
                             control::handle(&text, &out, &config, &registry, &shutdown).await;
                             continue;
                         }
-                        let request: ClientEnvelope = match serde_json::from_str(&text) {
+                        use fae_agent::protocol::{Message, RequestPayload, ResponseMessage, ServerFrame};
+                        let request: Message = match serde_json::from_str(&text) {
                             Ok(request) => request,
-                            Err(error) => {
-                                out.send(ServerEnvelope::new(&config.instance_id, None, None,
-                                    ServerMessage::Error(ProtocolError::new("invalid_message", error))));
-                                break;
-                            }
+                            // Malformed/other-version frames have no trusted correlation envelope.
+                            Err(_) => { out.close(); break; }
                         };
-                        if request.version != VERSION {
-                            out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
-                                ServerMessage::Error(ProtocolError::new("unsupported_version", "Protocol version must be 3"))));
-                            break;
+                        let Ok(payload) = request.as_request() else { out.close(); break; };
+                        if !payload.path().is_session() {
+                            let response = ResponseMessage::error(&request, fae_agent::protocol::ResponseCode::BadRequest, "Expected session operation").unwrap();
+                            out.send(ServerFrame::Response(response));
+                            continue;
                         }
-                        if let Some((_, _, tx)) = &binding {
-                            if route == "/v3/lark/session" && !matches!(request.body,
-                                ClientMessage::ExternalInput { .. } | ClientMessage::Acceptance { .. } |
-                                ClientMessage::Clean | ClientMessage::Status | ClientMessage::Cancel { .. } | ClientMessage::Close { .. }) {
-                                out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
-                                    ServerMessage::Error(ProtocolError::new("forbidden", "Lark route does not allow this operation"))));
-                                continue;
-                            }
-                            let tx: &tokio::sync::mpsc::Sender<session::Command> = tx;
-                            let close = matches!(request.body, ClientMessage::Close { .. });
-                            if tx.send(session::Command::Request(request)).await.is_err() { break; }
-                            if close { break; }
-                        } else if let ClientMessage::Open(open) = request.body {
-                            let validation = if route == "/v3/lark/session" {
+                        let result = if let RequestPayload::SessionCreate(create) = payload {
+                            let validation = if let Some(principal) = &principal {
                                 match crate::lark::config::Config::load(&registry.home) {
-                                    Ok(config) => {
-                                        // Registry::open verifies the complete immutable binding
-                                        // and rejects expired resumes without creating an actor.
-                                        // An existing actor already passed the route check.
-                                        match crate::lark::identity::validate(&config, &open) {
-                                            Ok(()) if open.resume.is_some() => Ok(()),
-                                            Ok(()) => config.check_agent(&registry.home).await,
-                                            Err(error) => Err(error),
-                                        }
+                                    Ok(config) => match crate::lark::identity::validate(&config, principal, &create.target, false)
+                                        .and_then(|_| {
+                                            anyhow::ensure!(create.channels.iter().all(|channel| matches!(channel,
+                                                fae_agent::ChannelBinding::Lark { app_id, chat_id, thread_id }
+                                                if app_id == &principal.app_id && chat_id == &principal.chat_id
+                                                    && thread_id.as_deref() == Some(principal.thread_id.as_str()))),
+                                                "Channel binding does not match authenticated principal");
+                                            Ok(())
+                                        }) {
+                                        Ok(()) => config.check_agent(&registry.home).await,
+                                        Err(error) => Err(error),
                                     },
                                     Err(error) => Err(error),
                                 }
-                            } else {
-                                if open.binding.is_some() {
-                                    Err(anyhow::anyhow!("Explicit binding requires the Lark route"))
-                                } else { Ok(()) }
-                            };
-                            if let Err(error) = validation {
-                                out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
-                                    ServerMessage::Error(ProtocolError::new("invalid_binding", error))));
-                                continue;
-                            }
-                            match registry.open(open, out.clone(), request.request_id.clone()).await {
-                                Ok(bound) => binding = Some(bound),
-                                Err(error) => {
-                                    out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id), ServerMessage::Error(error)));
-                                }
+                            } else if create.channels.iter().any(|c| matches!(c, fae_agent::ChannelBinding::Lark { .. })) {
+                                Err(anyhow::anyhow!("Lark channel requires gateway authentication"))
+                            } else { Ok(()) };
+                            match validation {
+                                Ok(()) => registry.create(request.clone(), principal.clone(), out.clone()).await,
+                                Err(error) => Err(ProtocolError::new("forbidden", error)),
                             }
                         } else {
-                            out.send(ServerEnvelope::new(&config.instance_id, None, Some(&request.request_id),
-                                ServerMessage::Error(ProtocolError::new("invalid_message", "First message must be open"))));
+                            let sid = request.session_id.as_ref().unwrap().as_str();
+                            match registry.lookup(sid, principal.as_ref()) {
+                                Ok((key, tx)) => {
+                                    let sent = tx.send(session::Command::Request { request: request.clone(), out: out.clone() }).await;
+                                    sent.map(|_| (key, tx)).map_err(|e| ProtocolError::new("session_not_found", e))
+                                }
+                                Err(error) => Err(error),
+                            }
+                        };
+                        match result {
+                            Ok((key, tx)) => { attached.insert(key, tx); }
+                            Err(error) => {
+                                out.send(ServerFrame::Response(ResponseMessage::error(&request, session::response_code(&error), error.to_string()).unwrap()));
+                            }
                         }
                     }
-                    if let Some((_, _, tx)) = binding { let _ = tx.send(session::Command::Detach { lease: out.id.clone() }).await; }
+                    for (_, tx) in attached { let _ = tx.send(session::Command::Detach { lease: out.id.clone() }).await; }
                     drop(out);
                     let _ = transport.await;
                 });

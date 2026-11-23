@@ -78,6 +78,7 @@ impl ToolCompletion {
                 .ctx
                 .append_stack(crate::ContextStackDraft::new(self.meta.clone(), phase));
         }
+        let _ = self.ctx.invocation_finished();
     }
 }
 impl Drop for ToolCompletion {

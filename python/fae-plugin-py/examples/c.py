@@ -5,6 +5,7 @@ def plugin_config() -> dict:
     return {
         "registration_mode": "chain",
         "plugin_version": "1.0.0",
+        "fae_plugin_api_version": "0.2.0",
         "description": "Python 链的终端处理",
         "mounts": [{"point": "SingleAgentHook", "implementation": "C"}],
     }

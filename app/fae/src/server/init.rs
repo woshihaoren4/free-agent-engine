@@ -11,7 +11,7 @@ use fae_agent::{
 use fae_engine::DEFAULT_TOOL_NAMES;
 use tokio::io::AsyncWriteExt;
 
-use crate::protocol::InitArgsDto as InitArgs;
+use fae_agent::protocol::InitializeRequest as InitArgs;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InitResult {
@@ -125,7 +125,10 @@ async fn write_new(path: &Path, content: &[u8]) -> anyhow::Result<()> {
         .with_context(|| format!("create `{}`", path.display()))?;
     file.write_all(content)
         .await
-        .with_context(|| format!("write `{}`", path.display()))
+        .with_context(|| format!("write `{}`", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("flush `{}`", path.display()))
 }
 
 fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {

@@ -91,10 +91,12 @@ struct WorkspaceHook {
 impl SingleAgentHook for WorkspaceHook {
     async fn on_prompt(
         &self,
-        _ctx: &SingleAgentHookContext<'_>,
+        ctx: &SingleAgentHookContext<'_>,
         prompt: String,
     ) -> anyhow::Result<String> {
-        append_workspace_prompt(&self.workspace, prompt).await
+        let scope = ctx.ctx.scope()?;
+        let workspace = scope.workspace.as_deref().unwrap_or(&self.workspace);
+        append_workspace_prompt(workspace, prompt).await
     }
 }
 

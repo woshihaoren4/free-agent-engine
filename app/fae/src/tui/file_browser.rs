@@ -154,7 +154,9 @@ mod tests {
         }
     }
     impl Drop for TestDir {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
     #[test]
     fn browser_lists_directories_and_images_only() {

@@ -6,8 +6,8 @@ use std::{
 };
 
 use fae_agent::{
-    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, Session, SessionEventData,
-    SessionInput, SessionOutput, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
+    Event, EventType, FAEWorkflowMetadataLoader, RuntimeSelectExec, SessionEventData, SessionIo,
+    SessionOutput, TaskError, TaskReq, TaskResp, TaskType, WorkflowActionRequest,
     WorkflowActionResponse, WorkflowEnv,
 };
 use fae_engine::EngineBuilder;
@@ -155,7 +155,7 @@ async fn build_engine(loader: FAEWorkflowMetadataLoader) -> fae_engine::Engine {
     builder.build().await
 }
 
-async fn print_session(session: &impl Session<SessionInput, SessionOutput>) -> anyhow::Result<()> {
+async fn print_session(session: &impl SessionIo<SessionOutput>) -> anyhow::Result<()> {
     let mut streaming = None;
     println!("\n=== WORKFLOW SESSION (LIVE) ===");
 
@@ -198,7 +198,7 @@ fn print_session_event(
 
         let content = match &data {
             SessionEventData::ModelReasoning { content }
-            | SessionEventData::ModelOutput { content } => content,
+            | SessionEventData::ModelOutput { content, .. } => content,
             _ => unreachable!(),
         };
         print!("{content}");

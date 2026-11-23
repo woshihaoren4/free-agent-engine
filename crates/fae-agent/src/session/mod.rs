@@ -6,57 +6,23 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
 
+mod data;
+mod execution;
+mod handle;
+mod id;
+
+pub use data::*;
+pub use execution::*;
+pub use handle::*;
+pub use id::*;
+
+#[cfg(test)]
+mod data_tests;
+
+/// Internal Plan input/output transport, separate from serializable Session data.
 #[async_trait::async_trait]
-pub trait Session<In, Out>: Debug + Send + Sync + 'static {
-    async fn call(&self, input: In) -> anyhow::Result<()>;
+pub trait SessionIo<Out>: Debug + Send + Sync + 'static {
     async fn answer(&self) -> anyhow::Result<Option<Out>>;
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SessionInputData {
-    /// User-provided text.
-    pub text: String,
-    /// Image paths, URLs, or identifiers associated with the input.
-    pub images: Option<Vec<String>>,
-    /// File paths or identifiers associated with the input.
-    pub files: Option<Vec<String>>,
-    /// Opaque binary input for runtimes that support it.
-    pub data: Option<Vec<u8>>,
-}
-
-impl SessionInputData {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            ..Self::default()
-        }
-    }
-
-    pub fn with_images(mut self, images: Vec<String>) -> Self {
-        self.images = (!images.is_empty()).then_some(images);
-        self
-    }
-}
-
-impl From<String> for SessionInputData {
-    fn from(text: String) -> Self {
-        Self::text(text)
-    }
-}
-
-impl From<&str> for SessionInputData {
-    fn from(text: &str) -> Self {
-        Self::text(text)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionInput {
-    /// Stop the active conversation and start a new one.
-    NewChat(SessionInputData),
-    /// Add information to the active conversation without ending it.
-    Supplement(SessionInputData),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -969,22 +935,6 @@ mod tests {
                 event_type: "progress".to_string(),
                 content: json!({"percent": 50}),
             }
-        );
-    }
-
-    #[test]
-    fn session_input_round_trips_all_payload_fields() {
-        let input = SessionInput::Supplement(SessionInputData {
-            text: "inspect these inputs".to_string(),
-            images: Some(vec!["image.png".to_string()]),
-            files: Some(vec!["notes.txt".to_string()]),
-            data: Some(vec![1, 2, 3]),
-        });
-
-        let value = serde_json::to_value(&input).unwrap();
-        assert_eq!(
-            serde_json::from_value::<SessionInput>(value).unwrap(),
-            input
         );
     }
 

@@ -3,6 +3,7 @@ use fae_agent::{
     WorkflowActionRequest, WorkflowActionResponse,
 };
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 use wd_tools::channel::{Channel, Receiver, Sender};
 const ID: &str = "workflow.python";
 
@@ -33,10 +34,7 @@ impl PythonActionRuntime {
             .get("arguments")
             .cloned()
             .unwrap_or(Value::Null);
-        let output = tokio::select! {
-            output = execute_python(code, &arguments, &task.ctx) => output?,
-            reason = task.ctx.cancellation() => return Err(anyhow::anyhow!("{reason}").into()),
-        };
+        let output = execute_python(code, &arguments, &task.ctx).await?;
         Ok(TaskResp {
             ctx: task.ctx,
             meta: task.meta,
@@ -96,17 +94,41 @@ async fn execute_python(
         serde_json::to_string(&serde_json::to_string(arguments)?)?
     );
     let mut command = tokio::process::Command::new("python3");
-    command.arg("-c").arg(program).kill_on_drop(true);
+    command
+        .arg("-c")
+        .arg(program)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if let Ok(scope) = ctx.scope() {
         if let Some(workspace) = &scope.workspace {
             command.current_dir(workspace);
         }
     }
-    let output = command.output().await?;
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let status = tokio::select! {
+        result = async {
+            let (status, out, err) = tokio::join!(
+                child.wait(), stdout.read_to_end(&mut output), stderr.read_to_end(&mut errors),
+            );
+            out?;
+            err?;
+            status
+        } => result?,
+        reason = ctx.cancellation() => {
+            child.start_kill()?;
+            child.wait().await?;
+            anyhow::bail!("{reason}");
+        }
+    };
     anyhow::ensure!(
-        output.status.success(),
+        status.success(),
         "python action failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&errors)
     );
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(serde_json::from_slice(&output)?)
 }

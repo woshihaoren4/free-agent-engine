@@ -195,7 +195,12 @@ async fn stop_locked(home: &Path) -> anyhow::Result<bool> {
         }
         return Ok(false);
     };
-    client::control(home, &config, ControlMessage::Shutdown).await?;
+    client::control(
+        home,
+        &config,
+        fae_agent::protocol::RequestPayload::EngineShutdown(fae_agent::protocol::Empty {}),
+    )
+    .await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(_probe) = FileLock::try_acquire(&home.join("server/server.lock"))? {

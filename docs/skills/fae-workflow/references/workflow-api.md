@@ -39,6 +39,13 @@ fae workflow <workflow-id> --interactive --input '{"key":"value"}'
 - `--interactive` 默认关闭；开启后进入 TUI 并实时展示执行事件。
 - 配置在执行前反序列化并完成整图校验。
 
+每次 CLI 调用创建新 Session，再通过标准 execution/start 启动图。
+公共 Session 创建、查询和订阅本身不执行 Workflow；start 忙时返回冲突。
+主服务与客户端只支持公共协议 v4，应一起升级。
+Execution 准备时固定 Workflow、引用 Agent、内容指纹、工作区与插件快照；
+当前图的子流程和 Runtime 继续使用该快照，下一次执行重新加载。
+全局 `--workspace` 指定执行目录，默认传当前目录；它不构成文件系统沙箱。
+
 ## 2. 顶层结构
 
 ```json
@@ -251,6 +258,8 @@ join，配置中优先使用后者。
 
 子 workflow 位于同一个 `workflows/` 目录，父节点输出是子 workflow 的最终 JSON。可通过父子
 workflow 隔离 loop 和并行 DAG。
+子 workflow 共享父 Session、Execution 和工作区，使用独立 Invocation；
+它不会另开公共执行或刷新本次固定的依赖定义。
 
 ### Single Agent
 
@@ -282,6 +291,8 @@ workflow 隔离 loop 和并行 DAG。
 ```
 
 Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进入 workflow 的同一个 session。
+子 Agent 的用户与 Session ID 由宿主继承，不能用其 config 更换身份；
+模型及插件输出按 Invocation 与响应分支区分。
 
 ### Python
 
@@ -306,6 +317,10 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
 - `task_type` 可省略，默认是 `workflow.python`。
 
 ### Session
+
+此 action 操作既有 JSONL 历史存储分区，`agent_id/user_id/session_id` 是明确的存储定位字段。
+它与公共 Session 控制协议不同：Query/Add/Delete 不会创建逻辑会话、启动执行或发送 steer/stop；
+Delete 仅删除指定历史文件，不等同于 TUI 的会话清理或归档。
 
 查询会话历史：
 

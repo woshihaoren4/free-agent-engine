@@ -7,7 +7,7 @@ pub mod adapter;
 pub mod codec;
 pub mod config;
 pub mod manager;
-pub use manager::{PluginManager, PluginRun, PluginSnapshot};
+pub use manager::{PluginExecutionBinding, PluginManager, PluginSnapshot};
 
 pub enum PluginValue {
     Json(serde_json::Value),
@@ -32,7 +32,7 @@ pub trait PluginExecutor: std::fmt::Debug + Send + Sync {
     ) -> anyhow::Result<PluginValue>;
 }
 
-pub const API_VERSION: &str = "0.1.0";
+pub const API_VERSION: &str = "0.2.0";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -260,7 +260,7 @@ mod tests {
     fn rejects_invalid_entries_versions_and_overlap() {
         for (field, value) in [
             ("plugin_version", "bad"),
-            ("fae_plugin_api_version", "0.2.0"),
+            ("fae_plugin_api_version", "0.1.0"),
             ("description", ""),
         ] {
             let mut invalid = config();

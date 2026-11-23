@@ -4,7 +4,6 @@ use super::*;
 pub struct SingleAgentPlanBuilder {
     home_dir: PathBuf,
     hooks: Vec<Arc<dyn SingleAgentHookBuilder>>,
-    frozen_sources: HashMap<String, (SingleAgentConfig, String)>,
     timer_workspace: Option<PathBuf>,
 }
 
@@ -32,7 +31,6 @@ impl SingleAgentPlanBuilder {
         Self {
             home_dir: home_dir.into(),
             hooks: Vec::new(),
-            frozen_sources: HashMap::new(),
             timer_workspace: None,
         }
     }
@@ -74,9 +72,6 @@ impl SingleAgentPlanBuilder {
         &self,
         source: &SingleAgentSource,
     ) -> anyhow::Result<(SingleAgentConfig, String)> {
-        if let Some(snapshot) = self.frozen_sources.get(&serde_json::to_string(source)?) {
-            return Ok(snapshot.clone());
-        }
         let (config_path, prompt_path, expected_agent_id) = self.source_paths(source)?;
 
         let config_bytes = tokio::fs::read(&config_path).await.map_err(|error| {
@@ -111,12 +106,25 @@ impl SingleAgentPlanBuilder {
         Ok((config, prompt))
     }
 
-    /// Fix a source's configuration for the lifetime of a session engine.
-    pub async fn freeze_source(&mut self, source: &SingleAgentSource) -> anyhow::Result<()> {
-        let snapshot = self.load_config(source).await?;
-        self.frozen_sources
-            .insert(serde_json::to_string(source)?, snapshot);
-        Ok(())
+    async fn load_execution_config(
+        &self,
+        ctx: &Ctx,
+        source: &SingleAgentSource,
+    ) -> anyhow::Result<(SingleAgentConfig, String)> {
+        let agent_id = match source {
+            SingleAgentSource::AgentId(id) => id.clone(),
+            SingleAgentSource::Paths { .. } => ctx.scope()?.agent_id.clone().ok_or_else(|| {
+                anyhow::anyhow!("file definition requires a resolved Agent identity")
+            })?,
+        };
+        let reference = serde_json::to_string(source)?;
+        ctx.definition(
+            format!("agent:{reference}"),
+            crate::PlanTarget::Agent { agent_id },
+            Some(reference),
+            self.load_config(source),
+        )
+        .await
     }
 
     fn source_paths<'a>(
@@ -148,6 +156,26 @@ impl SingleAgentPlanBuilder {
 
 #[async_trait::async_trait]
 impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
+    async fn prepare_child_spec(
+        &self,
+        ctx: &Ctx,
+        env: &SingleAgentEnv,
+    ) -> anyhow::Result<crate::ContextChildSpec> {
+        if ctx
+            .scope()
+            .ok()
+            .is_some_and(|scope| scope.execution.is_some())
+        {
+            let (config, _) = self.load_execution_config(ctx, &env.source).await?;
+            return Ok(crate::ContextChildSpec {
+                execution: true,
+                agent_id: Some(config.agent.name),
+                turn_id: Some(env.session.inner.next_turn_id.load(Ordering::Relaxed)),
+                ..Default::default()
+            });
+        }
+        self.child_spec(env).await
+    }
     async fn child_spec(&self, env: &SingleAgentEnv) -> anyhow::Result<crate::ContextChildSpec> {
         let (config, _) = self.load_config(&env.source).await?;
         Ok(crate::ContextChildSpec {
@@ -179,7 +207,11 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         );
         let mode = SingleAgentMode::parse(env.mode.as_deref())?;
         let (config_path, prompt_path, _) = self.source_paths(&env.source)?;
-        let (mut config, base_prompt) = self.load_config(&env.source).await?;
+        let (mut config, base_prompt) = if ctx.scope().ok().is_some_and(|s| s.execution.is_some()) {
+            self.load_execution_config(&ctx, &env.source).await?
+        } else {
+            self.load_config(&env.source).await?
+        };
         config.agent.user_id = env.user_id.clone();
         anyhow::ensure!(
             !env.ancestor_agents.contains(&config.agent.name),
@@ -202,14 +234,23 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
                 scope.agent_id.as_deref() == Some(&config.agent.name),
                 "agent ownership does not match context"
             );
-            anyhow::ensure!(
-                scope
-                    .session
-                    .as_ref()
-                    .is_some_and(|s| s.session_id == config.agent.session_id
-                        && s.session.same_session(&env.session)),
-                "agent session does not match context"
-            );
+            if let Some(execution) = &scope.execution {
+                let key = execution.session.key();
+                anyhow::ensure!(
+                    key.user_id.as_str() == env.user_id
+                        && key.session_id.as_str() == config.agent.session_id,
+                    "agent session does not match execution"
+                );
+            } else {
+                anyhow::ensure!(
+                    scope
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.session_id == config.agent.session_id
+                            && s.session.same_session(&env.session)),
+                    "agent session does not match context"
+                );
+            }
         } else {
             let mut scope = crate::ContextScope::root(env.user_id.clone());
             scope.agent_id = Some(config.agent.name.clone());
@@ -237,7 +278,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
         env.session.bind_context(ctx.clone());
         let skills = resolve_skills(&rt, &config.skills).await?;
         let sub_agents = self
-            .resolve_sub_agents(&config.agent.name, &config.sub_agents)
+            .resolve_sub_agents(&ctx, &config.agent.name, &config.sub_agents)
             .await?;
         let workflows = resolve_workflows(&rt, &config.workflows).await?;
         let configured_tools = config
@@ -337,13 +378,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
             ancestor_agents,
             hook,
         };
-        let binding = SingleAgentBinding {
-            rt: rt.clone(),
-            engine: ctx.get_engine(),
-            template: template.clone(),
-            mode,
-        };
-        let turn_id = env.session.bind(binding).await?;
+        let turn_id = env.session.activate_turn()?;
 
         Ok(build_single_agent_plan(
             ctx,
@@ -360,6 +395,7 @@ impl PlanBuilderWithEnv<SingleAgentEnv> for SingleAgentPlanBuilder {
 impl SingleAgentPlanBuilder {
     pub(super) async fn resolve_sub_agents(
         &self,
+        ctx: &Ctx,
         parent_agent_name: &str,
         agent_ids: &[String],
     ) -> anyhow::Result<Vec<ResolvedSubAgent>> {
@@ -376,9 +412,12 @@ impl SingleAgentPlanBuilder {
                 "sub-agent `{agent_id}` is configured more than once"
             );
             let source = SingleAgentSource::AgentId(agent_id.clone());
-            let (config, _) = self.load_config(&source).await.map_err(|error| {
-                anyhow::anyhow!("load sub-agent `{agent_id}` configuration: {error}")
-            })?;
+            let (config, _) = self
+                .load_execution_config(ctx, &source)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("load sub-agent `{agent_id}` configuration: {error}")
+                })?;
             anyhow::ensure!(
                 !config.agent.desc.trim().is_empty(),
                 "sub-agent `{agent_id}` description cannot be empty"

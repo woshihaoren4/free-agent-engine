@@ -1,393 +1,558 @@
-use fae::{
-    app::client::{self, Client},
-    protocol::*,
+include!("support/service_fixture.rs");
+use fae_agent::{
+    ExecutionId, ExecutionOutcome, ExecutionStatus, PlanTarget, RequestId, SessionId,
+    protocol::{
+        AcceptanceCertainty, ConfigUpdateRequest, ContentBlock, ConversationListRequest, Empty,
+        EventPayload, ExecutionGetRequest, ExecutionStartRequest, ExecutionSteerRequest,
+        ExecutionStopRequest, Message as ProtocolMessage, MessagePayload, RequestPayload,
+        ResponseCode, ResponseMessage, ResponsePayload, ServerFrame, SessionCreateRequest,
+        SubscribeRequest,
+    },
 };
-use fae_agent::{SessionInput, SessionInputData, SingleAgentSource};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
-use std::{
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU16, Ordering},
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::mpsc,
-};
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
-struct Service {
-    home: PathBuf,
-    child: Child,
-    config: ServerConfig,
-}
-impl Service {
-    async fn start(model_base: Option<&str>) -> Self {
-        for attempt in 0..5 {
-            let home =
-                std::env::temp_dir().join(format!("fae-service-test-{}", wd_tools::uuid::v4()));
-            std::fs::create_dir_all(&home).unwrap();
-            let home = home.canonicalize().unwrap();
-            // Releasing an OS-selected ephemeral port lets another test's outgoing
-            // connection claim it before the daemon binds. Keep service fixtures
-            // outside the ephemeral range and give each fixture a distinct port.
-            static NEXT_PORT: AtomicU16 = AtomicU16::new(20_000);
-            let listener = loop {
-                let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
-                assert!(port < 30_000, "service fixture port range exhausted");
-                match TcpListener::bind(("127.0.0.1", port)).await {
-                    Ok(listener) => break listener,
-                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
-                    Err(error) => panic!("reserve service fixture port: {error}"),
-                }
-            };
-            let port = listener.local_addr().unwrap().port();
-            drop(listener);
-            let mut command = Command::new(env!("CARGO_BIN_EXE_fae"));
-            command
-                .arg("--fae-home")
-                .arg(&home)
-                .args(["server", "start", "--foreground", "--port"])
-                .arg(port.to_string())
-                .stdout(Stdio::null())
-                .stderr(Stdio::from(
-                    std::fs::File::create(home.join("startup.log")).unwrap(),
-                ));
-            if let Some(base) = model_base {
-                command
-                    .env("OPENAI_BASE_URL", base)
-                    .env("OPENAI_API_KEY", "test-key");
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                // A daemon may be launched by a host that blocks process signals.
-                // Exercise restoration before Tokio workers are constructed.
-                unsafe {
-                    command.pre_exec(|| {
-                        let mut signals = std::mem::zeroed();
-                        libc::sigemptyset(&mut signals);
-                        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGCHLD] {
-                            libc::sigaddset(&mut signals, signal);
-                        }
-                        let result =
-                            libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut());
-                        if result != 0 {
-                            return Err(std::io::Error::from_raw_os_error(result));
-                        }
-                        Ok(())
-                    });
-                }
-            }
-            let child = command.spawn().unwrap();
-            let placeholder = ServerConfig {
-                instance_id: "".into(),
-                pid: child.id(),
-                address: "127.0.0.1".parse().unwrap(),
-                port,
-                protocol_version: VERSION,
-                app_version: "".into(),
-                started_at: "".into(),
-                executable: "fae".into(),
-            };
-            let mut service = Self {
-                home,
-                child,
-                config: placeholder,
-            };
-            let ready = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if service.child.try_wait().unwrap().is_some() {
-                        return false;
-                    }
-                    if let Ok(config) = fae::server::lifecycle::read_config(&service.home) {
-                        if client::hello(&service.home, &config).await.is_ok() {
-                            service.config = config;
-                            return true;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-            .await
-            .unwrap();
-            if ready {
-                return service;
-            }
-            let diagnostic = std::fs::read_to_string(service.home.join("startup.log")).unwrap();
-            // Concurrent fork/exec can briefly inherit a fixture's reservation
-            // socket. Retry only this bind race, never execution or protocol errors.
-            assert!(
-                attempt < 4 && diagnostic.contains("address_in_use"),
-                "service exited before readiness: {diagnostic}"
-            );
-        }
-        unreachable!()
+fn create(service: &Service, target: PlanTarget) -> SessionCreateRequest {
+    SessionCreateRequest {
+        name: "test session".into(),
+        target,
+        workspace: Some(service.home.to_string_lossy().into()),
+        options: Default::default(),
+        channels: vec![],
     }
-    async fn init(&self, id: &str) {
-        client::control(
-            &self.home,
-            &self.config,
-            ControlMessage::Initialize(InitArgsDto {
-                agent_id: id.into(),
-                model: "mock".into(),
-                force: false,
-            }),
-        )
+}
+async fn agent(service: &Service) -> Client {
+    Client::open(
+        &service.home,
+        &service.config,
+        create(
+            service,
+            PlanTarget::Agent {
+                agent_id: "fae".into(),
+            },
+        ),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+async fn workflow(service: &Service, id: &str) -> Client {
+    Client::open(
+        &service.home,
+        &service.config,
+        create(
+            service,
+            PlanTarget::Workflow {
+                workflow_id: id.into(),
+            },
+        ),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+}
+fn start_payload(input: Vec<ContentBlock>) -> RequestPayload {
+    RequestPayload::SessionExecutionStart(ExecutionStartRequest {
+        input,
+        target: None,
+        workspace: None,
+        options: None,
+    })
+}
+async fn start_agent(client: &mut Client, text: &str) -> ExecutionId {
+    let ResponsePayload::SessionExecutionStart(accepted) = client
+        .request(start_payload(client::text_content(text)))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    accepted.execution_id
+}
+async fn start_workflow(client: &mut Client) -> ExecutionId {
+    let ResponsePayload::SessionExecutionStart(accepted) = client
+        .request(start_payload(vec![ContentBlock::Json { value: json!({}) }]))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    accepted.execution_id
+}
+async fn finish(client: &mut Client) -> (ExecutionId, ExecutionOutcome) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let MessagePayload::Event(EventPayload::ExecutionFinished(finished)) =
+                client.next().await.unwrap().payload
+            {
+                return (finished.execution_id, finished.outcome);
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+async fn exchange(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    request: &ProtocolMessage,
+) -> ResponseMessage {
+    socket
+        .send(Message::Text(
+            serde_json::to_string(request).unwrap().into(),
+        ))
         .await
         .unwrap();
-        std::fs::write(
-            self.home.join(format!("agents/{id}_prompt.txt")),
-            "You are a test agent.",
-        )
-        .unwrap();
-    }
-    fn agent(&self, session: &str) -> OpenSession {
-        OpenSession {
-            binding: None,
-            target: SessionTarget::Agent {
-                source: SingleAgentSource::AgentId("fae".into()),
-            },
-            session_id: Some(session.into()),
-            workspace: Some(self.home.clone()),
-            resume: None,
-        }
-    }
-    fn workflow(&self, id: &str, session: &str) -> OpenSession {
-        OpenSession {
-            binding: None,
-            target: SessionTarget::Workflow {
-                workflow_id: id.into(),
-                input: json!({}),
-            },
-            session_id: Some(session.into()),
-            workspace: Some(self.home.clone()),
-            resume: None,
-        }
-    }
-    fn write_workflow(&self, id: &str, code: &str) {
-        std::fs::create_dir_all(self.home.join("workflows")).unwrap();
-        std::fs::write(
-            self.home.join(format!("workflows/{id}.json")),
-            serde_json::to_vec(&json!({
-                "id":id,"desc":"Controlled process test","nodes":{
-                    "start":{"type":"start","next":"python"},
-                    "python":{"type":"execute","action":{"type":"python","code":code},"next":"end"},
-                    "end":{"type":"end","output":42}
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(text) => {
+                    if let ServerFrame::Response(response) = serde_json::from_str(&text).unwrap() {
+                        if Some(&response.request_id) == request.request_id.as_ref() {
+                            return response;
+                        }
+                    }
                 }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
-    async fn stop(&mut self) {
-        assert!(fae::app::daemon::stop(&self.home).await.unwrap());
-        assert!(self.child.wait().unwrap().success());
-        assert!(!self.home.join("server.config").exists());
-        assert!(!self.home.join("lark/lark.token").exists());
-        assert!(!fae::app::daemon::stop(&self.home).await.unwrap());
-    }
-}
-impl Drop for Service {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.home);
-    }
-}
-
-struct DetachedService(PathBuf);
-impl Drop for DetachedService {
-    fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_fae"))
-            .arg("--fae-home")
-            .arg(&self.0)
-            .args(["server", "stop"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+                Message::Ping(data) => socket.send(Message::Pong(data)).await.unwrap(),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn restart_preserves_custom_endpoint_without_lark_config() {
+async fn workflow_create_subscribe_and_get_never_launch_execution() {
     let mut service = Service::start(None).await;
-    let _cleanup = DetachedService(service.home.clone());
-    let previous = service.config.clone();
-    let output = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .arg("restart")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    service.write_workflow(
+        "explicit",
+        "open('launched', 'w').write('yes')\nresult = 42",
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("no lark.config"));
-    assert!(service.child.wait().unwrap().success());
-    let config = fae::server::lifecycle::read_config(&service.home).unwrap();
-    assert_ne!(config.pid, previous.pid);
-    assert_ne!(config.instance_id, previous.instance_id);
-    assert_eq!(config.address, previous.address);
-    assert_eq!(config.port, previous.port);
-    client::hello(&service.home, &config).await.unwrap();
-    assert!(!service.home.join("lark/runtime.json").exists());
-    assert!(fae::app::daemon::stop(&service.home).await.unwrap());
+    let mut client = workflow(&service, "explicit").await;
+    assert!(client.info.active_execution.is_none());
+    assert!(!client.info.context.memory.history_loaded);
+    let ResponsePayload::SessionGet(summary) = client
+        .request(RequestPayload::SessionGet(Empty {}))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(summary.active_execution.is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!service.home.join("launched").exists());
+    let execution = start_workflow(&mut client).await;
+    let (finished, outcome) = finish(&mut client).await;
+    assert_eq!(finished, execution);
+    assert_eq!(client::outcome_result(outcome).unwrap(), json!(42));
+    assert!(service.home.join("launched").exists());
+    let ResponsePayload::SessionExecutionGet(result) = client
+        .request(RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+            execution_id: Some(execution),
+            input_request_id: None,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(result.execution.unwrap().status, ExecutionStatus::Succeeded);
+    let next = start_workflow(&mut client).await;
+    assert_eq!(finish(&mut client).await.0, next);
+    let ResponsePayload::SessionArchive(archived) = client
+        .request(RequestPayload::SessionArchive(Empty {}))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        archived.session_config.lifecycle,
+        fae_agent::SessionLifecycle::Archived
+    );
+    assert!(
+        client
+            .request(start_payload(vec![ContentBlock::Json { value: json!({}) }]))
+            .await
+            .is_err()
+    );
+    service.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn restart_rejects_invalid_lark_config_before_stopping_service() {
+async fn unsubscribe_keeps_execution_running_and_replays_public_events() {
     let mut service = Service::start(None).await;
-    for config in [
-        json!({}),
-        json!({
-            "version":1,"app_id":"test-app","app_secret":"test-secret",
-            "tenant_key":"tenant","agent_id":"missing","workspace":service.home
+    service.write_workflow(
+        "replay",
+        "import time\ntime.sleep(0.3)\nopen('replayed', 'w').write('once')\nresult = 42",
+    );
+    let mut original = workflow(&service, "replay").await;
+    let sid = original.sid().to_string();
+    let stream = original.stream.clone();
+    let execution = start_workflow(&mut original).await;
+    original.close().await.unwrap();
+    drop(original);
+    let mut resumed = Client::open(
+        &service.home,
+        &service.config,
+        create(
+            &service,
+            PlanTarget::Workflow {
+                workflow_id: "replay".into(),
+            },
+        ),
+        Some(sid),
+        None,
+        Some(SubscribeRequest {
+            stream_id: Some(stream),
+            after_seq: Some(0),
         }),
-    ] {
-        std::fs::write(
-            service.home.join("lark.config"),
-            serde_json::to_vec(&config).unwrap(),
-        )
+    )
+    .await
+    .unwrap();
+    let (id, outcome) = finish(&mut resumed).await;
+    assert_eq!(id, execution);
+    assert!(matches!(outcome, ExecutionOutcome::Succeeded { .. }));
+    assert!(service.home.join("replayed").exists());
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_subscribers_observe_same_execution_and_unsubscribe_is_connection_scoped() {
+    let mut service = Service::start(None).await;
+    service.write_workflow("shared", "import time\ntime.sleep(0.2)\nresult = 42");
+    let mut first = workflow(&service, "shared").await;
+    let mut second = Client::open(
+        &service.home,
+        &service.config,
+        create(
+            &service,
+            PlanTarget::Workflow {
+                workflow_id: "shared".into(),
+            },
+        ),
+        Some(first.sid().into()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_ne!(first.subscription, second.subscription);
+    assert!(
+        second
+            .request(RequestPayload::SessionUnsubscribe(
+                fae_agent::protocol::UnsubscribeRequest {
+                    subscription_id: first.subscription.clone()
+                }
+            ))
+            .await
+            .is_err()
+    );
+    let execution = start_workflow(&mut first).await;
+    assert_eq!(finish(&mut first).await.0, execution);
+    assert_eq!(finish(&mut second).await.0, execution);
+    first.close().await.unwrap();
+    let next = start_workflow(&mut second).await;
+    assert_eq!(finish(&mut second).await.0, next);
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_ids_are_correlated_and_conflicts_do_not_execute_another_operation() {
+    let mut service = Service::start(None).await;
+    service.write_workflow("dedup", "result = 42");
+    let client = workflow(&service, "dedup").await;
+    let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+        .await
         .unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_fae"))
-            .arg("--fae-home")
-            .arg(&service.home)
-            .arg("restart")
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("before restart"));
-        assert_eq!(
-            fae::server::lifecycle::read_config(&service.home)
-                .unwrap()
-                .instance_id,
-            service.config.instance_id
+    let request = ProtocolMessage::request(
+        RequestId::new("same").unwrap(),
+        Some(SessionId::new(client.sid()).unwrap()),
+        RequestPayload::SessionGet(Empty {}),
+    )
+    .unwrap();
+    let first = exchange(&mut socket, &request).await;
+    let repeated = exchange(&mut socket, &request).await;
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(repeated).unwrap()
+    );
+    let conflict = ProtocolMessage::request(
+        RequestId::new("same").unwrap(),
+        request.session_id.clone(),
+        RequestPayload::SessionArchive(Empty {}),
+    )
+    .unwrap();
+    let response = exchange(&mut socket, &conflict).await;
+    assert_eq!(response.payload.code, ResponseCode::Conflict);
+    assert!(response.payload.data.is_none());
+    assert_eq!(
+        response.path,
+        conflict.as_request().unwrap().path().response()
+    );
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_routes_versions_and_external_events_are_rejected() {
+    let mut service = Service::start(None).await;
+    for route in ["/v3/control", "/v3/session", "/v3/lark/session"] {
+        assert!(
+            client::connect(&service.home, &service.config, route)
+                .await
+                .is_err()
         );
-        client::hello(&service.home, &service.config).await.unwrap();
+    }
+    for value in [
+        json!({"version":3,"request_id":"r","type":"status"}),
+        json!({"version":4,"request_id":"r","type":"status"}),
+        json!({"version":4,"request_id":"r","path":"/request/session/not_registered","payload":{}}),
+        json!({"version":4,"session_id":"s","stream_id":"stream","seq":1,"path":"/event/session/execution/state_changed","payload":{"execution_id":"e","status":"running","reason":null}}),
+    ] {
+        let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap();
+        assert!(!matches!(response, Some(Ok(Message::Text(_)))));
     }
     service.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn restart_stops_gateway_first_and_reports_gateway_start_failure() {
-    use fae::server::lifecycle::FileLock;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
+async fn execution_limits_keep_queries_responsive_and_busy_start_is_never_steered() {
     let mut service = Service::start(None).await;
-    let _cleanup = DetachedService(service.home.clone());
-    service.init("fae").await;
-    std::fs::write(
-        service.home.join("lark.config"),
-        serde_json::to_vec(&json!({
-            "version":1,"app_id":"test-app","app_secret":"test-secret",
-            "tenant_key":"tenant","agent_id":"fae","workspace":service.home
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    // A local control endpoint exercises gateway shutdown without contacting
-    // Feishu. Removing the config during shutdown makes the next start fail.
-    let lock = FileLock::try_acquire(&service.home.join("lark/gateway.lock"))
-        .unwrap()
-        .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut runtime = fae::lark::lifecycle::Runtime::new();
-    runtime.port = listener.local_addr().unwrap().port();
-    runtime.ready = true;
-    std::fs::write(
-        service.home.join("lark/runtime.json"),
-        serde_json::to_vec(&runtime).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(service.home.join("lark/control.token"), "test-token").unwrap();
-    let home = service.home.clone();
-    let previous = service.config.clone();
-    let gateway = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut line = String::new();
-        BufReader::new(&mut stream)
-            .read_line(&mut line)
-            .await
-            .unwrap();
-        let request: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(request["command"], "stop");
-        assert_eq!(request["token"], "test-token");
-        assert_eq!(request["instance"], runtime.instance);
-        // The original service must still be available when the gateway stops.
-        client::hello(&home, &previous).await.unwrap();
-        stream
-            .write_all(format!("{}\n", json!({"runtime":runtime})).as_bytes())
-            .await
-            .unwrap();
-        std::fs::remove_file(home.join("lark/runtime.json")).unwrap();
-        std::fs::remove_file(home.join("lark.config")).unwrap();
-        drop(lock);
-    });
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .arg("restart")
-        .output()
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), gateway)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!output.status.success());
+    service.write_workflow("slow", "import time\ntime.sleep(30)\nresult = 42");
+    let mut clients = vec![];
+    for _ in 0..8 {
+        let mut client = workflow(&service, "slow").await;
+        start_workflow(&mut client).await;
+        clients.push(client);
+    }
     assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("service restarted, but Lark gateway failed to start")
+        clients[0]
+            .request(start_payload(vec![ContentBlock::Json { value: json!({}) }]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session_busy")
     );
-    assert!(service.child.wait().unwrap().success());
-    let config = fae::server::lifecycle::read_config(&service.home).unwrap();
-    assert_ne!(config.instance_id, service.config.instance_id);
-    assert_eq!(config.port, service.config.port);
-    client::hello(&service.home, &config).await.unwrap();
-    assert!(fae::app::daemon::stop(&service.home).await.unwrap());
+    let mut rejected = workflow(&service, "slow").await;
+    assert!(
+        rejected
+            .request(start_payload(vec![ContentBlock::Json { value: json!({}) }]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("resource_exhausted")
+    );
+    let ResponsePayload::SessionGet(summary) = tokio::time::timeout(
+        Duration::from_secs(2),
+        clients[0].request(RequestPayload::SessionGet(Empty {})),
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!()
+    };
+    assert!(summary.active_execution.is_some());
+    service.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lark_binds_raw_user_and_deduplicates_external_input() {
+async fn agents_use_public_content_multiple_starts_stop_and_existing_history_partition() {
     let (base, mut requests, model_task) = model().await;
     let mut service = Service::start(Some(&base)).await;
-    assert!(service.home.join("lark/lark.token").is_file());
-    assert!(!service.home.join("lark.token").exists());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(service.home.join("lark/lark.token"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-    }
     service.init("fae").await;
-    let path = service.home.join("agents/fae_config.json");
-    let mut agent: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    agent["tools"] = json!([]);
-    agent["skills"] = json!([]);
-    std::fs::write(&path, serde_json::to_vec(&agent).unwrap()).unwrap();
-    std::fs::write(
-        service.home.join("lark.config"),
-        serde_json::to_vec(&json!({
-            "version":1, "app_id":"cli_test", "app_secret":"test-secret",
-            "tenant_key":"tenant", "agent_id":"fae", "workspace":service.home
+    let mut client = agent(&service).await;
+    for text in ["hello", "again"] {
+        let id = start_agent(&mut client, text).await;
+        assert_eq!(requests.recv().await.as_deref(), Some(text));
+        assert_eq!(finish(&mut client).await.0, id);
+    }
+    let ResponsePayload::SessionConversationList(page) = client
+        .request(RequestPayload::SessionConversationList(
+            ConversationListRequest {
+                offset: 0,
+                limit: 100,
+            },
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(!page.messages.is_empty());
+    assert_eq!(page.partition.session_id.as_str(), client.sid());
+    assert!(
+        service
+            .home
+            .join(format!(
+                "session/fae/{}/{}.jsonl",
+                page.partition.user_id,
+                client.sid()
+            ))
+            .exists()
+    );
+    let id = start_agent(&mut client, "stream then wait").await;
+    assert_eq!(requests.recv().await.as_deref(), Some("stream then wait"));
+    loop {
+        if matches!(
+            client.next().await.unwrap().payload,
+            MessagePayload::Event(EventPayload::OutputDelta(_))
+        ) {
+            break;
+        }
+    }
+    assert!(
+        client
+            .request(start_payload(client::text_content("must not steer")))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session_busy")
+    );
+    client
+        .request(RequestPayload::SessionExecutionSteer(
+            ExecutionSteerRequest {
+                execution_id: ExecutionId::new("stale").unwrap(),
+                input: client::text_content("stale"),
+            },
+        ))
+        .await
+        .unwrap_err();
+    client
+        .request(RequestPayload::SessionExecutionStop(ExecutionStopRequest {
+            execution_id: id.clone(),
+            reason: Some("test stop".into()),
         }))
-        .unwrap(),
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&mut client).await.1,
+        ExecutionOutcome::Cancelled { .. }
+    ));
+    assert!(!client.stop_round(Some(id.to_string())).await.unwrap());
+    client
+        .request(RequestPayload::SessionConversationClear(Empty {}))
+        .await
+        .unwrap();
+    let ResponsePayload::SessionConversationList(page) = client
+        .request(RequestPayload::SessionConversationList(
+            ConversationListRequest {
+                offset: 0,
+                limit: 100,
+            },
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(page.messages.is_empty());
+    service.stop().await;
+    model_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_workspace_changes_affect_next_execution_and_keep_active_settings_fixed() {
+    let mut service = Service::start(None).await;
+    service.write_workflow(
+        "workspace",
+        "import time\ntime.sleep(0.3)\nopen('execution-workspace', 'w').write('done')\nresult = 42",
+    );
+    let next = service.home.join("next");
+    std::fs::create_dir(&next).unwrap();
+    let mut client = workflow(&service, "workspace").await;
+    let id = start_workflow(&mut client).await;
+    assert!(
+        client
+            .request(RequestPayload::SessionConfigUpdate(ConfigUpdateRequest {
+                workspace: Some(next.to_string_lossy().into()),
+                ..Default::default()
+            }))
+            .await
+            .is_err()
+    );
+    let ResponsePayload::SessionExecutionGet(result) = client
+        .request(RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+            execution_id: Some(id),
+            input_request_id: None,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        result.execution.unwrap().effective.workspace,
+        service.home.to_string_lossy()
+    );
+    finish(&mut client).await;
+    assert!(service.home.join("execution-workspace").exists());
+    assert!(!next.join("execution-workspace").exists());
+    client
+        .request(RequestPayload::SessionConfigUpdate(ConfigUpdateRequest {
+            workspace: Some(next.to_string_lossy().into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    start_workflow(&mut client).await;
+    finish(&mut client).await;
+    assert!(next.join("execution-workspace").exists());
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_resume_does_not_create_or_start_a_session() {
+    let mut service = Service::start(None).await;
+    service.write_workflow("expired", "result = 42");
+    let client = workflow(&service, "expired").await;
+    let error = Client::open(
+        &service.home,
+        &service.config,
+        create(
+            &service,
+            PlanTarget::Workflow {
+                workflow_id: "expired".into(),
+            },
+        ),
+        Some(client.sid().into()),
+        None,
+        Some(SubscribeRequest {
+            stream_id: Some("expired".into()),
+            after_seq: Some(0),
+        }),
     )
+    .await
+    .err()
     .unwrap();
-    let binding = SessionBinding {
+    assert!(error.to_string().contains("resume_expired"));
+    assert!(client.info.active_execution.is_none());
+    service.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lark_identity_is_host_metadata_and_public_request_id_tracks_acceptance() {
+    let (base, mut requests, model_task) = model().await;
+    let mut service = Service::start(Some(&base)).await;
+    service.init("fae").await;
+    std::fs::write(service.home.join("lark.config"), serde_json::to_vec(&json!({
+        "version":1,"app_id":"cli_test","app_secret":"test-secret","tenant_key":"tenant","agent_id":"fae","workspace":service.home
+    })).unwrap()).unwrap();
+    let principal = fae::session_host::LarkPrincipal {
         session_mapping_version: 2,
-        thread_id: "omt_group".into(),
+        thread_id: "omt_public".into(),
         channel: "lark".into(),
         user_id: "alice".into(),
         app_id: "cli_test".into(),
@@ -395,766 +560,155 @@ async fn lark_binds_raw_user_and_deduplicates_external_input() {
         chat_type: "group".into(),
         chat_id: "group".into(),
     };
-    let mut open = service.agent(&fae::lark::identity::session_id(&binding));
-    open.binding = Some(binding.clone());
-    let mut alice = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    assert_eq!(alice.info.user_id, "alice");
-    assert_eq!(alice.info.session_id, "omt_group");
-    let request_id = fae::lark::identity::receipt_id("cli_test", "tenant", "message");
-    let body = ClientMessage::ExternalInput {
-        external_request_id: request_id.clone(),
-        input: SessionInput::NewChat("hello".into()),
-        mode: None,
-        auto_steer: false,
-    };
-    let round = match alice.request(body.clone()).await.unwrap() {
-        ServerMessage::Ack { round_id: Some(id) } => id,
-        other => panic!("{other:?}"),
-    };
-    match alice.request(body).await.unwrap() {
-        ServerMessage::Acceptance {
-            round_id: Some(id),
-            uncertain: false,
-            ..
-        } => assert_eq!(id, round),
-        other => panic!("{other:?}"),
-    }
-    assert!(
-        alice
-            .request(ClientMessage::ExternalInput {
-                external_request_id: request_id,
-                input: SessionInput::NewChat("different".into()),
-                mode: None,
-                auto_steer: false,
-            })
-            .await
-            .is_err()
+    let create = create(
+        &service,
+        PlanTarget::Agent {
+            agent_id: "fae".into(),
+        },
     );
-    assert!(matches!(
-        finish(&mut alice).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    assert_eq!(requests.recv().await.unwrap(), "hello");
-    assert!(
-        requests.try_recv().is_err(),
-        "duplicate request executed the model"
-    );
-    let history = service
-        .home
-        .join(format!("session/fae/alice/{}.jsonl", alice.info.session_id));
-    assert!(
-        std::fs::read_to_string(history)
-            .unwrap()
-            .contains("mock answer")
-    );
-    // A different user's canonical session cannot resume another user's stream.
-    let mut bob = binding.clone();
-    bob.user_id = "bob".into();
-    open.binding = Some(bob.clone());
-    open.session_id = Some(fae::lark::identity::session_id(&bob));
-    open.resume = Some(Resume {
-        stream_id: alice.stream.clone(),
-        after_seq: 0,
-    });
-    assert!(
-        Client::open(&service.home, &service.config, open.clone())
-            .await
-            .is_err()
-    );
-    open.resume = None;
-    let mut bob = Client::open(&service.home, &service.config, open)
-        .await
-        .unwrap();
-    assert_eq!(bob.info.user_id, "bob");
-    // Cleanup is allowed only for the bound conversation.
-    assert!(matches!(
-        bob.request(ClientMessage::Clean).await.unwrap(),
-        ServerMessage::Cleaned
-    ));
-    drop(bob);
-    alice
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    // Closing releases the actor. The durable binding must still reject
-    // reopening the same user/thread under another chat.
-    let mut conflict = service.agent("omt_group");
-    let mut other_chat = binding;
-    other_chat.chat_id = "another-chat".into();
-    conflict.binding = Some(other_chat);
-    assert!(
-        Client::open(&service.home, &service.config, conflict)
-            .await
-            .is_err()
-    );
-    service.stop().await;
-    model_task.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lark_resume_preserves_replay_and_frozen_config_for_all_outcomes() {
-    let (base, mut requests, model_task) = model().await;
-    let mut service = Service::start(Some(&base)).await;
-    service.init("fae").await;
-    let config_path = service.home.join("agents/fae_config.json");
-    let prompt_path = service.home.join("agents/fae_prompt.txt");
-    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    config["tools"] = json!([]);
-    config["skills"] = json!([]);
-    let config_bytes = serde_json::to_vec(&config).unwrap();
-    let prompt_bytes = std::fs::read(&prompt_path).unwrap();
-    std::fs::write(
-        service.home.join("lark.config"),
-        serde_json::to_vec(&json!({
-            "version":1, "app_id":"cli_test", "app_secret":"test-secret",
-            "tenant_key":"tenant", "agent_id":"fae", "workspace":service.home
-        }))
-        .unwrap(),
+    let mut alice = Client::open(
+        &service.home,
+        &service.config,
+        create.clone(),
+        Some("omt_public".into()),
+        Some(principal.clone()),
+        None,
     )
+    .await
     .unwrap();
-    for expected in ["succeeded", "failed", "cancelled"] {
-        std::fs::write(&config_path, &config_bytes).unwrap();
-        std::fs::write(&prompt_path, &prompt_bytes).unwrap();
-        let binding = SessionBinding {
-            session_mapping_version: 2,
-            thread_id: format!("omt_{expected}"),
-            channel: "lark".into(),
-            app_id: "cli_test".into(),
-            tenant_key: "tenant".into(),
-            user_id: "alice".into(),
-            chat_type: "group".into(),
-            chat_id: expected.into(),
-        };
-        let mut open = service.agent(&fae::lark::identity::session_id(&binding));
-        open.binding = Some(binding);
-        let history = service.home.join(format!(
-            "session/fae/alice/{}.jsonl",
-            open.session_id.as_ref().unwrap()
-        ));
-        let mut client = Client::open(&service.home, &service.config, open.clone())
-            .await
-            .unwrap();
-        let receipt = fae::lark::identity::receipt_id("cli_test", "tenant", expected);
-        let input = match expected {
-            "cancelled" => "stream then wait",
-            "failed" => "stream before save",
-            _ => "hello",
-        };
-        let round = match client
-            .request(ClientMessage::ExternalInput {
-                external_request_id: receipt.clone(),
-                input: SessionInput::NewChat(input.into()),
-                mode: None,
-                auto_steer: false,
-            })
-            .await
-            .unwrap()
-        {
-            ServerMessage::Ack {
-                round_id: Some(round),
-            } => round,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(requests.recv().await.unwrap(), input);
-        if expected != "succeeded" {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let ServerMessage::Event { output, .. } = client.next().await.unwrap() {
-                        if output.input_type == "model_output" {
-                            assert_eq!(output.output["content"], "mock answer");
-                            break;
-                        }
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            if expected == "cancelled" {
-                client
-                    .request(ClientMessage::Cancel {
-                        round_id: round.clone(),
-                    })
-                    .await
-                    .unwrap();
-            } else {
-                // Saving history fails after model text has already been emitted.
-                std::fs::create_dir_all(&history).unwrap();
-            }
-        }
-        let outcome = finish(&mut client).await.1;
-        assert!(matches!(
-            (expected, &outcome),
-            ("succeeded", RoundOutcome::Succeeded { .. })
-                | ("failed", RoundOutcome::Failed { .. })
-                | ("cancelled", RoundOutcome::Cancelled { .. })
-        ));
-        let stream = client.stream.clone();
-        client
-            .request(ClientMessage::Close {
-                cancel_active: false,
-            })
-            .await
-            .unwrap();
-        drop(client);
-        std::fs::remove_file(&config_path).unwrap();
-        std::fs::remove_file(&prompt_path).unwrap();
-        open.resume = Some(Resume {
-            stream_id: stream,
-            after_seq: 0,
-        });
-        let mut resumed = Client::open(&service.home, &service.config, open)
-            .await
-            .unwrap();
-        assert!(resumed.info.resumed);
-        // The response query buffers earlier replay. A terminal receipt must
-        // not make the consumer drop that buffered model text.
-        assert!(matches!(
-            resumed
-                .request(ClientMessage::Acceptance {
-                    external_request_id: receipt
-                })
-                .await
-                .unwrap(),
-            ServerMessage::Acceptance {
-                outcome: Some(_),
-                ..
-            }
-        ));
-        let text = tokio::time::timeout(Duration::from_secs(10), async {
-            let mut text = String::new();
-            let mut last_seq = 0;
-            loop {
-                let message = resumed.next().await.unwrap();
-                if let Some(seq) = message.seq() {
-                    assert!(seq > last_seq);
-                    last_seq = seq;
-                }
-                match message {
-                    ServerMessage::Event {
-                        round_id, output, ..
-                    } => {
-                        assert_eq!(round_id, round);
-                        if output.input_type == "model_output" {
-                            text.push_str(output.output["content"].as_str().unwrap());
-                        }
-                    }
-                    ServerMessage::Finished {
-                        round_id,
-                        outcome: replayed,
-                        ..
-                    } => {
-                        assert_eq!(round_id, round);
-                        assert_eq!(
-                            serde_json::to_value(replayed).unwrap(),
-                            serde_json::to_value(&outcome).unwrap()
-                        );
-                        break text;
-                    }
-                    ServerMessage::Error(error) => panic!("{error}"),
-                    _ => {}
-                }
-            }
-        })
+    assert_eq!(alice.info.user_info.user_id.as_str(), "alice");
+    assert_eq!(alice.sid(), "omt_public");
+    let rid = fae::lark::identity::receipt_id("cli_test", "tenant", "message");
+    let payload = start_payload(client::text_content("hello"));
+    let ResponsePayload::SessionExecutionStart(accepted) = alice
+        .request_with_id(payload.clone(), RequestId::new(rid.clone()).unwrap())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let repeated = alice
+        .request_with_id(payload, RequestId::new(rid.clone()).unwrap())
         .await
         .unwrap();
-        assert_eq!(text, "mock answer");
-        assert!(requests.try_recv().is_err(), "resume reran the model");
-        resumed
-            .request(ClientMessage::Close {
-                cancel_active: false,
-            })
-            .await
-            .unwrap();
-    }
+    assert!(matches!(
+        repeated,
+        ResponsePayload::SessionExecutionStart(_)
+    ));
+    assert_eq!(requests.recv().await.as_deref(), Some("hello"));
+    finish(&mut alice).await;
+    let ResponsePayload::SessionExecutionGet(result) = alice
+        .request(RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+            execution_id: None,
+            input_request_id: Some(RequestId::new(rid).unwrap()),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let fact = result.acceptance.unwrap();
+    assert_eq!(fact.certainty, AcceptanceCertainty::Known);
+    assert_eq!(fact.execution_id, Some(accepted.execution_id));
+    assert!(fact.outcome.is_some());
+    let mut bob_principal = principal.clone();
+    bob_principal.user_id = "bob".into();
+    let bob = Client::open(
+        &service.home,
+        &service.config,
+        create.clone(),
+        Some("omt_public".into()),
+        Some(bob_principal),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bob.info.user_info.user_id.as_str(), "bob");
+    assert!(
+        Client::open(
+            &service.home,
+            &service.config,
+            create,
+            Some("omt_public".into()),
+            None,
+            None
+        )
+        .await
+        .is_err()
+    );
     service.stop().await;
     model_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lark_steers_active_round_without_queue_and_isolates_session_commands() {
-    let (base, mut requests, model_task) = model().await;
+async fn timer_keeps_persisted_ownership_after_public_session_clean_and_disconnect() {
+    let (base, _requests, model_task) = model().await;
     let mut service = Service::start(Some(&base)).await;
     service.init("fae").await;
     let path = service.home.join("agents/fae_config.json");
-    let mut agent: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    agent["tools"] = json!([]);
-    agent["skills"] = json!([]);
-    std::fs::write(&path, serde_json::to_vec(&agent).unwrap()).unwrap();
-    std::fs::write(
-        service.home.join("lark.config"),
-        serde_json::to_vec(&json!({
-            "version":1, "app_id":"cli_test", "app_secret":"test-secret",
-            "tenant_key":"tenant", "agent_id":"fae", "workspace":service.home
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let binding = SessionBinding {
-        session_mapping_version: 2,
-        thread_id: "omt_steer".into(),
-        channel: "lark".into(),
-        user_id: "ou_alice".into(),
-        app_id: "cli_test".into(),
-        tenant_key: "tenant".into(),
-        chat_type: "p2p".into(),
-        chat_id: "chat".into(),
-    };
-    let original = fae::lark::identity::session_id(&binding);
-    let mut open = service.agent(&original);
-    open.binding = Some(binding.clone());
-    let mut client = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    assert!(!client.stop_round(None).await.unwrap());
-    let explicit = ClientMessage::ExternalInput {
-        external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "idle-steer"),
-        input: SessionInput::Supplement("idle".into()),
-        mode: None,
-        auto_steer: true,
-    };
-    assert!(client.request(explicit).await.is_err());
-    assert!(requests.try_recv().is_err());
-    let round = match client
-        .request(ClientMessage::ExternalInput {
-            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "initial"),
-            input: SessionInput::NewChat("stream then wait".into()),
-            mode: None,
-            auto_steer: true,
-        })
-        .await
-        .unwrap()
-    {
-        ServerMessage::Ack {
-            round_id: Some(round),
-        } => round,
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(requests.recv().await.unwrap(), "stream then wait");
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let ServerMessage::Event { output, .. } = client.next().await.unwrap() {
-                if output.input_type == "model_output" {
-                    break;
-                }
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["agent"]["user_id"] = json!("alice");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut client = agent(&service).await;
+    let original = client.sid().to_string();
+    start_agent(&mut client, "timer:create:once").await;
+    let mut tool_outputs = Vec::new();
+    loop {
+        match client.next().await.unwrap().payload {
+            MessagePayload::Event(EventPayload::OutputDelta(delta)) => {
+                tool_outputs.extend(delta.content)
             }
-        }
-    })
-    .await
-    .unwrap();
-    // A different thread opens an independent round while T1 is still busy.
-    let mut second_open = open.clone();
-    second_open.session_id = Some("omt_parallel".into());
-    second_open.binding.as_mut().unwrap().thread_id = "omt_parallel".into();
-    let mut second = Client::open(&service.home, &service.config, second_open)
-        .await
-        .unwrap();
-    assert!(matches!(
-        second.request(ClientMessage::Status).await.unwrap(),
-        ServerMessage::Status(SessionStatus { round_id: None, .. })
-    ));
-    let accepted = second
-        .request(ClientMessage::ExternalInput {
-            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", "parallel"),
-            input: SessionInput::NewChat("hello from T2".into()),
-            mode: None,
-            auto_steer: true,
-        })
-        .await
-        .unwrap();
-    assert!(matches!(accepted, ServerMessage::Ack { round_id: Some(_) }));
-    assert!(matches!(
-        finish(&mut second).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    assert_eq!(requests.recv().await.unwrap(), "hello from T2");
-    second
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(second);
-    assert!(client.request(ClientMessage::Clean).await.is_err());
-    // Ordinary input and command text both steer the existing round.
-    for (message_id, text) in [("supplement", "new instructions"), ("command", "/clean")] {
-        let body = ClientMessage::ExternalInput {
-            external_request_id: fae::lark::identity::receipt_id("cli_test", "tenant", message_id),
-            input: SessionInput::NewChat(text.into()),
-            mode: None,
-            auto_steer: true,
-        };
-        for _ in 0..2 {
-            match client.request(body.clone()).await.unwrap() {
-                ServerMessage::Acceptance {
-                    round_id: Some(id),
-                    supplemented: true,
-                    uncertain: false,
-                    ..
-                } => assert_eq!(id, round),
-                other => panic!("{other:?}"),
+            MessagePayload::Event(EventPayload::ExecutionFinished(finished)) => {
+                assert!(matches!(
+                    finished.outcome,
+                    ExecutionOutcome::Succeeded { .. }
+                ));
+                break;
             }
+            _ => {}
         }
     }
     assert!(
-        matches!(client.request(ClientMessage::Status).await.unwrap(),
-        ServerMessage::Status(SessionStatus { round_id: Some(id), .. }) if id == round)
-    );
-    assert!(
-        requests.try_recv().is_err(),
-        "a supplemental input started a queued model round"
+        service.home.join("timer/fae/alice/state.json").exists(),
+        "timer creation output: {tool_outputs:?}"
     );
     client
-        .request(ClientMessage::Cancel {
-            round_id: round.clone(),
-        })
+        .request(RequestPayload::SessionConversationClear(Empty {}))
         .await
         .unwrap();
-    assert!(matches!(
-        finish(&mut client).await.1,
-        RoundOutcome::Cancelled { .. }
-    ));
-    assert!(
-        requests.try_recv().is_err(),
-        "supplements ran after cancellation"
-    );
-    client.request(ClientMessage::Clean).await.unwrap();
+    client.close().await.unwrap();
     drop(client);
-    let selected = "omt_another".to_owned();
-    open.session_id = Some(selected.clone());
-    open.binding.as_mut().unwrap().thread_id = selected.clone();
-    let mut replacement = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    assert_eq!(replacement.info.session_id, selected);
-    replacement
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(replacement);
-    let mut other = binding.clone();
-    other.chat_id = "another-chat".into();
-    open.session_id = Some(original.clone());
-    open.binding = Some(other);
-    assert!(
-        Client::open(&service.home, &service.config, open.clone())
-            .await
-            .is_err()
-    );
-    open.binding = Some(binding);
-    open.session_id = Some(format!("{original}--../../escape"));
-    assert!(
-        Client::open(&service.home, &service.config, open)
-            .await
-            .is_err()
-    );
-    service.stop().await;
-    model_task.abort();
-}
-
-async fn input(client: &mut Client, text: &str) -> String {
-    match client
-        .request(ClientMessage::Input {
-            input: SessionInput::NewChat(SessionInputData::text(text)),
-            mode: None,
-        })
-        .await
-        .unwrap()
-    {
-        ServerMessage::Ack { round_id: Some(id) } => id,
-        other => panic!("expected ack: {other:?}"),
-    }
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lark_environment_reaches_main_prompt_and_refreshes_between_rounds() {
-    let (base, mut requests, model_task) = model().await;
-    let mut service = Service::start(Some(&base)).await;
-    service.init("fae").await;
-    std::fs::write(
-        service.home.join("lark.config"),
-        serde_json::to_vec(&json!({
-            "version":1,"app_id":"cli_test","app_secret":"secret",
-            "tenant_key":"tenant","agent_id":"fae","workspace":service.home
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let binding = SessionBinding {
-        session_mapping_version: 2,
-        thread_id: "omt_environment".into(),
-        channel: "lark".into(),
-        app_id: "cli_test".into(),
-        tenant_key: "tenant".into(),
-        user_id: "ou_alice".into(),
-        chat_type: "group".into(),
-        chat_id: "oc_environment".into(),
-    };
-    let mut open = service.agent(&binding.thread_id);
-    open.binding = Some(binding.clone());
-    let mut client = Client::open(&service.home, &service.config, open)
-        .await
-        .unwrap();
-    std::fs::create_dir_all(service.home.join("lark/records")).unwrap();
-    for message_id in ["om_first", "om_second"] {
-        let id = fae::lark::identity::receipt_id("cli_test", "tenant", message_id);
-        // A durable gateway receipt; optional delivery fields are omitted.
-        std::fs::write(
-            service.home.join(format!("lark/records/{id}.json")),
-            serde_json::to_vec(&json!({
-                "id":id,"session_id":binding.thread_id,"binding":binding,
-                "message_id":message_id,"text":"lark:probe","state":"received",
-                "root_id":"om_root","parent_id":"om_parent","inbound_thread_id":"",
-                "seq":0,"responses":[],"notice_uuid":"uuid","notice_sent":false,"created":1234,
-                "message_metadata":{"bot_open_id":"ou_bot","create_time":"1234567890000",
-                    "mentions":[{"key":"@_user_2","name":"张三","open_id":"ou_zhang",
-                        "user_id":null,"union_id":null,"mentioned_type":"user","tenant_key":"tenant"}]}
-            })).unwrap(),
-        ).unwrap();
-        client
-            .request(ClientMessage::ExternalInput {
-                external_request_id: id,
-                input: SessionInput::NewChat("lark:probe".into()),
-                mode: None,
-                auto_steer: true,
-            })
-            .await
-            .unwrap();
-        let RoundOutcome::Succeeded { result } = finish(&mut client).await.1 else {
-            panic!()
-        };
-        let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
-        let prompt = probe["prompt"].as_str().unwrap();
-        assert!(prompt.contains(message_id) && prompt.contains("om_parent"));
-        assert!(prompt.contains("oc_environment") && prompt.contains("ou_zhang"));
-        assert!(!prompt.contains("secret"));
-        assert_eq!(prompt.matches("<LarkEnvironment ").count(), 1);
-        if message_id == "om_second" {
-            assert!(!prompt.contains("om_first"));
-        }
-        assert_eq!(probe["query"], "lark:probe");
-        assert_eq!(requests.recv().await.unwrap(), "lark:probe");
-    }
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    let mut ordinary = Client::open(&service.home, &service.config, service.agent("ordinary"))
-        .await
-        .unwrap();
-    input(&mut ordinary, "lark:probe").await;
-    let RoundOutcome::Succeeded { result } = finish(&mut ordinary).await.1 else {
-        panic!()
-    };
-    let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
-    assert!(
-        !probe["prompt"]
-            .as_str()
-            .unwrap()
-            .contains("<LarkEnvironment ")
-    );
-    ordinary
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    service.stop().await;
-    model_task.abort();
-}
-
-async fn finish(client: &mut Client) -> (String, RoundOutcome) {
-    let mut observed = Vec::new();
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    config["agent"]["user_id"] = json!("bob");
+    config["agent"]["session_id"] = json!("changed-default");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let state = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let message = client.next().await.unwrap();
-            observed.push(format!("{message:?}"));
-            match message {
-                ServerMessage::Finished {
-                    round_id, outcome, ..
-                } => return (round_id, outcome),
-                ServerMessage::Error(error) => panic!("{error}"),
-                _ => {}
-            }
-        }
-    })
-    .await;
-    match result {
-        Ok(result) => result,
-        Err(error) => {
-            let status = tokio::time::timeout(
-                Duration::from_secs(2),
-                client.request(ClientMessage::Status),
+            let state: Value = serde_json::from_slice(
+                &std::fs::read(service.home.join("timer/fae/alice/state.json")).unwrap(),
             )
-            .await;
-            panic!("finish timed out: {error}; status={status:?}; events={observed:?}");
-        }
-    }
-}
-
-// Tiny SSE model server exercises the production ModelRuntime and streaming
-// path. No credentials or process-global environment changes are needed.
-async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}/v1", listener.local_addr().unwrap());
-    let (tx, rx) = mpsc::channel(32);
-    let task = tokio::spawn(async move {
-        let mut requests = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                Some(_) = requests.join_next(), if !requests.is_empty() => {},
-                accepted = listener.accept() => {
-                    let (mut socket, _) = accepted.unwrap();
-                    let tx = tx.clone();
-                    requests.spawn(async move {
-                        let mut bytes = Vec::new();
-                        let body = loop {
-                            let mut buffer = [0; 4096];
-                            let read = socket.read(&mut buffer).await.unwrap();
-                            if read == 0 { return; }
-                            bytes.extend_from_slice(&buffer[..read]);
-                            if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                                let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
-                                let length: usize = header.lines().find_map(|line| line.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap();
-                                if bytes.len() >= end + 4 + length {
-                                    break serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + length]).unwrap();
-                                }
-                            }
-                        };
-                        let text = body["messages"].as_array().unwrap().iter().rev()
-                            .find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap().to_string();
-                        tx.send(text.clone()).await.unwrap();
-                        if matches!(text.as_str(), "stream then wait" | "stream before save") {
-                            let chunk = json!({"id":"mock","object":"chat.completion.chunk","created":1,"model":"mock",
-                                "choices":[{"index":0,"delta":{"role":"assistant","content":"mock answer"},"finish_reason":null}]});
-                            let data = format!("data: {chunk}\n\n");
-                            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{data}\r\n", data.len());
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            if text == "stream then wait" {
-                                tokio::time::sleep(Duration::from_secs(30)).await;
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(400)).await;
-                                let end = "data: [DONE]\n\n";
-                                let _ = socket.write_all(format!("{:x}\r\n{end}\r\n0\r\n\r\n", end.len()).as_bytes()).await;
-                            }
-                            return;
-                        }
-                        if text.contains("slow") { tokio::time::sleep(Duration::from_secs(30)).await; }
-                        let tool_result = body["messages"].as_array().unwrap().last().is_some_and(|m| m["role"] == "tool");
-                        let (delta, reason) = if text.starts_with("timer:create:") && !tool_result {
-                            use chrono::{Datelike, Timelike};
-                            let at = chrono::Utc::now() + chrono::Duration::seconds(4);
-                            let schedule = if text.ends_with("repeat") {
-                                json!({"kind":"repeat","cron":"0/2 * * * * *","max_fires":3})
-                            } else {
-                                json!({"kind":"once","cron":format!("{} {} {} {} {} * {}", at.second(), at.minute(), at.hour(), at.day(), at.month(), at.year())})
-                            };
-                            let args = json!({"operation":"create","idempotency_key":text,"name":"Service timer","input":"background timer input","schedule":schedule});
-                            (json!({"role":"assistant","tool_calls":[{"index":0,"id":"timer-1","type":"function","function":{"name":"timer","arguments":args.to_string()}}]}), "tool_calls")
-                        } else if text == "workspace:probe" && !tool_result {
-                            (json!({"role":"assistant","tool_calls":[{"index":0,"id":"workspace-1","type":"function","function":{"name":"execute_command","arguments":"{\"command\":\"pwd\"}"}}]}), "tool_calls")
-                        } else if text == "workspace:probe" {
-                            let prompt = body["messages"].as_array().unwrap().iter()
-                                .filter(|m| m["role"] == "system")
-                                .map(|m| m["content"].as_str().unwrap_or_default())
-                                .collect::<Vec<_>>().join("\n");
-                            let tool = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
-                            (json!({"role":"assistant","content":json!({"prompt":prompt,"tool":tool}).to_string()}), "stop")
-                        } else if text == "lark:probe" {
-                            let prompt = body["messages"].as_array().unwrap().iter()
-                                .filter(|m| m["role"] == "system")
-                                .map(|m| m["content"].as_str().unwrap_or_default())
-                                .collect::<Vec<_>>().join("\n");
-                            (json!({"role":"assistant","content":json!({"prompt":prompt,"query":text}).to_string()}), "stop")
-                        } else if text == "delegate" {
-                            (json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"agent","arguments":"{\"agent_id\":\"worker\",\"input\":\"slow child\"}"}}]}), "tool_calls")
-                        } else { (json!({"role":"assistant","content":"mock answer"}), "stop") };
-                        let chunk = |delta: Value, finish: Value| json!({"id":"mock","object":"chat.completion.chunk","created":1,"model":"mock",
-                            "choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string();
-                        let data = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunk(delta, Value::Null), chunk(json!({}), json!(reason)));
-                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len());
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    });
-                }
-            }
-        }
-    });
-    (base, rx, task)
-}
-
-async fn timer_state(service: &Service, user: &str, accepted: u64, terminal: usize) -> Value {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if let Ok(bytes) =
-                std::fs::read(service.home.join(format!("timer/fae/{user}/state.json")))
+            .unwrap();
+            if state["occurrences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["status"] == "succeeded")
             {
-                let state: Value = serde_json::from_slice(&bytes).unwrap();
-                let done = state["occurrences"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|o| o["status"] == "succeeded")
-                    .count();
-                if state["timers"][0]["accepted_count"] == accepted && done >= terminal {
-                    return state;
-                }
+                break state;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     })
     .await
-    .unwrap_or_else(|e| {
-        panic!(
-            "timer timeout ({accepted}/{terminal}): {e}; state={:?}; log={:?}",
-            std::fs::read_to_string(service.home.join(format!("timer/fae/{user}/state.json"))),
-            std::fs::read_to_string(service.home.join("startup.log"))
-        )
-    })
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn timer_runs_without_client_after_clean_and_config_user_change() {
-    let (base, mut requests, model_task) = model().await;
-    let mut service = Service::start(Some(&base)).await;
-    service.init("fae").await;
-    let config_path = service.home.join("agents/fae_config.json");
-    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    config["agent"]["user_id"] = json!("alice");
-    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let mut client = Client::open(
-        &service.home,
-        &service.config,
-        service.agent("timer-origin"),
-    )
-    .await
     .unwrap();
-    input(&mut client, "timer:create:once").await;
-    assert!(matches!(
-        finish(&mut client).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    let state = timer_state(&service, "alice", 0, 0).await;
-    assert_eq!(state["timers"][0]["created_session_id"], "timer-origin");
-    assert!(matches!(
-        client.request(ClientMessage::Clean).await.unwrap(),
-        ServerMessage::Cleaned
-    ));
-    drop(client);
-    config["agent"]["user_id"] = json!("bob");
-    config["agent"]["session_id"] = json!("changed-default");
-    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let state = timer_state(&service, "alice", 1, 1).await;
-    let o = &state["occurrences"][0];
-    assert_eq!(o["owner"]["user_id"], "alice");
-    assert_eq!(o["status"], "succeeded");
-    let session = o["session_id"].as_str().unwrap();
-    assert_ne!(session, "timer-origin");
+    let occurrence = state["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["status"] == "succeeded")
+        .unwrap();
+    assert_eq!(occurrence["owner"]["user_id"], "alice");
+    let session = occurrence["session_id"].as_str().unwrap();
+    assert_ne!(session, original);
     assert_ne!(session, "changed-default");
     let history = std::fs::read_to_string(
         service
@@ -1170,917 +724,200 @@ async fn timer_runs_without_client_after_clean_and_config_user_change() {
             .join(format!("session/fae/bob/{session}.jsonl"))
             .exists()
     );
-    assert!(
-        !service
-            .home
-            .join("session/fae/alice/timer-origin.jsonl")
-            .exists()
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if requests.recv().await.unwrap() == "background timer input" {
-                    break;
-                }
-            }
-        })
-        .await
-        .is_ok()
-    );
     service.stop().await;
     model_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn repeat_timer_recovers_after_service_restart_with_distinct_sessions() {
-    let (base, _requests, model_task) = model().await;
-    let mut service = Service::start(Some(&base)).await;
-    service.init("fae").await;
-    let mut client = Client::open(
-        &service.home,
-        &service.config,
-        service.agent("repeat-origin"),
-    )
-    .await
-    .unwrap();
-    input(&mut client, "timer:create:repeat").await;
-    assert!(matches!(
-        finish(&mut client).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(client);
-    timer_state(&service, "master", 1, 1).await;
-    service.stop().await;
-    service.child = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .args(["server", "start", "--foreground", "--port"])
-        .arg(service.config.port.to_string())
-        .env("OPENAI_BASE_URL", &base)
-        .env("OPENAI_API_KEY", "test-key")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Ok(config) = fae::server::lifecycle::read_config(&service.home) {
-                if client::hello(&service.home, &config).await.is_ok() {
-                    service.config = config;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let state = timer_state(&service, "master", 3, 3).await;
-    let sessions: std::collections::HashSet<_> = state["occurrences"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|o| o["session_id"].as_str().unwrap())
-        .collect();
-    assert_eq!(sessions.len(), 3);
-    assert_eq!(state["timers"][0]["state"], "completed");
-    for session in sessions {
-        assert_ne!(session, "repeat-origin");
-        assert!(
-            service
-                .home
-                .join(format!("session/fae/master/{session}.jsonl"))
-                .exists()
-        );
-    }
-    service.stop().await;
-    model_task.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn agents_support_multiple_rounds_cancel_current_and_delegated_contexts() {
+async fn retained_context_and_target_partitions_follow_coordinator_facts() {
     let (base, mut requests, model_task) = model().await;
     let mut service = Service::start(Some(&base)).await;
     service.init("fae").await;
-    service.init("worker").await;
-    let path = service.home.join("agents/fae_config.json");
-    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    config["sub_agents"] = json!(["worker"]);
-    std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let open = service.agent("multi");
-    let mut client = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    assert!(
-        Client::open(&service.home, &service.config, open.clone())
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("session_in_use")
-    );
-    let first = input(&mut client, "hello").await;
-    assert_eq!(requests.recv().await.unwrap(), "hello");
-    let (round, outcome) = finish(&mut client).await;
-    assert_eq!(round, first);
-    assert!(matches!(outcome, RoundOutcome::Succeeded { .. }));
-    let second = input(&mut client, "slow second").await;
-    assert_eq!(requests.recv().await.unwrap(), "slow second");
-    assert!(
-        client
-            .request(ClientMessage::Input {
-                input: SessionInput::NewChat(SessionInputData::text("busy")),
-                mode: None
-            })
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("session_busy")
-    );
-    let mut other = Client::open(&service.home, &service.config, service.agent("other"))
-        .await
-        .unwrap();
-    assert!(
-        other
-            .request(ClientMessage::Clean)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("cleanup_busy")
-    );
-    assert!(client.stop_round(Some(second.clone())).await.unwrap());
-    let (round, outcome) = finish(&mut client).await;
-    assert_eq!(round, second);
-    assert!(matches!(outcome, RoundOutcome::Cancelled { .. }));
-    assert!(!client.stop_round(Some(second)).await.unwrap());
-    let delegated = input(&mut client, "delegate").await;
-    assert_eq!(requests.recv().await.unwrap(), "delegate");
-    assert_eq!(requests.recv().await.unwrap(), "slow child");
-    assert!(client.stop_round(Some(delegated)).await.unwrap());
-    assert!(matches!(
-        finish(&mut client).await.1,
-        RoundOutcome::Cancelled { .. }
-    ));
-    let ServerMessage::History { messages } = client
-        .request(ClientMessage::History {
-            limit: 100,
-            offset: 0,
-        })
+    service.init("other").await;
+    let mut client = agent(&service).await;
+    let sid = client.sid().to_string();
+    let rid = RequestId::new("initial").unwrap();
+    let ResponsePayload::SessionExecutionStart(accepted) = client
+        .request_with_id(start_payload(client::text_content("hello")), rid.clone())
         .await
         .unwrap()
     else {
         panic!()
     };
-    assert!(!messages.is_empty());
+    assert_eq!(requests.recv().await.as_deref(), Some("hello"));
     assert!(matches!(
-        client.request(ClientMessage::Clean).await.unwrap(),
-        ServerMessage::Cleaned
+        finish(&mut client).await.1,
+        ExecutionOutcome::Succeeded { .. }
     ));
-    assert!(!service.home.join("session/fae/master/multi.jsonl").exists());
-    service.stop().await;
-    model_task.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_workspace_overrides_defaults_and_updates_execution_after_resume() {
-    let (base, _requests, model_task) = model().await;
-    let mut service = Service::start(Some(&base)).await;
-    service.init("fae").await;
-    let first = service.home.join("first");
-    let second = service.home.join("second");
-    for (path, marker) in [(&first, "FIRST_WORKSPACE"), (&second, "SECOND_WORKSPACE")] {
-        std::fs::create_dir_all(path.join(".fae")).unwrap();
-        std::fs::write(path.join(".fae/workspace.md"), marker).unwrap();
-    }
-    let mut open = service.agent("workspace");
-    open.workspace = Some(first.clone());
-    let mut client = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    let stream = client.stream.clone();
-    for (path, marker) in [(&first, "FIRST_WORKSPACE"), (&second, "SECOND_WORKSPACE")] {
-        assert_eq!(&client.info.workspace, path);
-        input(&mut client, "workspace:probe").await;
-        let RoundOutcome::Succeeded { result } = finish(&mut client).await.1 else {
-            panic!()
-        };
-        let probe: Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
-        assert!(
-            probe["prompt"].as_str().unwrap().contains(marker),
-            "{probe}"
-        );
-        assert!(
-            probe["prompt"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("workspace_path=\"{}\"", path.display())),
-            "{probe}"
-        );
-        // The tool result must reflect the actual process directory, not just
-        // the workspace advertised by SessionInfo or the prompt.
-        let tool = probe["tool"].as_str().unwrap();
-        assert!(tool.contains(&path.display().to_string()), "{tool}");
-        let ServerMessage::Status(status) = client.request(ClientMessage::Status).await.unwrap()
-        else {
-            panic!()
-        };
-        let after_seq = status.latest_seq;
-        client
-            .request(ClientMessage::Close {
-                cancel_active: false,
-            })
-            .await
-            .unwrap();
-        if path == &first {
-            drop(client);
-            open.workspace = Some(second.clone());
-            open.resume = Some(Resume {
-                stream_id: stream.clone(),
-                after_seq,
-            });
-            client = Client::open(&service.home, &service.config, open.clone())
-                .await
-                .unwrap();
-            assert_eq!(client.stream, stream);
-        }
-    }
-    drop(client);
-    open.resume = None;
-    // An omitted JSON field must also be accepted by the server.
-    let mut value = serde_json::to_value(&open).unwrap();
-    value.as_object_mut().unwrap().remove("workspace");
-    open = serde_json::from_value(value).unwrap();
-    let mut client = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    assert_eq!(client.info.workspace, second);
-    let ServerMessage::History { messages } = client
-        .request(ClientMessage::History {
-            limit: 100,
-            offset: 0,
-        })
+    let ResponsePayload::SessionExecutionGet(result) = client
+        .request(RequestPayload::SessionExecutionGet(ExecutionGetRequest {
+            execution_id: Some(accepted.execution_id.clone()),
+            input_request_id: Some(rid),
+        }))
         .await
         .unwrap()
     else {
         panic!()
     };
-    assert!(
-        messages.len() >= 4,
-        "history must survive workspace changes"
-    );
-    let history = fae_engine::SessionRuntime::with_host_dir(&service.home)
-        .session_path("fae", &client.info.user_id, "workspace")
-        .unwrap();
-    assert!(history.is_file());
-    let saved: PathBuf =
-        serde_json::from_slice(&std::fs::read(history.with_extension("json")).unwrap()).unwrap();
-    assert_eq!(saved, second);
-    assert!(!service.home.join("session-workspaces").exists());
-    client.request(ClientMessage::Clean).await.unwrap();
-    assert!(!history.exists());
-    assert!(history.with_extension("json").is_file());
-    drop(client);
-    let mut client = Client::open(&service.home, &service.config, open.clone())
+    let execution = result.execution.unwrap();
+    let input = result.acceptance.unwrap().input.unwrap();
+    assert_eq!(input.status, fae_agent::InputStatus::Applied);
+    assert!(execution.invocations.iter().any(|invocation| {
+        invocation
+            .model
+            .as_ref()
+            .is_some_and(|model| model.model == "mock" && model.provider == base)
+    }));
+    let ResponsePayload::SessionGet(summary) = client
+        .request(RequestPayload::SessionGet(Empty {}))
         .await
-        .unwrap();
-    assert_eq!(
-        client.info.workspace, second,
-        "saved default must survive actor removal"
-    );
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(client);
-    service.stop().await;
-    service.child = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .args(["server", "start", "--foreground", "--port"])
-        .arg(service.config.port.to_string())
-        .env("OPENAI_BASE_URL", &base)
-        .env("OPENAI_API_KEY", "test-key")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Ok(config) = fae::server::lifecycle::read_config(&service.home) {
-                if client::hello(&service.home, &config).await.is_ok() {
-                    service.config = config;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let mut client = Client::open(&service.home, &service.config, open)
-        .await
-        .unwrap();
-    assert_eq!(
-        client.info.workspace, second,
-        "saved default must survive restart"
-    );
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(client);
-
-    // Exercise the real CLI parser and client. The cwd or explicit flag must
-    // override the default saved by the prior invocation.
-    for explicit in [false, true] {
-        let home = service.home.clone();
-        let cwd = first.clone();
-        let override_workspace = second.clone();
-        let output = tokio::task::spawn_blocking(move || {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_fae"));
-            command.current_dir(cwd).arg("--fae-home").arg(home);
-            if explicit {
-                command.arg("--workspace").arg(override_workspace);
-            }
-            command
-                .args(["agent", "--session-id", "workspace", "workspace:probe"])
-                .output()
-                .unwrap()
-        })
-        .await
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let probe: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let expected = if explicit { &second } else { &first };
-        assert!(
-            probe["tool"]
-                .as_str()
-                .unwrap()
-                .contains(&expected.display().to_string()),
-            "{probe}"
-        );
-    }
-    service.stop().await;
-    model_task.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn workflow_disconnect_replay_dedup_authentication_and_shutdown() {
-    let mut service = Service::start(None).await;
-    service.write_workflow(
-        "delayed",
-        "import time\ntime.sleep(0.4)\nopen('workspace-round.txt', 'w').write('done')\nresult = 42",
-    );
-    let next_workspace = service.home.join("next-workspace");
-    std::fs::create_dir(&next_workspace).unwrap();
-    let open = service.workflow("delayed", "replay");
-    let mut client = Client::open(&service.home, &service.config, open.clone())
-        .await
-        .unwrap();
-    let stream = client.stream.clone();
-    // Close only the client lease; the workflow keeps running.
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-    drop(client);
-    let mut resume = open;
-    resume.workspace = Some(next_workspace.clone());
-    resume.resume = Some(Resume {
-        stream_id: stream,
-        after_seq: 0,
-    });
-    let mut client = Client::open(&service.home, &service.config, resume)
-        .await
-        .unwrap();
-    assert!(client.info.resumed);
-    assert_eq!(client.info.workspace, next_workspace);
-    assert!(
-        matches!(finish(&mut client).await.1, RoundOutcome::Succeeded { result } if result == json!(42))
-    );
-    assert!(service.home.join("workspace-round.txt").exists());
-    assert!(!next_workspace.join("workspace-round.txt").exists());
-    client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await
-        .unwrap();
-
-    let mut expired = service.workflow("delayed", "replay");
-    expired.resume = Some(Resume {
-        stream_id: "expired-stream".into(),
-        after_seq: 0,
-    });
-    assert!(
-        Client::open(&service.home, &service.config, expired)
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("resume_expired")
-    );
-
-    service.write_workflow("slow", "import time\ntime.sleep(30)\nresult = 42");
-    let mut client = Client::open(
-        &service.home,
-        &service.config,
-        service.workflow("slow", "cancel"),
-    )
-    .await
-    .unwrap();
-    let round = loop {
-        if let ServerMessage::Ack {
-            round_id: Some(round),
-        } = client.next().await.unwrap()
-        {
-            break round;
-        }
+        .unwrap()
+    else {
+        panic!()
     };
+    assert!(summary.context.memory.history_loaded);
+    assert!(summary.context.memory.user_memories_loaded);
+    assert_eq!(summary.context.memory.history_count, 2);
     client
-        .request(ClientMessage::Cancel { round_id: round })
+        .request(RequestPayload::SessionConfigUpdate(ConfigUpdateRequest {
+            target: Some(PlanTarget::Agent {
+                agent_id: "other".into(),
+            }),
+            ..Default::default()
+        }))
         .await
         .unwrap();
-    assert!(matches!(
-        finish(&mut client).await.1,
-        RoundOutcome::Cancelled { .. }
-    ));
-
-    let request = service
-        .config
-        .endpoint("/v1/control")
-        .into_client_request()
-        .unwrap();
-    assert!(tokio_tungstenite::connect_async(request).await.is_err());
-    let mut request = service
-        .config
-        .endpoint("/v1/control")
-        .into_client_request()
-        .unwrap();
-    let token = std::fs::read_to_string(service.home.join("server/server.token")).unwrap();
-    request
-        .headers_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    request
-        .headers_mut()
-        .insert("origin", "http://localhost".parse().unwrap());
-    assert!(tokio_tungstenite::connect_async(request).await.is_err());
-
-    // Raw connection allows an intentionally repeated request ID.
-    service.init("fae").await;
-    let mut socket = client::connect(&service.home, &service.config, "/v1/session")
+    let ResponsePayload::SessionConversationList(page) = client
+        .request(RequestPayload::SessionConversationList(
+            ConversationListRequest {
+                offset: 0,
+                limit: 100,
+            },
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(page.partition.target_id, "other");
+    assert!(page.messages.is_empty());
+    start_agent(&mut client, "other input").await;
+    assert_eq!(requests.recv().await.as_deref(), Some("other input"));
+    finish(&mut client).await;
+    client
+        .request(RequestPayload::SessionArchive(Empty {}))
         .await
         .unwrap();
-    async fn exchange(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        id: &str,
-        body: ClientMessage,
-    ) -> ServerMessage {
-        socket
-            .send(Message::Text(
-                serde_json::to_string(&ClientEnvelope {
-                    version: VERSION,
-                    request_id: id.into(),
-                    body,
-                })
-                .unwrap()
-                .into(),
+    client
+        .request(RequestPayload::SessionConversationClear(Empty {}))
+        .await
+        .unwrap();
+    assert!(
+        !service
+            .home
+            .join(format!(
+                "session/other/{}/{sid}.jsonl",
+                summary.user_info.user_id
             ))
-            .await
-            .unwrap();
-        loop {
-            match socket.next().await.unwrap().unwrap() {
-                Message::Text(text) => {
-                    return serde_json::from_str::<ServerEnvelope>(&text).unwrap().body;
-                }
-                Message::Ping(data) => socket.send(Message::Pong(data)).await.unwrap(),
-                _ => {}
-            }
-        }
-    }
-    assert!(matches!(
-        exchange(
-            &mut socket,
-            "open",
-            ClientMessage::Open(service.agent("dedup"))
-        )
-        .await,
-        ServerMessage::Opened(_)
-    ));
-    let first = exchange(&mut socket, "same", ClientMessage::Status).await;
-    let second = exchange(&mut socket, "same", ClientMessage::Status).await;
-    assert_eq!(
-        serde_json::to_value(first).unwrap(),
-        serde_json::to_value(second).unwrap()
+            .exists()
     );
-    assert!(
-        matches!(exchange(&mut socket, "same", ClientMessage::Clean).await, ServerMessage::Error(error) if error.code == "request_id_conflict")
-    );
-    service.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[cfg(unix)]
-async fn unreadable_credentials_and_discovery_preserve_running_service() {
-    use std::os::unix::fs::PermissionsExt;
-    // Root bypasses mode-based read restrictions.
-    if unsafe { libc::geteuid() } == 0 {
-        return;
-    }
-    let mut service = Service::start(None).await;
-    for name in ["server/server.token", "server.config"] {
-        let path = service.home.join(name);
-        let permissions = std::fs::metadata(&path).unwrap().permissions();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
-        let outputs: Vec<_> = ["show", "status", "stop", "start"]
-            .into_iter()
-            .map(|command| {
-                Command::new(env!("CARGO_BIN_EXE_fae"))
-                    .arg("--fae-home")
-                    .arg(&service.home)
-                    .args(["server", command])
-                    .output()
-                    .unwrap()
-            })
-            .collect();
-        std::fs::set_permissions(&path, permissions).unwrap();
-        for output in outputs {
-            let error = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success());
-            assert!(error.contains(&path.display().to_string()), "{error}");
-            assert!(error.contains("Permission denied"), "{error}");
-            assert!(error.contains("sudo"), "{error}");
-            assert!(!error.contains("Service is unavailable"), "{error}");
-        }
-        assert_eq!(
-            fae::server::lifecycle::read_config(&service.home)
-                .unwrap()
-                .instance_id,
-            service.config.instance_id
-        );
-        client::hello(&service.home, &service.config).await.unwrap();
-    }
-    service.stop().await;
-}
-
-#[test]
-#[cfg(unix)]
-fn service_start_rejects_another_users_home_before_creating_runtime_files() {
-    use std::os::unix::fs::MetadataExt;
-    let home = PathBuf::from("/");
-    if std::fs::metadata(&home).unwrap().uid() == unsafe { libc::geteuid() } {
-        return;
-    }
-    for foreground in [false, true] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fae"));
-        command
-            .arg("--fae-home")
-            .arg(&home)
-            .args(["server", "start", "--port", "1666"]);
-        if foreground {
-            command.arg("--foreground");
-        }
-        let output = command.output().unwrap();
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success());
-        assert!(error.contains("FAE home belongs to UID"), "{error}");
-        assert!(error.contains("without sudo"), "{error}");
-        assert!(error.contains("--port 6666"), "{error}");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_reuses_custom_endpoint_and_preserves_locked_corrupt_discovery() {
-    let mut service = Service::start(None).await;
-    let pid = service.config.pid;
-    let args = ["server", "start", "--port"];
-    let output = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .args(args)
-        .arg(service.config.port.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fae::app::daemon::ensure(&service.home).await.unwrap().pid,
-        pid
-    );
-    let mismatch = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .args(["server", "start", "--port", "1"])
-        .output()
-        .unwrap();
-    assert!(!mismatch.status.success());
-    std::fs::write(service.home.join("server.config"), "{broken").unwrap();
-    assert!(
-        fae::app::daemon::ensure(&service.home)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("discovery")
-    );
-    fae::server::lifecycle::atomic_write(
-        &service.home.join("server.config"),
-        &serde_json::to_vec(&service.config).unwrap(),
-        false,
-    )
-    .unwrap();
-    service.stop().await;
-
-    std::fs::create_dir_all(service.home.join("server")).unwrap();
-    std::fs::write(
-        service.home.join("server/server.log"),
-        "error: old-startup-failure\n",
-    )
-    .unwrap();
-    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = occupied.local_addr().unwrap().port();
-    let output = Command::new(env!("CARGO_BIN_EXE_fae"))
-        .arg("--fae-home")
-        .arg(&service.home)
-        .args(["server", "start", "--port"])
-        .arg(port.to_string())
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(!service.home.join("server.config").exists());
-    let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(diagnostic.contains("address_in_use"), "{diagnostic}");
-    assert!(!diagnostic.contains("old-startup-failure"), "{diagnostic}");
-    assert!(
-        std::fs::read_to_string(service.home.join("server/server.log"))
-            .unwrap()
-            .contains("address_in_use")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_detached_start_has_one_instance_and_survives_clients() {
-    let mut service = Service::start(None).await;
-    let port = service.config.port;
-    service.stop().await;
-    struct Detached(PathBuf);
-    impl Drop for Detached {
-        fn drop(&mut self) {
-            let _ = Command::new(env!("CARGO_BIN_EXE_fae"))
-                .arg("--fae-home")
-                .arg(&self.0)
-                .args(["server", "stop"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-    let _cleanup = Detached(service.home.clone());
-    let start = || {
-        Command::new(env!("CARGO_BIN_EXE_fae"))
-            .arg("--fae-home")
-            .arg(&service.home)
-            .args(["server", "start", "--port"])
-            .arg(port.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    let first = start();
-    let second = start();
-    for child in [first, second] {
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let config = fae::server::lifecycle::read_config(&service.home).unwrap();
-    assert_ne!(config.pid, service.child.id());
-    assert_eq!(config.port, port);
-    client::hello(&service.home, &config).await.unwrap();
-    assert!(service.home.join("server/server.lock").is_file());
-    assert!(service.home.join("server/start-stop.lock").is_file());
-    assert!(service.home.join("server/server.token").is_file());
-    assert!(!service.home.join("server.lock").exists());
-    assert!(!service.home.join("server.token").exists());
-    assert!(!service.home.join("start.lock").exists());
-    assert!(service.home.join("schedule/timer.lock").is_file());
-    assert!(!service.home.join("timer.lock").exists());
-    assert!(
-        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/server.lock"))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/start-stop.lock"))
-            .unwrap()
-            .is_some()
-    );
-    assert!(fae::app::daemon::stop(&service.home).await.unwrap());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn independent_workflow_opens_and_session_capacity_remain_isolated() {
-    let mut service = Service::start(None).await;
-    service.write_workflow("quick", "result = 42");
-    let mut open = service.workflow("quick", "unused");
-    open.session_id = None;
-    let mut first = Client::open(&service.home, &service.config, open.clone())
+    client
+        .request(RequestPayload::SessionExecutionGet(
+            ExecutionGetRequest::default(),
+        ))
         .await
         .unwrap();
-    let mut second = Client::open(&service.home, &service.config, open)
+    assert!(
+        client
+            .request(start_payload(client::text_content("archived")))
+            .await
+            .is_err()
+    );
+    service.stop().await;
+    model_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_cache_is_shared_across_sessions_and_connections() {
+    let mut service = Service::start(None).await;
+    service.write_workflow("dedup", "result = 42");
+    let first = workflow(&service, "dedup").await;
+    let second = workflow(&service, "dedup").await;
+    let mut a = client::connect(&service.home, &service.config, "/v4/session")
         .await
         .unwrap();
-    assert_ne!(first.stream, second.stream);
-    assert_ne!(first.info.session_id, second.info.session_id);
-    assert!(matches!(
-        finish(&mut first).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    assert!(matches!(
-        finish(&mut second).await.1,
-        RoundOutcome::Succeeded { .. }
-    ));
-    service.init("fae").await;
-    let mut clients = Vec::new();
-    for id in 0..30 {
-        clients.push(
-            Client::open(
-                &service.home,
-                &service.config,
-                service.agent(&format!("idle-{id}")),
-            )
-            .await
-            .unwrap(),
-        );
-    }
-    assert!(
-        Client::open(&service.home, &service.config, service.agent("overflow"))
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("resource_exhausted")
+    let mut b = client::connect(&service.home, &service.config, "/v4/session")
+        .await
+        .unwrap();
+    let request = ProtocolMessage::request(
+        RequestId::new("shared-id").unwrap(),
+        Some(SessionId::new(first.sid()).unwrap()),
+        RequestPayload::SessionGet(Empty {}),
+    )
+    .unwrap();
+    let original = exchange(&mut a, &request).await;
+    assert_eq!(
+        serde_json::to_value(exchange(&mut b, &request).await).unwrap(),
+        serde_json::to_value(original).unwrap()
     );
-    let mut conflicting = service.agent("idle-0");
-    std::fs::create_dir(service.home.join("other-workspace")).unwrap();
-    conflicting.workspace = Some(service.home.join("other-workspace"));
-    assert!(
-        Client::open(&service.home, &service.config, conflicting)
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("session_in_use")
+    let conflict = ProtocolMessage::request(
+        RequestId::new("shared-id").unwrap(),
+        Some(SessionId::new(second.sid()).unwrap()),
+        RequestPayload::SessionArchive(Empty {}),
+    )
+    .unwrap();
+    assert_eq!(
+        exchange(&mut b, &conflict).await.payload.code,
+        ResponseCode::Conflict
     );
     service.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn distinct_runtime_instances_serialize_shared_user_memory_updates() {
-    use fae_agent::{UserMemoryCategory, UserMemoryConfidence, UserMemoryResponse};
-    let home = std::env::temp_dir().join(format!("fae-shared-memory-{}", wd_tools::uuid::v4()));
-    std::fs::create_dir_all(&home).unwrap();
-    let mut tasks = tokio::task::JoinSet::new();
-    for index in 0..32 {
-        let home = home.clone();
-        tasks.spawn(async move {
-            fae_engine::UserMemoryRuntime::with_host_dir(home)
-                .update(
-                    "alice",
-                    None,
-                    UserMemoryCategory::Preference,
-                    format!("value-{index}"),
-                    UserMemoryConfidence::UserStated,
-                )
-                .await
-                .unwrap()
-        });
-    }
-    let mut ids = std::collections::HashSet::new();
-    while let Some(result) = tasks.join_next().await {
-        let UserMemoryResponse::Updated { memory, .. } = result.unwrap() else {
-            panic!()
-        };
-        assert!(ids.insert(memory.id));
-    }
-    let UserMemoryResponse::Memories { memories, .. } =
-        fae_engine::UserMemoryRuntime::with_host_dir(&home)
-            .query("alice")
-            .await
-            .unwrap()
+async fn workspace_save_failure_releases_reservation_without_committing_defaults() {
+    let mut service = Service::start(None).await;
+    service.write_workflow("rollback", "result = 42");
+    let mut client = workflow(&service, "rollback").await;
+    let user = client.info.user_info.user_id.to_string();
+    let path = service
+        .home
+        .join(format!("session/rollback/{user}/{}.json", client.sid()));
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let proposed = service.home.join("proposed");
+    std::fs::create_dir(&proposed).unwrap();
+    let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+        .await
+        .unwrap();
+    let request = ProtocolMessage::request(
+        RequestId::new("rollback").unwrap(),
+        Some(SessionId::new(client.sid()).unwrap()),
+        RequestPayload::SessionConfigUpdate(ConfigUpdateRequest {
+            workspace: Some(proposed.to_string_lossy().into()),
+            name: Some("must not commit".into()),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let response = exchange(&mut socket, &request).await;
+    assert_eq!(response.payload.code, ResponseCode::StorageError);
+    assert!(response.payload.data.is_none());
+    let ResponsePayload::SessionGet(summary) = client
+        .request(RequestPayload::SessionGet(Empty {}))
+        .await
+        .unwrap()
     else {
         panic!()
     };
-    assert_eq!(memories.len(), 32);
-    std::fs::remove_dir_all(home).unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn activity_limit_does_not_block_status_or_shutdown_cancellation() {
-    let mut service = Service::start(None).await;
-    service.write_workflow("slow", "import time\ntime.sleep(30)\nresult = 42");
-    let mut clients = Vec::new();
-    for index in 0..8 {
-        let mut client = Client::open(
-            &service.home,
-            &service.config,
-            service.workflow("slow", &format!("active-{index}")),
-        )
-        .await
-        .unwrap();
-        loop {
-            if matches!(
-                client.next().await.unwrap(),
-                ServerMessage::Ack { round_id: Some(_) }
-            ) {
-                break;
-            }
-        }
-        clients.push(client);
-    }
-    let mut rejected = Client::open(
-        &service.home,
-        &service.config,
-        service.workflow("slow", "overflow"),
-    )
-    .await
-    .unwrap();
-    assert!(
-        matches!(rejected.next().await.unwrap(), ServerMessage::Error(error) if error.code == "resource_exhausted")
-    );
-    assert!(
-        matches!(clients[0].request(ClientMessage::Status).await.unwrap(), ServerMessage::Status(status) if status.state == "running")
-    );
-    service.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn idle_client_answers_heartbeats_without_foreground_reads() {
-    let mut service = Service::start(None).await;
-    service.init("fae").await;
-    let mut client = Client::open(
-        &service.home,
-        &service.config,
-        service.agent("idle-heartbeat"),
-    )
-    .await
-    .unwrap();
-    // Simulate the user editing for longer than the server's 45s timeout.
-    tokio::time::sleep(Duration::from_secs(50)).await;
-    assert!(
-        matches!(client.request(ClientMessage::Status).await.unwrap(), ServerMessage::Status(status) if status.state == "idle")
-    );
-    service.stop().await;
-}
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn sigterm_performs_owned_discovery_cleanup() {
-    let mut service = Service::start(None).await;
+    assert_eq!(summary.session_config.name, "test session");
     assert_eq!(
-        unsafe { libc::kill(service.config.pid as i32, libc::SIGTERM) },
-        0
+        summary.session_config.workspace.root,
+        service.home.to_string_lossy()
     );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(status) = service.child.try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!service.home.join("server.config").exists());
-    assert!(!service.home.join("server/server.token").exists());
-    assert!(
-        fae::server::lifecycle::FileLock::try_acquire(&service.home.join("server/server.lock"))
-            .unwrap()
-            .is_some()
-    );
+    start_workflow(&mut client).await;
+    assert!(matches!(
+        finish(&mut client).await.1,
+        ExecutionOutcome::Succeeded { .. }
+    ));
+    service.stop().await;
 }

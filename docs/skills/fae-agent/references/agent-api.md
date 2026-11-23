@@ -107,11 +107,13 @@ ${FAE_HOST:-~/.fae}/
 | --- | --- |
 | `agent.name` | 非空；按 ID 运行时必须与 Agent ID 相同 |
 | `agent.desc` | Agent 的简短职责说明；被挂载为子 Agent 时会注入父 Agent prompt |
-| `agent.user_id` | 非空；参与确定会话历史路径 |
-| `agent.session_id` | 非空；参与确定会话历史路径 |
+| `agent.user_id` | 非空配置字段；宿主执行时以可信用户身份覆盖 |
+| `agent.session_id` | 非空配置字段；CLI 执行时以宿主 Session ID 覆盖 |
 | `agent.metadata` | 可省略，默认为空对象；用于保存业务标签 |
 
-修改 `user_id` 或 `session_id` 会切换到另一份持久化历史。需要保持上下文时，不要随意更改。
+逻辑 Session 由可信用户与 session ID 确定，执行目标与历史存储分区另行绑定。
+CLI 不传 `--session-id` 时创建新会话；传入时只连接已有会话，不能用任意 ID 创建。
+不要通过修改这两个配置字段选择 CLI 会话或切换用户。
 
 ### Model 字段
 
@@ -199,7 +201,8 @@ Keep the final summary concise.
 
 `tag` 必须以小写英文字母开头，且只能包含小写英文字母、数字和下划线。
 
-修改 prompt 后重新启动 `fae agent`，新会话运行会读取最新内容。
+每次 Execution 在准备阶段加载并固定 config、prompt、依赖定义及内容指纹。
+修改后下一次执行重新加载，无需新建 Session；当前执行和子调用继续使用原定义。
 
 ## 5. 内置 Tool
 
@@ -419,17 +422,52 @@ fae --no-alt-screen agent --agent-id reviewer
 fae --color never agent --agent-id reviewer
 ```
 
+创建与恢复会话：
+
+```bash
+# 创建新会话；从 TUI 或 /status 获取宿主分配的 ID。
+fae agent --agent-id reviewer
+# 使用上一步已有的 ID，继续同一会话。
+fae agent --agent-id reviewer --session-id <existing-id>
+fae --workspace /absolute/path/to/workspace agent --agent-id reviewer --session-id <existing-id>
+```
+
+恢复必须使用同一 home、可信用户及匹配的 Agent 目标。未知 ID 返回 `404`，
+目标不同返回冲突。CLI 默认传当前目录，也可用全局 `--workspace` 指定目录；
+恢复时目录变化通过空闲 Session 配置更新保存，执行中修改会返回冲突。
+执行使用开始时固定的工作区；工作区设置不构成文件系统沙箱。
+
 会话内命令：
 
 | 命令 | 用途 |
 | --- | --- |
-| `/help` | 显示命令 |
-| `/status` | 显示模型和 session |
+| `/help`、`/session -h`、`/session --help` | 显示命令 |
+| `/status` | 显示 Session 摘要与执行状态 |
 | `/todo <message>` | 使用 single-agent todo mode 规划并执行该条消息 |
+| `/session new` | 创建并切换到新会话 |
+| `/session id=<id>` | 连接已存在且目标匹配的会话 |
+| `/session clean`、`/clean` | 空闲时清理当前会话历史和 todos，保留用户记忆 |
+| `/steer <message>` | 补充正在执行的 Agent |
+| `/stop` | 请求停止当前 Execution，并等待清理完成 |
 | `/clear` | 清空当前界面内容 |
 | `/exit`、`/quit` | 退出 |
 
 `/clear` 只清空界面，不删除磁盘会话历史。
+
+主服务、客户端和 Python SDK 应一起升级；公共传输只接受 v4。
+创建、查询和订阅 Session 不启动任务。每次 start 创建新 Execution，
+忙时返回冲突；steer 的接收回执与实际应用分离，可通过
+`execution/get` 读取 Queued/Applied/NotApplied。stop 校验预期 execution ID；
+finished 在子调用、插件流与 Worker 资源完成清理后发布。多个客户端可订阅同一
+Session，断开连接不取消任务；完成结果可重复读取，服务重启不会恢复执行或自动重跑。
+
+插件使用 API `0.2.0`。`fae plugin install/show/uninstall` 管理同一 home 的插件；
+安装、覆盖和卸载在服务运行时生效，当前执行继续使用原插件快照。
+插件 `session.send(content)` 输出独立 Content 通知，不写入模型历史或输入邮箱；
+输出携带 execution/invocation/output ID，客户端按来源及分支区分。
+编写插件时阅读 [Python SDK](../../../../python/fae-plugin-py/README.md)，
+使用 `read_summary/export_context/stacks/fork` 与显式 steer/stop，
+不要继续使用旧 `scope/state/bind_scope/set_state` 接口。
 
 ## 9. 用户记忆
 
@@ -453,12 +491,14 @@ ${FAE_HOST:-~/.fae}/session/<agent_id>/<user_id>/<session_id>.jsonl
 
 `history_turns` 控制新一轮读取的历史轮数。排查上下文问题时检查：
 
-- `agent_id` 和 `session_id` 是否仍是预期值。
+- Session 绑定的目标、可信 `user_id` 与实际 `session_id` 是否仍是预期值。
 - 是否切换了 `FAE_HOST` 或 `--fae-home`。
 - `history_turns` 是否为 0 或过小。
 - 历史文件是否存在且属于当前 Agent。
 
-不同用途的 Agent 应使用不同 `session_id`，避免不相关上下文互相污染。
+不同任务创建不同 Session；继续任务时使用已有 ID。历史仍按原目标、用户、会话分区保存，
+同目录 `<session_id>.json` 保存会话工作区默认值；不要把 Execution/Invocation ID
+当作历史文件名，也不要把这些文件当作执行恢复快照。
 
 ## 11. 验证配置
 

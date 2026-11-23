@@ -256,11 +256,14 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        if req.ctx.state().current().is_cancelled() {
+        if req.ctx.cancel_requested() {
             return Err(crate::Error::ContextAborted);
         }
         let ctx = req.ctx.clone();
         let meta = req.meta.clone();
+        if meta.ty != TaskType::Plan {
+            ctx.invocation_started(&meta)?;
+        }
         if meta.ty != TaskType::Plan {
             let _ = ctx.set_state(ContextState::Running);
         }
@@ -272,6 +275,7 @@ where
         if let Err(error) = &result {
             let _ = ctx.set_state(ContextState::failed(error.to_string()));
             let _ = ctx.append_stack(ContextStackDraft::new(meta, ContextStackPhase::Failed));
+            let _ = ctx.invocation_finished();
         }
         result
     }
@@ -314,11 +318,14 @@ where
         } else {
             return Err(crate::Error::RuntimeNoSupport);
         };
-        if req.ctx.state().current().is_cancelled() {
+        if req.ctx.cancel_requested() {
             return Err(crate::Error::ContextAborted);
         }
         let ctx = req.ctx.clone();
         let meta = req.meta.clone();
+        if meta.ty != TaskType::Plan {
+            ctx.invocation_started(&meta)?;
+        }
         if meta.ty != TaskType::Plan {
             let _ = ctx.set_state(ContextState::Running);
         }
@@ -346,12 +353,14 @@ where
                             ContextStackPhase::Succeeded,
                         ));
                     }
+                    let _ = ctx.invocation_finished();
                 }
                 Ok(resp.into_response())
             }
             Err(error) => {
                 let _ = ctx.set_state(ContextState::failed(error.to_string()));
                 let _ = ctx.append_stack(ContextStackDraft::new(meta, ContextStackPhase::Failed));
+                let _ = ctx.invocation_finished();
                 Err(error)
             }
         }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_openai::types::chat::CreateChatCompletionRequest;
 use fae_agent::{
-    ModelResponse, Session, SessionEventData, SingleAgentEnv, SingleAgentHook,
+    ModelResponse, SessionEventData, SessionIo, SingleAgentEnv, SingleAgentHook,
     SingleAgentHookBuilder, SingleAgentHookContext, SingleAgentPlanBuilder, ToolRequest,
 };
 use fae_engine::{
@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     while let Some(event) = session.answer().await? {
         match event.event_data()? {
             SessionEventData::ModelReasoning { content } => print!("{content}"),
-            SessionEventData::ModelOutput { content } => print!("{content}"),
+            SessionEventData::ModelOutput { content, .. } => print!("{content}"),
             SessionEventData::Completed { .. } => {
                 println!();
                 break;
