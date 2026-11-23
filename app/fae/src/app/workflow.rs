@@ -7,6 +7,7 @@ use crate::{
     protocol::*,
     tui::{Mode, TerminalUi},
 };
+use fae_agent::{PlanTarget, protocol::*};
 use std::path::{Path, PathBuf};
 
 async fn input(value: &str) -> anyhow::Result<serde_json::Value> {
@@ -26,37 +27,44 @@ pub async fn run(
     color: ColorChoice,
     no_alt_screen: bool,
 ) -> anyhow::Result<()> {
-    let open = OpenSession {
-        binding: None,
-        target: SessionTarget::Workflow {
+    let create = SessionCreateRequest {
+        name: args.id.clone(),
+        target: PlanTarget::Workflow {
             workflow_id: args.id.clone(),
-            input: input(&args.input).await?,
         },
-        session_id: None,
-        workspace: Some(workspace),
-        resume: None,
+        workspace: Some(workspace.to_string_lossy().into()),
+        options: Default::default(),
+        channels: vec![],
     };
-    let mut client = Client::open(home, config, open).await?;
+    let mut client = Client::open(home, config, create, None, None, None).await?;
+    client
+        .request(RequestPayload::SessionExecutionStart(
+            ExecutionStartRequest {
+                input: vec![ContentBlock::Json {
+                    value: input(&args.input).await?,
+                }],
+                target: None,
+                workspace: None,
+                options: None,
+            },
+        ))
+        .await?;
     if !args.interactive {
         return super::output::stream(&mut client, true).await;
     }
     let mut ui = TerminalUi::new(
         Mode::Workflow,
-        &client.info.name,
+        &client.info.session_config.name,
         None,
-        &client.info.model,
-        &client.info.session_id,
+        "—",
+        client.sid(),
         color.enabled(),
         no_alt_screen,
     )?;
     if super::agent::run_round(&mut ui, &mut client, false).await? {
         ui.wait_for_close().await?;
     }
-    let _ = client
-        .request(ClientMessage::Close {
-            cancel_active: false,
-        })
-        .await;
+    let _ = client.close().await;
     Ok(())
 }
 

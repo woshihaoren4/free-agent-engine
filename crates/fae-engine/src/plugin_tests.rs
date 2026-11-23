@@ -26,18 +26,86 @@ async fn setup(root: &Path) -> (Arc<PluginManager>, Engine, PluginAdapter) {
     let adapter = PluginAdapter::new(manager.clone());
     (manager, engine, adapter)
 }
-fn root(engine: &Engine, user: &str) -> (Ctx, CommonSession) {
-    let (_, session) = SingleAgentEnv::from_agent_id_with_user_id("fae", "hello", user);
-    let mut scope = ContextScope::root(user);
-    scope.agent_id = Some("fae".into());
-    scope.turn_id = Some(1);
-    scope.session = Some(ContextSession {
-        session_id: format!("s-{user}"),
-        session: session.clone(),
-    });
-    let ctx = engine.ctx_with_scope(scope).unwrap();
+struct SessionProbe {
+    events: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SessionControlEvent>>,
+}
+impl SessionProbe {
+    async fn outputs(&self) -> Vec<fae_agent::protocol::OutputDelta> {
+        let mut events = self.events.lock().await;
+        let mut outputs = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SessionControlEvent::Output {
+                execution_id,
+                invocation_id,
+                output_id,
+                source,
+                content,
+            } = event
+            {
+                outputs.push(fae_agent::protocol::OutputDelta {
+                    execution_id,
+                    invocation_id,
+                    output_id,
+                    source,
+                    content,
+                });
+            }
+        }
+        outputs
+    }
+}
+fn root(engine: &Engine, user: &str) -> (Ctx, SessionProbe) {
+    let target = PlanTarget::Agent {
+        agent_id: "fae".into(),
+    };
+    let workspace = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let coordinator = crate::SessionCoordinator::new(
+        engine.clone(),
+        ContextData {
+            user_info: UserInfo {
+                user_id: UserId::new(user).unwrap(),
+                name: None,
+            },
+            session_config: SessionConfig {
+                session_id: SessionId::new(format!("s-{user}")).unwrap(),
+                name: user.into(),
+                lifecycle: SessionLifecycle::Open,
+                created_at: Timestamp::now(),
+                updated_at: Timestamp::now(),
+                target: target.clone(),
+                workspace: WorkspaceBinding {
+                    root: workspace.clone(),
+                    project_files: vec![],
+                },
+                options: ExecutionOptions::default(),
+                channels: vec![],
+            },
+            memory_view: MemoryView::default(),
+            latest_execution_view: None,
+        },
+    )
+    .unwrap();
+    let events = coordinator.subscribe();
+    let execution = coordinator
+        .prepare(ExecutionSettings {
+            target,
+            workspace,
+            options: ExecutionOptions::default(),
+            definitions: vec![],
+        })
+        .unwrap();
+    coordinator.running(&execution.execution_id).unwrap();
+    let ctx = execution.ctx;
     ctx.set_state(ContextState::Running).unwrap();
-    (ctx, session)
+    (
+        ctx,
+        SessionProbe {
+            events: tokio::sync::Mutex::new(events),
+        },
+    )
 }
 async fn prompt(adapter: &PluginAdapter, ctx: &Ctx, value: &str) -> anyhow::Result<String> {
     let agent = SingleAgentInfo {
@@ -59,6 +127,245 @@ async fn prompt(adapter: &PluginAdapter, ctx: &Ctx, value: &str) -> anyhow::Resu
             value.into(),
         )
         .await
+}
+
+#[tokio::test]
+async fn saved_plugin_capability_cannot_send_into_the_next_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "saved",
+        "direct",
+        "SingleAgentHook",
+        r#"class Demo(SingleAgentHook):
+    def __init__(self):
+        self.previous = None
+    async def on_prompt(self, ctx, value):
+        if self.previous:
+            for action in (
+                lambda: self.previous.session.send([TextContent('stale')]),
+                lambda: self.previous.session.steer([TextContent('stale')], 'stale-steer'),
+                lambda: self.previous.session.stop('stale-stop'),
+            ):
+                try:
+                    await action()
+                    raise AssertionError('old capability remained live')
+                except PluginHostError:
+                    pass
+            summary = await ctx.read_summary()
+            assert summary.active_execution == ctx.execution_id
+        self.previous = ctx
+        await ctx.session.send([TextContent(value)])
+        await ctx.stacks(ContextStackQuery(limit=10))
+        return value
+"#,
+    );
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load("saved").await.unwrap();
+    let (ctx, probe) = root(&engine, "alice");
+    let binding = ctx.scope().unwrap().execution.clone().unwrap();
+    let session = binding.session.clone();
+    let settings = session.execution(None).unwrap().effective;
+    assert_eq!(prompt(&adapter, &ctx, "first").await.unwrap(), "first");
+    ctx.set_state(ContextState::succeeded(String::new()))
+        .unwrap();
+    session
+        .finishing(
+            &binding.execution_id,
+            ExecutionOutcome::Succeeded { result: vec![] },
+        )
+        .unwrap();
+    session
+        .cleaned(&binding.execution_id, &binding.invocation_id)
+        .unwrap();
+    let mut events = session.subscribe();
+    if session.read_summary().active_execution.is_some() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(
+                events.recv().await,
+                Some(SessionControlEvent::Finished { .. })
+            ) {}
+        })
+        .await
+        .unwrap();
+    }
+    let next = session.prepare(settings).unwrap();
+    session.running(&next.execution_id).unwrap();
+    next.ctx.set_state(ContextState::Running).unwrap();
+    assert_eq!(
+        prompt(&adapter, &next.ctx, "second").await.unwrap(),
+        "second"
+    );
+    let outputs = probe.outputs().await;
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].execution_id, binding.execution_id);
+    assert_eq!(outputs[1].execution_id, next.execution_id);
+    assert!(
+        matches!(&outputs[1].source, protocol::OutputSource::Plugin { plugin_id } if plugin_id == "saved")
+    );
+}
+
+#[tokio::test]
+async fn plugin_steer_acceptance_and_repeatable_processed_records_are_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "inputs",
+        "direct",
+        "SingleAgentHook",
+        r#"class Demo(SingleAgentHook):
+    async def on_prompt(self, ctx, value):
+        for request_id in ('applied', 'not-applied', 'left-queued'):
+            receipt = await ctx.session.steer([TextContent(request_id)], request_id)
+            assert receipt['accepted'] is True
+            assert receipt['execution_id'] == ctx.execution_id
+            record = await ctx.session.input_record(request_id)
+            assert record.status == InputStatus.QUEUED
+        await ctx.session.send([TextContent('queued')])
+        while True:
+            applied = await ctx.session.input_record('applied')
+            rejected = await ctx.session.input_record('not-applied')
+            if applied.status == InputStatus.APPLIED and rejected.status == InputStatus.NOT_APPLIED:
+                assert applied == await ctx.session.input_record('applied')
+                assert rejected == await ctx.session.input_record('not-applied')
+                assert rejected.reason == 'plan closed input'
+                break
+            await asyncio.sleep(0.01)
+        return value
+"#,
+    );
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load("inputs").await.unwrap();
+    let (ctx, probe) = root(&engine, "alice");
+    let binding = ctx.scope().unwrap().execution.clone().unwrap();
+    let caller = ctx.clone();
+    let call = tokio::spawn(async move { prompt(&adapter, &caller, "done").await });
+    let mut events = probe.events.lock().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !matches!(
+            events.recv().await,
+            Some(SessionControlEvent::Output { .. })
+        ) {}
+    })
+    .await
+    .unwrap();
+    let queued = binding.session.take_inputs(&binding.execution_id).unwrap();
+    assert_eq!(queued.len(), 3); // send does not enter the mailbox.
+    for (id, applied) in [("applied", true), ("not-applied", false)] {
+        binding
+            .session
+            .report(
+                &binding.execution_id,
+                ExecutionReport::InputProcessed {
+                    request_id: RequestId::new(id).unwrap(),
+                    applied,
+                    reason: (!applied).then(|| "plan closed input".into()),
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(call.await.unwrap().unwrap(), "done");
+    binding
+        .session
+        .finishing(
+            &binding.execution_id,
+            ExecutionOutcome::Succeeded { result: vec![] },
+        )
+        .unwrap();
+    binding
+        .session
+        .cleaned(&binding.execution_id, &binding.invocation_id)
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !matches!(
+            events.recv().await,
+            Some(SessionControlEvent::Finished { .. })
+        ) {}
+    })
+    .await
+    .unwrap();
+    let view = binding
+        .session
+        .execution(Some(&binding.execution_id))
+        .unwrap();
+    assert_eq!(view.inputs[0].status, InputStatus::Applied);
+    assert_eq!(view.inputs[1].status, InputStatus::NotApplied);
+    assert_eq!(view.inputs[2].status, InputStatus::NotApplied);
+}
+
+#[tokio::test]
+async fn plugin_release_waits_for_cancelled_synchronous_thread_before_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    write(
+        dir.path(),
+        "thread",
+        "direct",
+        "SingleAgentHook",
+        &format!(
+            r#"class Demo(SingleAgentHook):
+    def on_prompt(self, ctx, value):
+        import socket
+        with socket.create_connection(('127.0.0.1', {port})) as connection:
+            connection.recv(1)
+        return value
+"#
+        ),
+    );
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load("thread").await.unwrap();
+    let (ctx, _) = root(&engine, "alice");
+    let binding = ctx.scope().unwrap().execution.clone().unwrap();
+    let mut events = binding.session.subscribe();
+    let running = tokio::spawn(async move { prompt(&adapter, &ctx, "blocked").await });
+    let (mut connection, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+    binding
+        .session
+        .stop(&binding.execution_id, "test stop".into())
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    binding
+        .session
+        .finishing(
+            &binding.execution_id,
+            ExecutionOutcome::Cancelled {
+                reason: "test stop".into(),
+            },
+        )
+        .unwrap();
+    binding
+        .session
+        .cleaned(&binding.execution_id, &binding.invocation_id)
+        .unwrap();
+    assert_eq!(
+        binding.session.execution(None).unwrap().status,
+        ExecutionStatus::Finishing
+    );
+    assert!(binding.session.read_summary().active_execution.is_some());
+    use tokio::io::AsyncWriteExt;
+    connection.write_all(b"x").await.unwrap();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(SessionControlEvent::Finished { outcome, .. }) = events.recv().await {
+                break outcome;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(finished, ExecutionOutcome::Cancelled { .. }));
+    assert!(binding.session.read_summary().active_execution.is_none());
 }
 
 #[tokio::test]
@@ -508,11 +815,11 @@ async fn cancellation_acknowledges_before_release_and_does_not_cancel_other_sess
             r#"class Demo(SingleAgentHook):
     async def on_prompt(self,ctx,value):
         if value == 'cancel':
-            await ctx.cancel_run('plugin cancel')
+            await ctx.cancel_execution('plugin-stop')
             from pathlib import Path
             Path({marker:?}).touch()
             return 'must be discarded'
-        await ctx.session.send('other still alive')
+        await ctx.session.send([TextContent('other still alive')])
         return value
 "#
         ),
@@ -524,7 +831,7 @@ async fn cancellation_acknowledges_before_release_and_does_not_cancel_other_sess
     let (cancel, other) = tokio::join!(prompt(&adapter, &a, "cancel"), prompt(&adapter, &b, "ok"));
     assert!(cancel.is_err());
     assert_eq!(other.unwrap(), "ok");
-    assert!(a.state().current().is_cancelled());
+    assert!(a.cancel_requested());
     assert!(!b.state().current().is_terminal());
     // Synchronize with the worker through a subsequent request, rather than sleeping.
     prompt(&adapter, &b, "barrier").await.unwrap();
@@ -532,7 +839,7 @@ async fn cancellation_acknowledges_before_release_and_does_not_cancel_other_sess
         marker.exists(),
         "the cancellation RPC did not reach its awaiting caller"
     );
-    assert_eq!(session.drain_outputs().await.len(), 2);
+    assert_eq!(session.outputs().await.len(), 2);
 }
 #[tokio::test]
 async fn tools_route_from_same_instance_and_reject_native_or_direct_conflicts() {
@@ -593,7 +900,7 @@ async fn tools_route_from_same_instance_and_reject_native_or_direct_conflicts() 
     assert_eq!(manager.snapshot().nodes.len(), 1);
 }
 #[tokio::test]
-async fn context_bridge_fork_stacks_messages_and_child_cancel() {
+async fn context_bridge_public_facts_output_and_local_child_cancel() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -604,21 +911,15 @@ async fn context_bridge_fork_stacks_messages_and_child_cancel() {
     async def on_prompt(self,ctx,value):
         engine=await ctx.get_engine()
         assert engine.same_engine(await ctx.get_engine())
-        assert (await ctx.scope()).user.user_id == ctx.user_id
+        assert (await ctx.read_summary()).user_info.user_id == 'alice'
         session=await ctx.get_session()
-        await session.send('before')
-        child=await ctx.fork(ContextChildSpec())
-        await child.set_state(ContextState.running())
-        view=child.state()
-        await view.current()
-        await child.cancel('child only')
-        await view.changed()
-        assert (await view.current()).is_cancelled()
-        await view.aclose()
-        await ctx.append_stack(ContextStackDraft(TaskMeta('t','p',TaskType(),'plugin','bridge'),ContextStackPhase.STARTED))
-        assert len(await ctx.stacks(ContextStackQuery()))==1
-        assert not (await ctx.state().current()).is_terminal()
-        await session.send('after')
+        await session.send([TextContent('before')])
+        child=await ctx.fork(ContextChildSpec('plugin-child'))
+        assert child.execution_id == ctx.execution_id
+        assert child.invocation_id != ctx.invocation_id
+        await child.cancel_local('child only')
+        assert (await ctx.read_summary()).context.latest_execution.status == ExecutionStatus.RUNNING
+        await session.send([TextContent('after')])
         return value+'ok'
 "#,
     );
@@ -626,15 +927,30 @@ async fn context_bridge_fork_stacks_messages_and_child_cancel() {
     manager.load("bridge").await.unwrap();
     let (ctx, session) = root(&engine, "alice");
     assert_eq!(prompt(&adapter, &ctx, "").await.unwrap(), "ok");
-    let outputs = session.drain_outputs().await;
+    let outputs = session.outputs().await;
     assert_eq!(outputs.len(), 2);
-    assert!(
-        outputs
-            .iter()
-            .all(|o| o.input_type == "plugin_message" && o.output["plugin_id"] == "bridge")
+    assert!(outputs.iter().all(|o| {
+        o.execution_id
+            == ctx
+                .scope()
+                .unwrap()
+                .execution
+                .as_ref()
+                .unwrap()
+                .execution_id
+    }));
+    assert_eq!(
+        outputs[0].content,
+        vec![fae_agent::protocol::ContentBlock::Text {
+            text: "before".into()
+        }]
     );
-    assert_eq!(outputs[0].output["text"], "before");
-    assert_eq!(outputs[1].output["text"], "after");
+    assert_eq!(
+        outputs[1].content,
+        vec![fae_agent::protocol::ContentBlock::Text {
+            text: "after".into()
+        }]
+    );
     assert!(!ctx.state().current().is_terminal());
 }
 #[tokio::test]
@@ -653,7 +969,7 @@ async fn concurrent_sessions_use_one_worker_without_serializing() {
         self.count+=1
         if self.count==2: self.ready.set()
         await self.ready.wait()
-        return ctx.user_id
+        return (await ctx.read_summary()).user_info.user_id
 "#,
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
@@ -673,7 +989,7 @@ async fn model_predicates_route_aliases_once_and_detect_conflicts_before_exec() 
     def __init__(self):
         self.matches = {{}}
     async def match_model(self,ctx,model):
-        assert (await ctx.scope()).user.user_id == ctx.user_id
+        assert (await ctx.read_summary()).user_info.user_id in ('alice', 'bob')
         if model == 'bad-result': return 'invalid'
         self.matches[model] = self.matches.get(model,0)+1
         return model.startswith('family-')
@@ -770,7 +1086,7 @@ async fn model_stream_and_python_wrapper_pull_host_chunks() {
     async def exec(self,ctx,request):
         return ModelResponse.streaming(self.chunks(ctx,request))
     async def chunks(self,ctx,request):
-        await ctx.session.send('stream alive')
+        await ctx.session.send([TextContent('stream alive')])
         base={'id':'r','object':'chat.completion.chunk','created':0,'model':request.model}
         yield {**base,'choices':[{'index':0,'delta':{'role':'assistant','content':'hello'},'finish_reason':None}]}
         yield {**base,'choices':[{'index':0,'delta':{},'finish_reason':'stop'}]}
@@ -831,8 +1147,10 @@ async fn model_stream_and_python_wrapper_pull_host_chunks() {
     );
     assert!(chunks.iter().all(|c| c.is_ok()));
     assert_eq!(
-        session.drain_outputs().await[0].output["text"],
-        "stream alive"
+        session.outputs().await[0].content,
+        vec![fae_agent::protocol::ContentBlock::Text {
+            text: "stream alive".into()
+        }]
     );
 }
 
@@ -850,7 +1168,7 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
     def __init__(self):
         self.closed = asyncio.Event()
     async def exec(self,ctx,request):
-        if ctx.user_id == 'bob':
+        if (await ctx.read_summary()).user_info.user_id == 'bob':
             await self.closed.wait()
             return ModelResponse.completed({'id':'r','object':'chat.completion','created':0,
                 'model':request.model,'choices':[{'index':0,'message':{'role':'assistant','content':'closed'},
@@ -867,7 +1185,7 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("idle").await.unwrap();
-    let (alice, _) = root(&engine, "alice");
+    let (alice, probe) = root(&engine, "alice");
     let (bob, _) = root(&engine, "bob");
     let request: CreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
         "model":"plugin:idle/default","messages":[{"role":"user","content":"hi"}],"stream":true
@@ -886,9 +1204,26 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
             .as_deref(),
         Some("visible")
     );
-    alice
-        .set_state(ContextState::cancelled("stop idle stream"))
+    let scope = alice.scope().unwrap();
+    let binding = scope.execution.as_ref().unwrap();
+    binding
+        .session
+        .stop(&binding.execution_id, "stop idle stream".into())
         .unwrap();
+    binding
+        .session
+        .finishing(
+            &binding.execution_id,
+            ExecutionOutcome::Cancelled {
+                reason: "stop idle stream".into(),
+            },
+        )
+        .unwrap();
+    binding
+        .session
+        .cleaned(&binding.execution_id, &binding.invocation_id)
+        .unwrap();
+    assert!(binding.session.read_summary().active_execution.is_some());
     // Keep the stream alive without polling. Bob's request is a cleanup barrier.
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -901,10 +1236,21 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
         matches!(response,ModelResponse::Completed(response) if response.choices[0].message.content.as_deref()==Some("closed"))
     );
     assert!(stream.next().await.unwrap().is_err());
+    let mut events = probe.events.lock().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, SessionControlEvent::Finished { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(binding.session.read_summary().active_execution.is_none());
 }
 
 #[tokio::test]
-async fn agent_json_success_discards_hook_return_and_model_rejects_json_output() {
+async fn plugin_completion_uses_hook_return_and_exposes_no_terminal_write_api() {
     let dir = tempfile::tempdir().unwrap();
     write(
         dir.path(),
@@ -913,8 +1259,9 @@ async fn agent_json_success_discards_hook_return_and_model_rejects_json_output()
         "SingleAgentHook",
         r#"class Demo(SingleAgentHook):
     async def on_prompt(self,ctx,value):
-        await ctx.set_state(ContextState.succeeded('plugin result'))
-        return 'must be discarded'
+        assert not hasattr(ctx, 'set_state')
+        assert not hasattr(ctx, 'bind_scope')
+        return 'plugin result'
 "#,
     );
     write(
@@ -926,11 +1273,7 @@ async fn agent_json_success_discards_hook_return_and_model_rejects_json_output()
     async def match_model(self,ctx,model):
         return model == 'plugin:typed/default'
     async def exec(self,ctx,request):
-        try:
-            await ctx.set_state(ContextState.succeeded('invalid model output'))
-            raise AssertionError('native model task accepted JSON output')
-        except UnsupportedOutputType:
-            pass
+        assert not hasattr(ctx, 'set_state')
         return ModelResponse.completed({'id':'r','object':'chat.completion','created':0,
             'model':request.model,'choices':[{'index':0,'message':{'role':'assistant','content':'typed'},
             'finish_reason':'stop'}]})
@@ -940,15 +1283,8 @@ async fn agent_json_success_discards_hook_return_and_model_rejects_json_output()
     manager.load("success").await.unwrap();
     manager.load("typed").await.unwrap();
     let (agent, _) = root(&engine, "alice");
-    assert!(prompt(&adapter, &agent, "").await.is_err());
-    let state = agent.state().current();
-    let ContextState::Succeeded { output } = state.as_ref() else {
-        panic!("expected JSON success")
-    };
-    assert_eq!(
-        output.json_snapshot().unwrap(),
-        serde_json::json!("plugin result")
-    );
+    assert_eq!(prompt(&adapter, &agent, "").await.unwrap(), "plugin result");
+    assert!(!agent.state().current().is_terminal());
     let (model, _) = root(&engine, "bob");
     let request = serde_json::from_value(serde_json::json!({
         "model":"plugin:typed/default","messages":[{"role":"user","content":"hi"}]

@@ -105,7 +105,16 @@ impl Tools for AgentTool {
             }
         };
         if let Some(session_id) = args.session_id {
+            if let Some(binding) = ctx.scope()?.execution.as_ref() {
+                anyhow::ensure!(
+                    binding.session.key().session_id.as_str() == session_id,
+                    "child Agent cannot override its execution session"
+                );
+            }
             env = env.with_session_id(session_id);
+        }
+        if let Some(binding) = ctx.scope()?.execution.as_ref() {
+            env = env.with_session_id(binding.session.key().session_id.to_string());
         }
 
         let engine = ctx.get_engine();

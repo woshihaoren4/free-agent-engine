@@ -13,15 +13,17 @@ Output = TypeVar("Output")
 
 class HookNext(Generic[Input, Output]):
     def __init__(self, callback: Callable[[Input], Awaitable[Output]],
-                 check: Callable[[Any], None]) -> None:
+                 check: Callable[[Any], None], owner_check: Callable[[], bool] | None = None) -> None:
         self._callback = callback
         self._check = check
         self._owner = asyncio.current_task()
         self._used = False
         self._active = True
+        self._owner_check = owner_check
 
     async def __call__(self, value: Input) -> Output:
-        if not self._active or self._used or asyncio.current_task() is not self._owner:
+        if (not self._active or self._used or asyncio.current_task() is not self._owner
+                or (self._owner_check is not None and not self._owner_check())):
             raise InvalidHookNext("next must be awaited once in its owning method")
         self._used = True
         self._check(value)

@@ -111,6 +111,7 @@ impl TodoContextBinding {
 
 #[derive(Debug, Clone)]
 pub struct ContextScope {
+    pub execution: Option<crate::ExecutionBinding>,
     pub scope_id: String,
     pub parent_scope_id: Option<String>,
     pub user: Arc<ContextUser>,
@@ -128,6 +129,7 @@ pub struct ContextScope {
 impl ContextScope {
     pub fn root(user_id: impl Into<String>) -> Self {
         Self {
+            execution: None,
             scope_id: wd_tools::uuid::v4(),
             parent_scope_id: None,
             user: Arc::new(ContextUser {
@@ -209,6 +211,7 @@ impl ContextOutput {
                     .downcast_ref::<String>()
                     .map(|value| value.clone().into())
             })
+            .or_else(|| value.is::<()>().then_some(serde_json::Value::Null))
             .map(Arc::new);
         Self {
             value: Arc::new(Mutex::new(Some(value))),
@@ -334,7 +337,8 @@ impl ContextStackDraft {
         }
     }
 }
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextStackQuery {
     pub tree: bool,
     pub task_id: Option<String>,
@@ -346,10 +350,18 @@ pub struct ContextStackQuery {
 }
 
 pub trait Context: Debug + Send + Sync + 'static {
-    fn plugin_run(&self) -> Option<Arc<crate::plugin::PluginRun>> {
+    /// Cancellation is a signal; it does not commit a terminal result.
+    fn cancellation_signal(&self) -> Option<watch::Receiver<Option<Arc<str>>>> {
         None
     }
-    fn bind_plugin_run(&self, _run: Arc<crate::plugin::PluginRun>) {}
+    fn request_cancel(&self, reason: Arc<str>) -> anyhow::Result<()> {
+        self.set_state(ContextState::Cancelled { reason })?;
+        Ok(())
+    }
+    fn plugin_execution(&self) -> Option<Arc<crate::plugin::PluginExecutionBinding>> {
+        None
+    }
+    fn bind_plugin_execution(&self, _binding: Arc<crate::plugin::PluginExecutionBinding>) {}
     /// Host-only short synchronous admission; implementations can serialize it
     /// with terminal publication. The action must never call back into this Ctx.
     fn with_active(&self, action: &mut dyn FnMut() -> anyhow::Result<()>) -> anyhow::Result<()> {
@@ -440,6 +452,208 @@ impl WeakCtx {
     }
 }
 impl Ctx {
+    /// Fix loaded definition data once per Execution, shared by child Invocations.
+    pub async fn definition<T, F>(
+        &self,
+        key: String,
+        target: crate::PlanTarget,
+        source: Option<String>,
+        load: F,
+    ) -> anyhow::Result<T>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+        F: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        use sha2::{Digest, Sha256};
+        let Some(binding) = self.scope().ok().and_then(|scope| scope.execution.clone()) else {
+            return load.await;
+        };
+        let mut definitions = binding.definitions.lock().await;
+        if let Some(value) = definitions.get(&key) {
+            return Ok(serde_json::from_value(value.clone())?);
+        }
+        let loaded = load.await?;
+        let value = serde_json::to_value(&loaded)?;
+        let content_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?));
+        binding.session.report(
+            &binding.execution_id,
+            crate::ExecutionReport::DefinitionLoaded(crate::DefinitionRef {
+                target,
+                source,
+                content_fingerprint,
+            }),
+        )?;
+        definitions.insert(key, value);
+        Ok(loaded)
+    }
+    pub fn execution_output(
+        &self,
+        output_id: String,
+        content: crate::protocol::Content,
+    ) -> anyhow::Result<()> {
+        let binding = self
+            .scope()?
+            .execution
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("context has no session execution"))?;
+        binding.session.report(
+            &binding.execution_id,
+            crate::ExecutionReport::Output {
+                invocation_id: binding.invocation_id,
+                output_id,
+                source: crate::protocol::OutputSource::Runtime,
+                content,
+            },
+        )?;
+        Ok(())
+    }
+    pub fn cancel_requested(&self) -> bool {
+        self.cancellation_signal()
+            .is_some_and(|signal| signal.borrow().is_some())
+            || self.state().current().is_cancelled()
+    }
+
+    /// Register actual dispatch, rather than treating all debug scopes as calls.
+    pub fn invocation_started(&self, meta: &TaskMeta) -> anyhow::Result<()> {
+        self.invocation_dispatch(meta, None)
+    }
+
+    pub fn invocation_plan_started(&self, meta: &TaskMeta, plan_id: &str) -> anyhow::Result<()> {
+        self.invocation_dispatch(meta, Some(plan_id))
+    }
+
+    fn invocation_dispatch(&self, meta: &TaskMeta, plan_id: Option<&str>) -> anyhow::Result<()> {
+        let Some(binding) = self.scope().ok().and_then(|s| s.execution.clone()) else {
+            return Ok(());
+        };
+        let view = binding.session.execution(Some(&binding.execution_id))?;
+        let scope = self.scope()?;
+        let mut invocation = view
+            .invocations
+            .iter()
+            .find(|v| v.invocation_id == binding.invocation_id)
+            .cloned()
+            .unwrap_or(crate::InvocationView {
+                invocation_id: binding.invocation_id.clone(),
+                parent_invocation_id: binding.parent_invocation_id.clone(),
+                kind: if meta.ty == crate::TaskType::Plan {
+                    crate::InvocationKind::Plan
+                } else {
+                    crate::InvocationKind::Runtime
+                },
+                plan_id: crate::PlanInstanceId::new(if let Some(plan_id) = plan_id {
+                    plan_id.to_owned()
+                } else if meta.plan_id.is_empty() {
+                    meta.id.clone()
+                } else {
+                    meta.plan_id.clone()
+                })?,
+                task_id: Some(crate::TaskId::new(meta.id.clone())?),
+                runtime_id: Some(meta.executor.clone()),
+                agent_id: scope.agent_id.clone(),
+                workflow_id: scope.workflow_id.clone(),
+                node_id: scope.node_id.clone(),
+                model: None,
+                status: crate::InvocationStatus::Preparing,
+            });
+        if !view
+            .invocations
+            .iter()
+            .any(|v| v.invocation_id == binding.invocation_id)
+        {
+            binding.session.report(
+                &binding.execution_id,
+                crate::ExecutionReport::InvocationRegistered(invocation.clone()),
+            )?;
+        }
+        invocation.status = crate::InvocationStatus::Running;
+        if let Some(plan_id) = plan_id {
+            invocation.plan_id = crate::PlanInstanceId::new(plan_id)?;
+        } else if !meta.plan_id.is_empty() {
+            invocation.plan_id = crate::PlanInstanceId::new(meta.plan_id.clone())?;
+        }
+        invocation.task_id = Some(crate::TaskId::new(meta.id.clone())?);
+        invocation.runtime_id = (!meta.executor.is_empty()).then(|| meta.executor.clone());
+        invocation.agent_id = scope.agent_id.clone();
+        invocation.workflow_id = scope.workflow_id.clone();
+        invocation.node_id = scope.node_id.clone();
+        binding.session.report(
+            &binding.execution_id,
+            crate::ExecutionReport::InvocationChanged(invocation),
+        )?;
+        Ok(())
+    }
+
+    pub fn initial_input_applied(&self) -> anyhow::Result<()> {
+        let Some(binding) = self.scope().ok().and_then(|scope| scope.execution.clone()) else {
+            return Ok(());
+        };
+        if binding.parent_invocation_id.is_some() {
+            return Ok(());
+        }
+        if let Some(request_id) = binding.session.initial_input(&binding.execution_id)? {
+            binding.session.report(
+                &binding.execution_id,
+                crate::ExecutionReport::InputProcessed {
+                    request_id,
+                    applied: true,
+                    reason: None,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn invocation_model(&self, model: crate::ModelRef) -> anyhow::Result<()> {
+        let Some(binding) = self.scope().ok().and_then(|scope| scope.execution.clone()) else {
+            return Ok(());
+        };
+        let view = binding.session.execution(Some(&binding.execution_id))?;
+        let Some(mut invocation) = view
+            .invocations
+            .into_iter()
+            .find(|invocation| invocation.invocation_id == binding.invocation_id)
+        else {
+            return Ok(());
+        };
+        invocation.model = Some(model);
+        binding.session.report(
+            &binding.execution_id,
+            crate::ExecutionReport::InvocationChanged(invocation),
+        )?;
+        Ok(())
+    }
+
+    pub fn invocation_finished(&self) -> anyhow::Result<()> {
+        let Some(binding) = self.scope().ok().and_then(|s| s.execution.clone()) else {
+            return Ok(());
+        };
+        let view = binding.session.execution(Some(&binding.execution_id))?;
+        let Some(mut invocation) = view
+            .invocations
+            .iter()
+            .find(|v| v.invocation_id == binding.invocation_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if invocation.status.is_terminal() {
+            return Ok(());
+        }
+        invocation.status = match &*self.state().current() {
+            ContextState::Succeeded { .. } => crate::InvocationStatus::Succeeded,
+            ContextState::Failed { .. } => crate::InvocationStatus::Failed,
+            _ => crate::InvocationStatus::Cancelled,
+        };
+        binding.session.report(
+            &binding.execution_id,
+            crate::ExecutionReport::InvocationChanged(invocation),
+        )?;
+        binding
+            .session
+            .cleaned(&binding.execution_id, &binding.invocation_id)?;
+        Ok(())
+    }
     pub fn same_context(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -473,6 +687,16 @@ impl Ctx {
         Self(Arc::new(ContextNull))
     }
     pub async fn cancellation(&self) -> Arc<str> {
+        if let Some(mut signal) = self.cancellation_signal() {
+            loop {
+                if let Some(reason) = signal.borrow().clone() {
+                    return reason;
+                }
+                if signal.changed().await.is_err() {
+                    return std::future::pending().await;
+                }
+            }
+        }
         let mut view = self.state();
         loop {
             if let ContextState::Cancelled { reason } = &*view.current() {

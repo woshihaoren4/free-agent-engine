@@ -1,42 +1,42 @@
 from typing import Any
-from .types import MessageReceipt
+from .types import ContentBlock, InputRecord, OutputReceipt, encode
 
 
 class Session:
-    __slots__ = ("_host", "_identity", "_handle")
+    __slots__ = ("_host", "_binding", "_session_id")
 
-    def __init__(self, *, _host: Any, _identity: dict[str, Any], _handle: str):
+    def __init__(self, *, _host: Any, _binding: dict[str, Any], _session_id: str):
         self._host = _host
-        self._identity = dict(_identity)
-        self._handle = _handle
+        self._binding = dict(_binding)
+        self._session_id = _session_id
 
     @property
     def session_id(self) -> str:
-        return self._identity["session_id"]
+        return self._session_id
 
     @property
-    def user_id(self) -> str:
-        return self._identity["user_id"]
+    def execution_id(self) -> str:
+        return self._binding["execution_id"]
 
     @property
-    def agent_id(self) -> str | None:
-        return self._identity.get("agent_id")
+    def invocation_id(self) -> str:
+        return self._binding["invocation_id"]
 
-    @property
-    def turn_id(self) -> int | None:
-        return self._identity.get("turn_id")
+    async def send(self, content: list[ContentBlock]) -> OutputReceipt:
+        result = await self._host.call("/request/plugin/output/send",
+            {"access": self._host.access(self._binding), "content": encode(content)})
+        return OutputReceipt(**result)
 
-    @property
-    def run_id(self) -> str | None:
-        return self._identity.get("run_id")
+    async def steer(self, content: list[ContentBlock], request_id: str) -> dict[str, Any]:
+        return await self._host.call("/request/session/execution/steer",
+            {"execution_id": self.execution_id, "input": encode(content)}, request_id)
 
-    async def send(self, text: str) -> MessageReceipt:
-        if not isinstance(text, str):
-            raise TypeError("Session.send requires text")
-        if not text.strip():
-            raise ValueError("Session message must not be blank")
-        result = await self._host.call("session.send", {"handle": self._handle, "text": text})
-        return MessageReceipt(**result)
+    async def stop(self, request_id: str, reason: str | None = None) -> dict[str, Any]:
+        return await self._host.call("/request/session/execution/stop",
+            {"execution_id": self.execution_id, "reason": reason}, request_id)
 
-    def _wire_reference(self) -> dict[str, str]:
-        return {"handle": self._handle}
+    async def input_record(self, request_id: str) -> InputRecord | None:
+        data = await self._host.call("/request/session/execution/get",
+            {"execution_id": self.execution_id, "input_request_id": request_id})
+        record = data["acceptance"]["input"]
+        return InputRecord.from_dict(record) if record else None

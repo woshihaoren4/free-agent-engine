@@ -1,5 +1,6 @@
 use super::config::Config;
-use crate::protocol::{OpenSession, SessionBinding, SessionTarget};
+use crate::session_host::LarkPrincipal as SessionBinding;
+use fae_agent::PlanTarget;
 use sha2::{Digest, Sha256};
 
 pub fn hash(tuple: &[&str]) -> String {
@@ -68,11 +69,12 @@ pub fn worker_key(binding: &SessionBinding, agent: &str) -> String {
         &session_id(binding),
     ])
 }
-pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
-    let binding = open
-        .binding
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Lark binding required"))?;
+pub fn validate(
+    config: &Config,
+    binding: &SessionBinding,
+    target: &PlanTarget,
+    recovering: bool,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         binding.channel == "lark"
             && binding.app_id == config.app_id
@@ -86,17 +88,15 @@ pub fn validate(config: &Config, open: &OpenSession) -> anyhow::Result<()> {
         "Invalid Lark identity"
     );
     anyhow::ensure!(
-        open.session_id
-            .as_deref()
-            .is_some_and(|id| owns_session(binding, id)),
+        owns_session(binding, &session_id(binding)),
         "Lark session identity mismatch"
     );
     anyhow::ensure!(
-        binding.session_mapping_version == 2 || open.resume.is_some(),
+        binding.session_mapping_version == 2 || recovering,
         "Legacy Lark mapping is only available for recovery"
     );
     anyhow::ensure!(
-        matches!(&open.target, SessionTarget::Agent { source: fae_agent::SingleAgentSource::AgentId(id) } if id == &config.agent_id),
+        matches!(target, PlanTarget::Agent { agent_id } if agent_id == &config.agent_id),
         "Lark Agent mismatch"
     );
     Ok(())

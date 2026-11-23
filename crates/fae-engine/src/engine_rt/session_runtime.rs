@@ -180,6 +180,8 @@ impl SessionRuntime {
     ) -> fae_agent::Result<TaskResp<SessionResponse>> {
         Self::validate_context(&task)?;
         let TaskReq { ctx, mut meta, req } = task;
+        let binding = ctx.scope()?.execution.clone();
+        let report_request = req.clone();
         let resp = match req {
             SessionRequest::Add {
                 agent_id,
@@ -207,7 +209,56 @@ impl SessionRuntime {
             }
         };
 
-        meta.publisher = Self::ID.to_string();
+        if let Some(binding) = binding {
+            let partition = match &report_request {
+                SessionRequest::Add {
+                    agent_id,
+                    user_id,
+                    session_id,
+                    ..
+                }
+                | SessionRequest::Query {
+                    agent_id,
+                    user_id,
+                    session_id,
+                    ..
+                }
+                | SessionRequest::Delete {
+                    agent_id,
+                    user_id,
+                    session_id,
+                } => fae_agent::protocol::ConversationPartition {
+                    target_id: agent_id.clone(),
+                    user_id: user_id.clone(),
+                    session_id: fae_agent::SessionId::new(session_id.clone())
+                        .map_err(anyhow::Error::from)?,
+                },
+            };
+            let report = match (&report_request, &resp) {
+                (
+                    SessionRequest::Query { offset, .. },
+                    SessionResponse::History { messages, .. },
+                ) => Some(fae_agent::ExecutionReport::HistoryLoaded {
+                    partition,
+                    messages: messages.clone(),
+                    offset: offset.unwrap_or(0),
+                }),
+                (SessionRequest::Add { messages, .. }, SessionResponse::Added { .. }) => {
+                    Some(fae_agent::ExecutionReport::HistoryAdded {
+                        invocation_id: binding.invocation_id.clone(),
+                        partition,
+                        messages: messages.clone(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(report) = report {
+                let _ = binding.session.report(&binding.execution_id, report);
+            }
+        }
+        if meta.publisher.is_empty() {
+            meta.publisher = Self::ID.to_string();
+        }
         Ok(TaskResp { ctx, meta, resp })
     }
 
@@ -242,9 +293,13 @@ impl SessionRuntime {
         );
         anyhow::ensure!(
             scope
-                .session
+                .execution
                 .as_ref()
-                .is_some_and(|s| s.session_id == *session_id),
+                .map(|binding| binding.session.key().session_id.as_str() == session_id)
+                .unwrap_or_else(|| scope
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.session_id == *session_id)),
             "session request session does not match context session"
         );
         Ok(())
@@ -296,48 +351,19 @@ impl RuntimeSelectExec<SessionRequest, SessionResponse, SessionQuery, SessionRes
             if meta.publisher.is_empty() {
                 meta.publisher = Self::ID.to_string();
             }
-            let response_ctx = ctx.clone();
             let error_meta = meta.clone();
             let runtime = SessionRuntime::with_host_dir(host_dir);
-            let result = match req {
-                SessionRequest::Add {
-                    agent_id,
-                    user_id,
-                    session_id,
-                    messages,
-                } => {
-                    runtime
-                        .add(&agent_id, &user_id, &session_id, &messages)
-                        .await
-                }
-                SessionRequest::Delete {
-                    agent_id,
-                    user_id,
-                    session_id,
-                } => runtime.delete(&agent_id, &user_id, &session_id).await,
-                SessionRequest::Query {
-                    agent_id,
-                    user_id,
-                    session_id,
-                    limit,
-                    offset,
-                } => {
-                    runtime
-                        .query_page(&agent_id, &user_id, &session_id, limit, offset)
-                        .await
-                }
-            }
-            .map(|resp| Event {
-                from_rt_id: Self::ID.to_string(),
-                event_type: EventType::TaskResult(
-                    TaskResp {
-                        ctx: response_ctx,
-                        meta,
-                        resp,
-                    }
-                    .into_response(),
-                ),
-            });
+            let result = runtime
+                .exec_session(TaskReq {
+                    ctx: ctx.clone(),
+                    meta,
+                    req,
+                })
+                .await
+                .map(|response| Event {
+                    from_rt_id: Self::ID.to_string(),
+                    event_type: EventType::TaskResult(response.into_response()),
+                });
 
             match result {
                 Ok(event) => {

@@ -5,6 +5,13 @@ use std::fmt::Debug;
 pub trait PlanBuilder: Debug + Send + Sync + 'static {
     fn ty(&self) -> String;
     async fn build(&self, rt: RT, ctx: Ctx, env: common::AnyType) -> anyhow::Result<Box<dyn Plan>>;
+    async fn prepare_child_spec(
+        &self,
+        _ctx: &Ctx,
+        env: &mut common::AnyType,
+    ) -> anyhow::Result<crate::ContextChildSpec> {
+        self.child_spec(env).await
+    }
     async fn child_spec(
         &self,
         _env: &mut common::AnyType,
@@ -22,6 +29,16 @@ pub trait PlanBuilderWithEnv<ENV: 'static>: Debug + Send + Sync + 'static {
         super::to_plan_ty::<ENV>()
     }
     async fn build(&self, rt: RT, ctx: Ctx, env: ENV) -> anyhow::Result<Box<dyn Plan>>;
+    async fn prepare_child_spec(
+        &self,
+        _ctx: &Ctx,
+        env: &ENV,
+    ) -> anyhow::Result<crate::ContextChildSpec>
+    where
+        ENV: Sync,
+    {
+        self.child_spec(env).await
+    }
     async fn child_spec(&self, _env: &ENV) -> anyhow::Result<crate::ContextChildSpec> {
         Ok(crate::ContextChildSpec {
             execution: true,
@@ -35,7 +52,7 @@ pub struct PlanBuilderWithEnvWrapper<ENV> {
     inner: Box<dyn PlanBuilderWithEnv<ENV>>,
 }
 
-impl<ENV> PlanBuilderWithEnvWrapper<ENV> {
+impl<ENV: 'static> PlanBuilderWithEnvWrapper<ENV> {
     pub fn new(inner: Box<dyn PlanBuilderWithEnv<ENV>>) -> Self {
         Self { inner }
     }
@@ -65,5 +82,15 @@ where
             .downcast_ref::<ENV>()
             .ok_or_else(|| anyhow::anyhow!("plan environment type mismatch"))?;
         self.inner.child_spec(env).await
+    }
+    async fn prepare_child_spec(
+        &self,
+        ctx: &Ctx,
+        env: &mut common::AnyType,
+    ) -> anyhow::Result<crate::ContextChildSpec> {
+        let env = env
+            .downcast_ref::<ENV>()
+            .ok_or_else(|| anyhow::anyhow!("plan environment type mismatch"))?;
+        self.inner.prepare_child_spec(ctx, env).await
     }
 }

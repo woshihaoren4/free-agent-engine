@@ -20,7 +20,7 @@ enum PlanCompletion {
 
 #[derive(Debug)]
 struct PlanExecution {
-    plan: Box<dyn Plan>,
+    plan: Option<Box<dyn Plan>>,
     ctx: Ctx,
     completion: Option<PlanCompletion>,
     pending_order: Vec<String>,
@@ -84,7 +84,7 @@ impl PlanRuntime {
             mut meta,
             req: mut plan,
         } = task;
-        if ctx.state().current().is_cancelled() {
+        if ctx.cancel_requested() {
             plan.abort(
                 PLAN_ABORT_CODE,
                 fae_agent::Error::ContextAborted.to_string(),
@@ -103,6 +103,7 @@ impl PlanRuntime {
         }
         meta.executor = Self::ID.into();
         let plan_meta = meta;
+        ctx.invocation_plan_started(&plan_meta, plan.id())?;
         let _ = ctx.append_stack(ContextStackDraft::new(
             plan_meta.clone(),
             ContextStackPhase::Started,
@@ -110,7 +111,7 @@ impl PlanRuntime {
         let done = Arc::new(tokio::sync::Notify::new());
         let watch_ctx = ctx.clone();
         let execution = Arc::new(Mutex::new(PlanExecution {
-            plan,
+            plan: Some(plan),
             ctx,
             completion: Some(completion),
             pending_order: Vec::new(),
@@ -128,13 +129,12 @@ impl PlanRuntime {
         }
 
         // Bounded to this execution: stop the observer when the plan is removed.
-        let mut view = watch_ctx.state();
         let plans = self.plans.clone();
         let sender = self.event_sender.clone();
         let watch_id = execution_id.clone();
         tokio::spawn(async move {
             loop {
-                if view.current().is_cancelled() {
+                if watch_ctx.cancel_requested() {
                     let execution = { plans.lock().await.remove(&watch_id) };
                     if let Some(execution) = execution {
                         let mut execution = execution.lock().await;
@@ -146,11 +146,22 @@ impl PlanRuntime {
                             execution.meta.clone(),
                             ContextStackPhase::Cancelled,
                         ));
-                        execution.plan.abort(PLAN_ABORT_CODE, message.clone()).await;
+                        execution
+                            .plan
+                            .as_mut()
+                            .unwrap()
+                            .abort(PLAN_ABORT_CODE, message.clone())
+                            .await;
                         let _ = execution.ctx.append_stack(ContextStackDraft::new(
                             execution.meta.clone(),
                             ContextStackPhase::CleanupFinished,
                         ));
+                        drop(execution.plan.take());
+                        execution.responses.clear();
+                        let _ = execution
+                            .ctx
+                            .set_state(ContextState::cancelled(message.clone()));
+                        let _ = execution.ctx.invocation_finished();
                         match execution.completion.take() {
                             Some(PlanCompletion::Exec(reply)) => {
                                 let _ = reply.send(Err(anyhow::anyhow!(message)));
@@ -174,7 +185,7 @@ impl PlanRuntime {
                 }
                 tokio::select! {
                     _ = done.notified() => break,
-                    result = view.changed() => { if result.is_err() { break; } }
+                    _ = watch_ctx.cancellation() => {}
                 }
             }
         });
@@ -183,7 +194,7 @@ impl PlanRuntime {
             let mut execution = execution.lock().await;
             let ctx = execution.ctx.clone();
             tokio::select! {
-                next = execution.plan.init() => Some(next),
+                next = execution.plan.as_mut().unwrap().init() => Some(next),
                 _ = ctx.cancellation() => None,
             }
         };
@@ -265,7 +276,7 @@ impl PlanRuntime {
 
                 let rt = ctx.get_engine().rt();
                 for mut task in tasks {
-                    if ctx.state().current().is_cancelled() {
+                    if ctx.cancel_requested() {
                         self.abort_plan(plan_id).await;
                         return;
                     }
@@ -306,11 +317,19 @@ impl PlanRuntime {
             let _ = execution
                 .ctx
                 .append_stack(ContextStackDraft::new(execution.meta.clone(), phase));
-            execution.plan.abort(PLAN_ABORT_CODE, message.clone()).await;
+            execution
+                .plan
+                .as_mut()
+                .unwrap()
+                .abort(PLAN_ABORT_CODE, message.clone())
+                .await;
             let _ = execution.ctx.append_stack(ContextStackDraft::new(
                 execution.meta.clone(),
                 ContextStackPhase::CleanupFinished,
             ));
+            drop(execution.plan.take());
+            execution.responses.clear();
+            let _ = execution.ctx.invocation_finished();
             match execution.completion.take() {
                 Some(PlanCompletion::Exec(sender)) => {
                     let _ = sender.send(Err(anyhow::anyhow!(message)));
@@ -336,6 +355,9 @@ impl PlanRuntime {
             execution.meta.clone(),
             ContextStackPhase::Succeeded,
         ));
+        drop(execution.plan.take());
+        execution.responses.clear();
+        let _ = execution.ctx.invocation_finished();
         let Some(completion) = execution.completion.take() else {
             return;
         };
@@ -392,11 +414,19 @@ impl PlanRuntime {
         let _ = execution
             .ctx
             .append_stack(ContextStackDraft::new(execution.meta.clone(), phase));
-        execution.plan.abort(PLAN_ABORT_CODE, message.clone()).await;
+        execution
+            .plan
+            .as_mut()
+            .unwrap()
+            .abort(PLAN_ABORT_CODE, message.clone())
+            .await;
         let _ = execution.ctx.append_stack(ContextStackDraft::new(
             execution.meta.clone(),
             ContextStackPhase::CleanupFinished,
         ));
+        drop(execution.plan.take());
+        execution.responses.clear();
+        let _ = execution.ctx.invocation_finished();
 
         match execution.completion.take() {
             Some(PlanCompletion::Spawn(meta)) if !meta.plan_id.is_empty() => {
@@ -428,7 +458,7 @@ impl PlanRuntime {
         let Some(execution) = self.plans.lock().await.get(plan_id).cloned() else {
             return false;
         };
-        if !execution.lock().await.ctx.state().current().is_cancelled() {
+        if !execution.lock().await.ctx.cancel_requested() {
             return false;
         }
 
@@ -539,7 +569,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
                 // Returning from next does not imply a retained stream was consumed.
                 // ModelResponse and ToolResponse own their consumption completion.
                 let next = tokio::select! {
-                    next = execution.plan.next(response) => next,
+                    next = execution.plan.as_mut().unwrap().next(response) => next,
                     _ = parent_ctx.cancellation() => Err(anyhow::Error::new(fae_agent::Error::ContextAborted)),
                 };
                 match next {
@@ -553,11 +583,11 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
                         break;
                     }
                 }
-                if execution.ctx.state().current().is_cancelled() {
+                if execution.ctx.cancel_requested() {
                     break;
                 }
             }
-            (result, execution.ctx.state().current().is_cancelled())
+            (result, execution.ctx.cancel_requested())
         };
 
         match result {

@@ -55,10 +55,10 @@ impl PluginSnapshot {
     }
 }
 #[derive(Debug)]
-pub struct PluginRun {
+pub struct PluginExecutionBinding {
     pub snapshot: Arc<PluginSnapshot>,
     pub root: crate::WeakCtx,
-    pub run_id: String,
+    pub execution_id: crate::ExecutionId,
 }
 
 #[derive(Debug)]

@@ -12,18 +12,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from ._host import BoundHost, Host
-from ._protocol import PROTOCOL_VERSION, Writer, read_frame, reader
+from ._protocol import Writer, read_frame, reader, request, response, hook_value
 from .chain import HookNext
 from .context import Context
 from .errors import HookCancelled, MissingChainHandler, PluginHostError
 from .registration import register
-from .types import ModelRequest, ModelResponse, NativeObject, ToolRequest, ToolResponse, SessionMessage, UserMemory, encode, json_value
+from .types import API_VERSION, ModelRequest, ModelResponse, NativeObject, ToolRequest, ToolResponse, SessionMessage, UserMemory, encode, json_value
 
 CURRENT_MEMBER: contextvars.ContextVar[str] = contextvars.ContextVar("fae_plugin_member")
 
 
 @dataclass
-class Invocation:
+class PluginCall:
     id: str
     params: dict[str, Any]
     deadline: float
@@ -33,6 +33,9 @@ class Invocation:
     task: asyncio.Task[Any] | None = None
     streams: set[str] = field(default_factory=set)
     responses: list[ModelResponse] = field(default_factory=list)
+    threads: set[asyncio.Future[Any]] = field(default_factory=set)
+    release_done: asyncio.Event = field(default_factory=asyncio.Event)
+    next_slots: dict[str, Any] = field(default_factory=dict)
 
     def remaining(self) -> float:
         return max(0.0, self.deadline - asyncio.get_running_loop().time())
@@ -60,7 +63,8 @@ class HostStream:
             raise ValueError("A stream permits only one next in flight")
         self.busy = True
         try:
-            result = await self.host.call("stream.next", {"stream_id": self.stream_id})
+            result = await self.host.call("/request/plugin/stream/next", {
+                "call_id": self.host.call_owner.id, "stream_id": self.stream_id, "access": self.host.access()})
             if result["eof"]:
                 self.closed = True
                 raise StopAsyncIteration
@@ -71,12 +75,13 @@ class HostStream:
     async def aclose(self) -> None:
         if not self.closed:
             self.closed = True
-            await self.host.call("stream.close", {"stream_id": self.stream_id})
+            await self.host.call("/request/plugin/stream/close", {
+                "call_id": self.host.call_owner.id, "stream_id": self.stream_id, "access": self.host.access()})
 
 
 class OwnedIterator:
     """Keep creator identity while lazy inner/outer generators are iterated."""
-    def __init__(self, iterator: Any, invocation: Invocation, record: Any, method: str):
+    def __init__(self, iterator: Any, invocation: PluginCall, record: Any, method: str):
         self.iterator = iterator.__aiter__()
         self.invocation, self.record, self.method = invocation, record, method
 
@@ -114,7 +119,7 @@ class OwnedIterator:
 
 @dataclass
 class Stream:
-    invocation: Invocation
+    invocation: PluginCall
     iterator: Any
     member: str
     busy: bool = False
@@ -140,8 +145,10 @@ def check_value(point: str, method: str, value: Any, *, output: bool) -> None:
         expected = (NativeObject, dict)
     if not isinstance(value, expected):
         raise TypeError(f"{point}.{method} {'output' if output else 'input'} has invalid type")
-    if isinstance(value, list) and not all(isinstance(item, (NativeObject, dict)) for item in value):
-        raise TypeError(f"{method} requires native objects")
+    if isinstance(value, list):
+        cls = UserMemory if method == "on_memory" else SessionMessage
+        if not all(isinstance(item, cls) for item in value):
+            raise TypeError(f"{method} requires {cls.__name__} values")
     if isinstance(value, ToolResponse) and value._reference is None and not isinstance(value.result, str):
         raise TypeError("Tool response must contain a string or a host reference")
     if not isinstance(value, (ModelResponse, ToolResponse)):
@@ -152,11 +159,12 @@ class Worker:
     def __init__(self, writer: Writer, members: list[dict[str, Any]]):
         self.writer, self.host = writer, Host(writer)
         self.records = register(members)
-        self.calls: dict[str, Invocation] = {}
+        self.calls: dict[str, PluginCall] = {}
         self.streams: dict[str, Stream] = {}
-        self.host_streams: dict[str, Invocation] = {}
+        self.host_streams: dict[str, PluginCall] = {}
         self.stream_ids = itertools.count()
-        self.queue: dict[str, deque[Invocation]] = {}
+        self.queue: dict[str, deque[PluginCall]] = {}
+        self.requests: dict[str, dict[str, Any]] = {}
         self.round_robin: deque[str] = deque()
         self.active: dict[str, int] = {}
         self.wake = asyncio.Event()
@@ -172,27 +180,29 @@ class Worker:
 
     async def result(self, id: str, *, result: Any = None, error: BaseException | None = None,
                      control: bool = False) -> None:
-        if error is None:
-            frame = {"id": id, "result": result}
-        else:
-            frame = {"id": id, "error": {"code": getattr(error, "code", "plugin_call_failed"),
-                    "message": str(error), "call_id": id,
-                    **getattr(error, "details", {})}}
+        message = self.requests.pop(id, None)
+        if message is None:
+            return
+        code = getattr(error, "code", 500) if error is not None else 0
+        if not isinstance(code, int) or isinstance(code, bool):
+            code = 500
+        code = int(code)
+        frame = response(message, result, code=code, msg=str(error) if error else "ok")
         await self.writer.send(frame, control=control)
 
     async def enqueue(self, frame: dict[str, Any]) -> None:
-        params = frame["params"]
+        params = frame["payload"]
         group = params["group"]  # The host supplies a validated user/session or root-run group.
         pending = sum(len(q) for q in self.queue.values())
         if pending >= 64 or len(self.queue.get(group, ())) >= 16 or len(self.calls) >= 96:
             error = PluginHostError("Plugin pending call queue is full", resource="calls")
-            error.code = "plugin_busy"
-            await self.result(frame["id"], error=error)
+            error.code = 409
+            await self.result(frame["request_id"], error=error)
             return
-        if frame["id"] in self.calls:
-            await self.result(frame["id"], error=ValueError("Duplicate call ID"))
+        if frame["request_id"] in self.calls:
+            await self.result(frame["request_id"], error=ValueError("Duplicate call ID"))
             return
-        invocation = Invocation(frame["id"], params,
+        invocation = PluginCall(frame["request_id"], params,
                                 asyncio.get_running_loop().time() + params["timeout_ms"] / 1000, group)
         self.calls[invocation.id] = invocation
         if group not in self.queue:
@@ -229,7 +239,7 @@ class Worker:
                 earliest = min(inv.remaining() for q in self.queue.values() for inv in q)
                 asyncio.get_running_loop().call_later(earliest, self.wake.set)
 
-    def decode(self, invocation: Invocation, host: BoundHost) -> Any:
+    def decode(self, invocation: PluginCall, host: BoundHost) -> Any:
         point, method, value = (invocation.params[k] for k in ("point", "method", "argument"))
         if method == "on_model_resp":
             if value["kind"] == "completed":
@@ -243,7 +253,7 @@ class Worker:
             return ModelRequest(value)
         if isinstance(value, list):
             cls = UserMemory if method == "on_memory" else SessionMessage
-            return [cls(v) for v in value]
+            return [cls.from_dict(v) for v in value]
         return value
 
     async def method(self, function: Any, ctx: Context, value: Any, **kwargs: Any) -> Any:
@@ -256,9 +266,12 @@ class Worker:
             self.executor, lambda: copied.run(function, ctx, value, **kwargs))
         # Cancelling the waiter cannot stop a Python thread. Keep its actual slot until it exits.
         future.add_done_callback(lambda _: self.thread_slots.release())
+        call = ctx._host.call_owner
+        call.threads.add(future)
+        future.add_done_callback(call.threads.discard)
         return await asyncio.shield(future)
 
-    async def matching_models(self, invocation: Invocation, records: list[Any], model: str) -> list[Any]:
+    async def matching_models(self, invocation: PluginCall, records: list[Any], model: str) -> list[Any]:
         if not isinstance(model, str):
             raise TypeError("match_model requires a model string")
         matching = []
@@ -284,11 +297,11 @@ class Worker:
                 CURRENT_MEMBER.reset(token)
         if len(matching) > 1 and matching[0].mode == "direct":
             conflict = PluginHostError(f"Multiple model implementations match {model}")
-            conflict.code = "plugin_model_conflict"
+            conflict.code = 409
             raise conflict
         return matching
 
-    async def execute(self, invocation: Invocation) -> None:
+    async def execute(self, invocation: PluginCall) -> None:
         try:
             point, method = invocation.params["point"], invocation.params["method"]
             matching = [r for r in self.records if r.matches(
@@ -336,8 +349,20 @@ class Worker:
                         def validate_next(v: Any) -> None:
                             invocation.check()
                             check_value(point, method, v, output=False)
-                        continuation = HookNext(lambda next_value: layer(index + 1, next_value),
-                                                validate_next)
+                        async def through_host(next_value: Any) -> Any:
+                            slot = {"input": next_value, "callback": lambda v: layer(index + 1, v),
+                                    "started": False}
+                            invocation.next_slots[record.key] = slot
+                            try:
+                                hook_value(point, method, self.next_wire(next_value, record.key))
+                                await host.call("/request/plugin/next", {
+                                    "access": host.access(), "point": point, "method": method,
+                                    "argument": self.next_wire(next_value, record.key)})
+                                return slot["result"]
+                            finally:
+                                invocation.next_slots.pop(record.key, None)
+                        continuation = HookNext(through_host, validate_next,
+                                                lambda: CURRENT_MEMBER.get(None) == record.key)
                         result = await self.method(getattr(record.object, method), ctx, value, next=continuation)
                     else:
                         result = await self.method(getattr(record.object, method), ctx, value)
@@ -355,7 +380,7 @@ class Worker:
                                     await close()
                                 error = PluginHostError("Model stream reference limit exceeded",
                                                         resource="stream_references")
-                                error.code = "plugin_busy"
+                                error.code = 409
                                 raise error
                             invocation.responses.append(result)
                     if record.mode == "direct" and index + 1 < len(matching):
@@ -385,7 +410,7 @@ class Worker:
                         if close is not None:
                             await close()
                         error = PluginHostError("Active model stream limit exceeded", resource="streams")
-                        error.code = "plugin_busy"
+                        error.code = 409
                         raise error
                     if output is value and isinstance(output.value, HostStream):
                         self.host_streams[invocation.id] = invocation
@@ -418,10 +443,10 @@ class Worker:
             # Host sends release after it has decoded the result and acquired any stream references.
 
     async def next_stream(self, frame: dict[str, Any]) -> None:
-        stream_id = frame["params"]["stream_id"]
+        stream_id = frame["payload"]["stream_id"]
         stream = self.streams.get(stream_id)
-        if stream is None or stream.busy:
-            await self.result(frame["id"], error=ValueError("Invalid or busy stream"))
+        if stream is None or stream.busy or stream.invocation.id != frame["payload"]["call_id"]:
+            await self.result(frame["request_id"], error=ValueError("Invalid or busy stream"))
             return
         stream.busy = True
         stream.task = asyncio.current_task()
@@ -471,15 +496,15 @@ class Worker:
                                 raise ValueError("Incomplete tool call")
                             json.loads(fields["arguments"])
                 stream.choices[index] = choice.get("finish_reason") is not None
-            await self.result(frame["id"], result={"eof": False, "chunk": chunk})
+            await self.result(frame["request_id"], result={"eof": False, "chunk": chunk})
         except StopAsyncIteration:
             if not stream.choices or not all(stream.choices.values()):
-                await self.result(frame["id"], error=ValueError("Model stream ended before choices finished"))
+                await self.result(frame["request_id"], error=ValueError("Model stream ended before choices finished"))
             else:
-                await self.result(frame["id"], result={"eof": True})
+                await self.result(frame["request_id"], result={"eof": True})
             await self.close_stream(stream_id)
         except BaseException as error:
-            await self.result(frame["id"], error=error)
+            await self.result(frame["request_id"], error=error)
             await self.close_stream(stream_id)
         finally:
             stream.busy = False
@@ -499,8 +524,10 @@ class Worker:
             except Exception:
                 pass
 
-    async def release(self, invocation: Invocation) -> None:
+    async def release(self, invocation: PluginCall) -> None:
         if invocation.released:
+            if asyncio.current_task() is not invocation.task:
+                await invocation.release_done.wait()
             return
         invocation.released = True
         self.host_streams.pop(invocation.id, None)
@@ -513,6 +540,9 @@ class Worker:
         self.wake.set()
         if invocation.task and invocation.task is not asyncio.current_task() and not invocation.task.done():
             invocation.task.cancel()
+            await asyncio.gather(invocation.task, return_exceptions=True)
+        if invocation.threads:
+            await asyncio.gather(*invocation.threads, return_exceptions=True)
         for stream_id in list(invocation.streams):
             await self.close_stream(stream_id)
         for response in invocation.responses:
@@ -524,33 +554,80 @@ class Worker:
                     pass
         invocation.responses.clear()
         self.calls.pop(invocation.id, None)
+        invocation.release_done.set()
+
+    async def release_request(self, frame: dict[str, Any]) -> None:
+        invocation = self.calls.get(frame["payload"]["call_id"])
+        if invocation:
+            await self.release(invocation)
+        await self.result(frame["request_id"], result={}, control=True)
+
+    def next_wire(self, value: Any, member: str) -> Any:
+        if isinstance(value, ModelResponse):
+            if value.is_streaming:
+                return {"kind": "streaming", "stream_id": f"next/{member}"}
+            return {"kind": "completed", "response": value.value}
+        if isinstance(value, ToolResponse):
+            if value._reference:
+                return {"result": value.result, "reference": value._reference}
+            return {"result": value.result}
+        return encode(value)
+
+    async def next_request(self, frame: dict[str, Any]) -> None:
+        try:
+            access = frame["payload"]["access"]
+            invocation = self.calls[access["call_id"]]
+            invocation.check()
+            if (frame["payload"]["point"], frame["payload"]["method"]) != (invocation.params["point"], invocation.params["method"]):
+                raise ValueError("next hook mismatch")
+            reference = invocation.params["contexts"][access["member"]]
+            if access["binding"] != reference["binding"] or frame.get("session_id") != reference.get("session_id"):
+                raise ValueError("next binding mismatch")
+            slot = invocation.next_slots[access["member"]]
+            if slot["started"] or frame["payload"]["argument"] != self.next_wire(slot["input"], access["member"]):
+                raise ValueError("next already used or argument mismatch")
+            slot["started"] = True
+            slot["result"] = await slot["callback"](slot["input"])
+            invocation.check()
+            wire = self.next_wire(slot["result"], access["member"])
+            hook_value(invocation.params["point"], invocation.params["method"], wire, output=True)
+            await self.result(frame["request_id"], result=wire)
+        except BaseException as error:
+            await self.result(frame["request_id"], error=error, control=True)
 
     async def run(self) -> None:
         self.spawn(self.schedule())
-        await self.writer.send({"method": "ready", "params": {
-            "protocol_version": PROTOCOL_VERSION, "api_version": "0.1.0",
-            "instances": [r.key for r in self.records]}}, control=True)
+        hello = request("worker-hello", "/request/plugin/worker/hello",
+            {"api_version": API_VERSION, "instances": [r.key for r in self.records]})
+        await self.writer.send(hello, control=True)
         stream = await reader()
+        accepted = await read_frame(stream)
+        if accepted != response(hello, {}, msg="ready"):
+            raise ValueError("Worker hello rejected")
         try:
             while True:
-                frame = await read_frame(stream)
-                method = frame.get("method")
-                if method is None:
+                try:
+                    frame = await read_frame(stream)
+                except asyncio.IncompleteReadError as error:
+                    if error.partial:
+                        raise
+                    break
+                path = frame["path"]
+                if path.startswith("/response/"):
                     self.host.response(frame)
-                elif method == "call":
+                    continue
+                self.requests[frame["request_id"]] = frame
+                if path == "/request/plugin/invoke":
                     await self.enqueue(frame)
-                elif method == "stream.next":
+                elif path == "/request/plugin/stream/next":
                     if len(self.controls) >= 64:
-                        await self.result(frame["id"], error=PluginHostError("Control capacity exceeded"))
+                        await self.result(frame["request_id"], error=PluginHostError("Control capacity exceeded"))
                     else:
                         self.spawn(self.next_stream(frame))
-                elif method in ("release", "cancel"):
-                    invocation = self.calls.get(frame["params"]["call_id"])
-                    if invocation:
-                        invocation.terminal = method == "cancel"
-                        self.spawn(self.release(invocation))
-                elif method == "stream.close":
-                    self.spawn(self.close_stream(frame["params"]["stream_id"]))
+                elif path == "/request/plugin/call/release":
+                    self.spawn(self.release_request(frame))
+                elif path == "/request/plugin/next":
+                    self.spawn(self.next_request(frame))
                 else:
                     raise ValueError("Unknown host protocol method")
         finally:
@@ -571,10 +648,7 @@ async def main() -> None:
         worker = Worker(writer, json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["members"])
         await worker.run()
     except BaseException as error:
-        await writer.send({"method": "startup_error", "params": {"message": str(error)}}, control=True)
-        # Drain the startup error before closing stdout.
-        while not writer.control.empty():
-            await asyncio.sleep(0)
+        print(f"Worker failed: {error}", file=sys.stderr)
         raise
     finally:
         writer_task.cancel()

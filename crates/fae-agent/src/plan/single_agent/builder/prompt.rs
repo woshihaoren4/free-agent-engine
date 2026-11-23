@@ -50,15 +50,6 @@ impl SingleAgentRuntimeContext {
         self.timer_execution = scope.timer_execution.clone();
     }
 
-    pub(in crate::plan::single_agent) fn restore_environment(
-        &self,
-        scope: &mut crate::ContextScope,
-    ) {
-        scope.workspace = self.workspace.clone();
-        scope.execution_origin = self.execution_origin.clone();
-        scope.timer_execution = self.timer_execution.clone();
-    }
-
     fn session_history_directory(&self) -> PathBuf {
         self.fae_home
             .join("session")

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
-from fae_plugin import ChainToolsHook, Context, HookNext, ToolRequest, ToolResponse
+from fae_plugin import ChainToolsHook, Context, HookNext, TextContent, ToolRequest, ToolResponse
 
 
 def chart_data(arguments: dict[str, Any]) -> tuple[list[str | int | float], list[float]]:
@@ -144,8 +144,10 @@ class Table2Tool(ChainToolsHook):
         arguments = request.arguments_json()
         if not isinstance(arguments, dict):
             raise ValueError("Tool arguments must be an object")
-        scope = await ctx.scope()
-        result = await asyncio.to_thread(render_line_chart, arguments, scope.workspace)
+        data = await ctx.export_context()
+        execution = data.latest_execution_view
+        workspace = execution.effective.workspace if execution else data.session_config.workspace.root
+        result = await asyncio.to_thread(render_line_chart, arguments, workspace)
         if ctx.session is not None:
-            await ctx.session.send(f"[table2-plugin] 已生成折线图：{result['path']}")
+            await ctx.session.send([TextContent(f"[table2-plugin] 已生成折线图：{result['path']}")])
         return ToolResponse.completed(json.dumps(result, ensure_ascii=False))

@@ -465,18 +465,25 @@ mod tests {
             "q".into(),
             None,
         );
-        let event = |seq| crate::protocol::ServerMessage::Event {
-            seq,
-            round_id: "r".into(),
-            output: fae_agent::SessionOutput {
-                parament_plan_id: Some("parent".into()),
-                node_id: None,
-                plan_id: None,
-                agent_name: Some("child".into()),
-                runtime_id: None,
-                input_type: "plugin_message".into(),
-                output: json!({"message_id":"stable-id","plugin_id":"b","text":"开始处理"}),
-            },
+        let event = |seq| {
+            fae_agent::protocol::Message::event(
+                fae_agent::SessionId::new("omt_plugin").unwrap(),
+                "stream".into(),
+                seq,
+                None,
+                fae_agent::protocol::EventPayload::OutputDelta(fae_agent::protocol::OutputDelta {
+                    execution_id: fae_agent::ExecutionId::new("r").unwrap(),
+                    invocation_id: fae_agent::InvocationId::new("child").unwrap(),
+                    output_id: "stable-id".into(),
+                    source: fae_agent::protocol::OutputSource::Plugin {
+                        plugin_id: "b".into(),
+                    },
+                    content: vec![fae_agent::protocol::ContentBlock::Text {
+                        text: "开始处理".into(),
+                    }],
+                }),
+            )
+            .unwrap()
         };
         super::super::output::ingest(&mut record, &event(1));
         assert!(record.outcome.is_none());
@@ -490,14 +497,11 @@ mod tests {
         store
             .update(&id, |record| {
                 super::super::output::ingest(record, &event(2));
-                super::super::output::ingest(
+                super::super::output::recover_terminal(
                     record,
-                    &crate::protocol::ServerMessage::Finished {
-                        seq: 3,
-                        round_id: "r".into(),
-                        outcome: crate::protocol::RoundOutcome::Cancelled {
-                            reason: "stop".into(),
-                        },
+                    "r",
+                    fae_agent::ExecutionOutcome::Cancelled {
+                        reason: "stop".into(),
                     },
                 );
             })
@@ -592,7 +596,7 @@ mod tests {
         let config = serde_json::from_value(json!({"version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae","workspace":home})).unwrap();
         let sdk = Sdk::for_test(config, base);
         let store = Arc::new(Store::open(&home, 7).unwrap());
-        let binding = crate::protocol::SessionBinding {
+        let binding = crate::session_host::LarkPrincipal {
             session_mapping_version: 2,
             thread_id: "omt_card".into(),
             channel: "lark".into(),

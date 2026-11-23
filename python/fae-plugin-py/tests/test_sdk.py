@@ -10,15 +10,77 @@ import unittest
 from pathlib import Path
 
 from fae_plugin import (
-    ContextState, ContextStateKind, ContextStackQuery, ContextChildSpec, InvalidHookNext,
-    TaskType, TaskTypeKind, SingleAgentSource, HookNext,
+    Context, ContextData, ContextChildSpec, ExecutionStatus, InvocationStatus, InputStatus,
+    InvalidHookNext, TextContent, Succeeded, HookNext,
 )
+from fae_plugin._protocol import request, response, validate
+from fae_plugin._protocol import hook_value
 from fae_plugin.config import inspect_config, normalize
 from fae_plugin.registration import ModuleLoader, register
 from fae_plugin.types import encode
 
 
 class TypesTest(unittest.TestCase):
+    def test_memory_and_history_use_registered_business_fields(self):
+        from fae_plugin import MemoryView, SessionMessageRole, UserMemoryCategory
+        value = MemoryView.from_dict({
+            "history": [{"role": "user", "content": "hello"}], "history_offset": 0, "summary": None,
+            "user_memories": [{"id": 1, "category": "preference", "content": "concise",
+                               "confidence": "user_stated", "updated_at": "original-format"}],
+        })
+        self.assertEqual(value.history[0].role, SessionMessageRole.USER)
+        self.assertEqual(value.user_memories[0].category, UserMemoryCategory.PREFERENCE)
+        for method, invalid in (("on_memory", [{"id": -1}]),
+                                ("on_history", [{"role": "invalid", "content": "x"}]),
+                                ("on_model_req", {"model": "x"}),
+                                ("on_tools_req", {"arguments": {}})):
+            with self.assertRaises((ValueError, TypeError)):
+                hook_value("SingleAgentHook", method, invalid)
+
+    def test_context_data_roundtrip_keeps_nested_facts_and_no_capabilities(self):
+        target = {"type": "agent", "agent_id": "demo"}
+        snapshot = {
+            "user_info": {"user_id": "alice", "name": None},
+            "session_config": {
+                "session_id": "session", "name": "chat", "lifecycle": "open",
+                "created_at": "2026-11-23T01:00:00Z", "updated_at": "2026-11-23T01:00:00Z",
+                "target": target, "workspace": {"root": "/tmp", "project_files": []},
+                "options": {}, "channels": [{"type": "sdk", "client_id": "python"}],
+            },
+            "memory_view": {"history": [{"role": "user", "content": "hello"}],
+                            "history_offset": 0, "summary": None, "user_memories": []},
+            "latest_execution_view": {
+                "execution_id": "execution", "target": target,
+                "effective": {"target": target, "workspace": "/tmp", "options": {}, "definitions": []},
+                "status": "succeeded", "started_at": None, "ended_at": None,
+                "outcome": {"type": "succeeded", "result": [{"type": "json", "value": None}]},
+                "invocations": [{
+                    "invocation_id": "invocation", "parent_invocation_id": None, "kind": "plan",
+                    "plan_id": "plan", "task_id": None, "runtime_id": None, "agent_id": "demo",
+                    "workflow_id": None, "node_id": None, "model": {"provider": "test", "model": "demo"},
+                    "status": "succeeded",
+                }],
+                "inputs": [{
+                    "request_id": "input", "execution_id": "execution", "status": "not_applied",
+                    "reason": "finished", "received_at": "2026-11-23T01:00:00Z", "processed_at": None,
+                }],
+            },
+        }
+        value = ContextData.from_dict(snapshot)
+        execution = value.latest_execution_view
+        self.assertEqual(execution.status, ExecutionStatus.SUCCEEDED)
+        self.assertEqual(execution.invocations[0].status, InvocationStatus.SUCCEEDED)
+        self.assertEqual(execution.inputs[0].status, InputStatus.NOT_APPLIED)
+        encoded = encode(value)
+        # Rust omits the unset allowlisted option; decoding also accepts its explicit null.
+        encoded["session_config"]["options"] = {}
+        encoded["latest_execution_view"]["effective"]["options"] = {}
+        self.assertEqual(encoded, snapshot)
+        self.assertFalse(hasattr(Context, "set_state"))
+        self.assertFalse(hasattr(Context, "bind_scope"))
+        with self.assertRaises(ValueError):
+            ContextData.from_dict({**snapshot, "handle": "forged"})
+
     def test_member_modules_load_current_source_despite_stale_bytecode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -66,22 +128,19 @@ class Demo(ModelHook):
                 module = ModuleLoader(member, source).load(source / "plugin.py")
                 self.assertEqual(module.VALUE, (number, number))
 
-    def test_state_fields_null_output_and_numeric_limits(self):
-        self.assertEqual(encode(ContextState.succeeded(None))["output"], {"json": None})
+    def test_public_content_and_restricted_child_spec(self):
+        self.assertEqual(encode(Succeeded([TextContent("result")])),
+                         {"type": "succeeded", "result": [{"type": "text", "text": "result"}]})
         with self.assertRaises(ValueError):
-            ContextState(ContextStateKind.RUNNING, reason="wrong")
-        with self.assertRaises(ValueError):
-            ContextStackQuery(after_sequence=-1)
-        with self.assertRaises(ValueError):
-            ContextChildSpec(turn_id=True)
+            ContextChildSpec("")
         with self.assertRaises(TypeError):
-            ContextChildSpec(execution="true")
+            ContextChildSpec(operation="child", workspace="/tmp")
         with self.assertRaises(TypeError):
-            ContextStackQuery(phase="unknown")
+            encode(object())
         with self.assertRaises(ValueError):
-            TaskType(TaskTypeKind.ANY)
+            validate({"id": "old", "method": "call", "params": {}})
         with self.assertRaises(ValueError):
-            SingleAgentSource("paths", config="config")
+            ContextData.from_dict({"user_info": {"user_id": "forged"}})
 
     def test_config_defaults_and_class_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +161,7 @@ class Demo(SingleAgentHook):
             config = inspect_config(module, "demo", source)
             self.assertEqual(module.count, 1)
             self.assertEqual(config["registration_mode"], "direct")
-            self.assertEqual(config["fae_plugin_api_version"], "0.1.0")
+            self.assertEqual(config["fae_plugin_api_version"], "0.2.0")
             records = register([{"id": "demo", "source": str(source), "declaration": config}])
             self.assertEqual(len(records), 1)
             invalid = dict(config, registration_mode="chain")
@@ -134,6 +193,7 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
         self.processes = []
+        self.next_requests = {}
 
     async def asyncTearDown(self):
         for process in self.processes:
@@ -157,7 +217,9 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
             }, plugin_id, source)
             members.append({"id": plugin_id, "source": str(source), "declaration": config})
             for index in range(len(classes)):
-                self.contexts[f"{plugin_id}:{index}"] = {"handle": plugin_id, "identity": {"agent_id": "demo"}}
+                self.contexts[f"{plugin_id}:{index}"] = {
+                    "binding": {"handle": f"{plugin_id}:{index}", "execution_id": None, "invocation_id": None},
+                    "session_id": None, "summary": None}
         manifest = self.root / f"manifest-{len(self.processes)}.json"
         manifest.write_text(json.dumps({"members": members}))
         process = await asyncio.create_subprocess_exec(
@@ -166,7 +228,9 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
             stderr=asyncio.subprocess.PIPE, env=os.environ.copy())
         self.processes.append(process)
         ready = await self.receive(process)
-        self.assertEqual(ready.get("method"), "ready", ready)
+        self.assertEqual(ready["path"], "/request/plugin/worker/hello", ready)
+        self.assertEqual(ready["payload"]["api_version"], "0.2.0")
+        await self.send(process, response(ready, {}, msg="ready"))
         return process
 
     async def send(self, process, frame):
@@ -176,32 +240,58 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
 
     async def receive(self, process):
         async def read():
-            size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
-            return json.loads(await process.stdout.readexactly(size))
+            while True:
+                size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
+                frame = validate(json.loads(await process.stdout.readexactly(size)))
+                if frame["path"] == "/request/plugin/next":
+                    identifier = f"next-dispatch-{len(self.next_requests)}-{frame['request_id']}"
+                    self.next_requests[identifier] = frame
+                    await self.send(process, request(identifier, frame["path"], frame["payload"],
+                                                     frame.get("session_id")))
+                elif frame["request_id"] in self.next_requests:
+                    original = self.next_requests.pop(frame["request_id"])
+                    await self.send(process, response(original, frame["payload"]["data"],
+                                                     code=frame["payload"]["code"], msg=frame["payload"]["msg"]))
+                else:
+                    return frame
         return await asyncio.wait_for(read(), 5)
 
     async def call(self, process, id, value, *, method="on_prompt", point="SingleAgentHook",
                    group=None, location="demo", model_members=None):
-        await self.send(process, {"id": id, "method": "call", "params": {
+        if point == "ModelHook" and method == "exec":
+            value = {"messages": [], **value}
+        await self.send(process, request(id, "/request/plugin/invoke", {
             "point": point, "method": method, "location": location, "argument": value,
             "contexts": self.contexts, "group": group or id, "timeout_ms": 3000,
-            "model_members": model_members}})
+            "model_members": model_members}))
+
+    async def data(self, process):
+        frame = await self.receive(process)
+        self.assertEqual(frame["payload"]["code"], 0, frame)
+        return frame["payload"]["data"]
+
+    async def error(self, process):
+        frame = await self.receive(process)
+        self.assertNotEqual(frame["payload"]["code"], 0, frame)
+        self.assertIsNone(frame["payload"]["data"])
+        return frame["payload"]
+
+    async def next_stream(self, process, id, stream_id, call_id="model"):
+        await self.send(process, request(id, "/request/plugin/stream/next",
+            {"call_id": call_id, "stream_id": stream_id, "access": None}))
 
     async def test_model_match_is_strict_bool_with_creator_details(self):
         process = await self.start([("bad", """
 from fae_plugin import ModelHook
 class Demo(ModelHook):
     def match_model(self, ctx, model):
-        assert ctx.agent_id == "demo"
         return 1
     async def exec(self, ctx, request):
         raise AssertionError("must not execute")
 """)], point="ModelHook")
         await self.call(process, "select", "native", point="ModelHook", method="match_model")
-        error = (await self.receive(process))["error"]
-        self.assertIn("must return bool", error["message"])
-        self.assertEqual(error["plugin_id"], "bad")
-        self.assertEqual(error["method"], "match_model")
+        error = await self.error(process)
+        self.assertIn("must return bool", error["msg"])
 
     async def test_chain_model_predicates_skip_layers_and_selection_is_not_repeated(self):
         process = await self.start([
@@ -239,19 +329,19 @@ class Demo(ChainModelHook):
             "finish_reason":"stop"}]})
 """)], mode="chain", point="ModelHook")
         await self.call(process, "select", "family-one", point="ModelHook", method="match_model")
-        members = (await self.receive(process))["result"]
+        members = await self.data(process)
         self.assertEqual(members, ["a:0", "c:0"])
         await self.call(process, "exec", {"model": "family-one"}, point="ModelHook", method="exec",
                         model_members=members)
-        response = (await self.receive(process))["result"]
+        response = await self.data(process)
         self.assertEqual(response["response"]["choices"][0]["message"]["content"], "c:a")
         await self.call(process, "miss", "unmatched", point="ModelHook", method="match_model")
-        self.assertEqual((await self.receive(process))["result"], [])
+        self.assertEqual(await self.data(process), [])
         # A matches this alias, but its terminal handler C does not.
         await self.call(process, "no-terminal", {"model": "family-two"},
                         point="ModelHook", method="exec")
-        error = (await self.receive(process))["error"]
-        self.assertIn("No terminal ModelHook.exec handler", error["message"])
+        error = await self.error(process)
+        self.assertIn("No terminal ModelHook.exec handler", error["msg"])
 
     async def test_direct_model_classes_conflict_before_exec(self):
         process = await self.start([("models", """
@@ -265,8 +355,8 @@ class Second(First):
     pass
 """)], point="ModelHook", classes=("First", "Second"))
         await self.call(process, "conflict", {"model": "shared"}, point="ModelHook", method="exec")
-        error = (await self.receive(process))["error"]
-        self.assertEqual(error["code"], "plugin_model_conflict")
+        error = await self.error(process)
+        self.assertEqual(error["code"], 409)
 
     async def test_async_sessions_overlap_and_respond_by_id(self):
         process = await self.start([("demo", """
@@ -288,7 +378,7 @@ class Demo(SingleAgentHook):
         await self.call(process, "one", "S1")
         await self.call(process, "two", "S2")
         results = [await self.receive(process), await self.receive(process)]
-        self.assertEqual({r["id"]: r["result"] for r in results}, {"one": "S1!", "two": "S2!"})
+        self.assertEqual({r["request_id"]: r["payload"]["data"] for r in results}, {"one": "S1!", "two": "S2!"})
 
     async def test_sync_threads_overlap(self):
         process = await self.start([("demo", """
@@ -304,7 +394,7 @@ class Demo(SingleAgentHook):
         await self.call(process, "one", "S1")
         await self.call(process, "two", "S2")
         results = [await self.receive(process), await self.receive(process)]
-        self.assertEqual({r["id"]: r["result"] for r in results}, {"one": "S1!", "two": "S2!"})
+        self.assertEqual({r["request_id"]: r["payload"]["data"] for r in results}, {"one": "S1!", "two": "S2!"})
 
     async def test_chain_order_short_circuit_and_direct_composition(self):
         process = await self.start([
@@ -327,9 +417,9 @@ class Demo(ChainSingleAgentHook):
         return prompt + "C"
 """)], mode="chain")
         await self.call(process, "one", "start")
-        self.assertEqual((await self.receive(process))["result"], "start[A[B CB]A]".replace(" ", ""))
+        self.assertEqual(await self.data(process), "start[A[B CB]A]".replace(" ", ""))
         await self.call(process, "two", "stop")
-        self.assertEqual((await self.receive(process))["result"], "stop[ASTOPA]")
+        self.assertEqual(await self.data(process), "stop[ASTOPA]")
 
     async def test_model_is_pulled_and_usage_survives(self):
         process = await self.start([("demo", """
@@ -349,13 +439,11 @@ class Demo(ModelHook):
 """)], point="ModelHook")
         await self.call(process, "model", {"model": "plugin:demo/default", "stream": True},
                         point="ModelHook", method="exec", location="plugin:demo/default")
-        response = await self.receive(process)
-        stream_id = response["result"]["stream_id"]
+        stream_id = (await self.data(process))["stream_id"]
         chunks = []
         for n in range(4):
-            await self.send(process, {"id": f"next-{n}", "method": "stream.next",
-                                     "params": {"stream_id": stream_id}})
-            result = (await self.receive(process))["result"]
+            await self.next_stream(process, f"next-{n}", stream_id)
+            result = await self.data(process)
             if result["eof"]:
                 break
             chunks.append(result["chunk"])
@@ -377,15 +465,14 @@ class Demo(ModelHook):
 """)], point="ModelHook")
         await self.call(process, "model", {"model": "plugin:broken/default", "stream": True},
                         point="ModelHook", method="exec", location="plugin:broken/default")
-        stream_id = (await self.receive(process))["result"]["stream_id"]
+        stream_id = (await self.data(process))["stream_id"]
         for index in range(2):
-            await self.send(process, {"id": f"next-{index}", "method": "stream.next",
-                                     "params": {"stream_id": stream_id}})
+            await self.next_stream(process, f"next-{index}", stream_id)
             frame = await self.receive(process)
             if index == 0:
-                self.assertEqual(frame["result"]["chunk"]["choices"][0]["delta"]["content"], "visible")
+                self.assertEqual(frame["payload"]["data"]["chunk"]["choices"][0]["delta"]["content"], "visible")
             else:
-                self.assertIn("before choices finished", frame["error"]["message"])
+                self.assertIn("before choices finished", frame["payload"]["msg"])
 
     async def test_chain_stream_preserves_inner_outer_identity_and_error_creator(self):
         process = await self.start([
@@ -423,22 +510,13 @@ class Demo(ChainModelHook):
 """)], mode="chain", point="ModelHook")
         await self.call(process, "model", {"model": "plugin:shared/default", "stream": True},
                         point="ModelHook", method="exec", location="plugin:shared/default")
-        response = await self.receive(process)
-        self.assertIn("result", response, response)
-        stream_id = response["result"]["stream_id"]
-        await self.send(process, {"id": "first", "method": "stream.next",
-                                 "params": {"stream_id": stream_id}})
-        first = await self.receive(process)
-        self.assertIn("result", first, first)
-        self.assertEqual(first["result"]["chunk"]["choices"][0]["delta"]["content"], "b:a")
-        await self.send(process, {"id": "error", "method": "stream.next",
-                                 "params": {"stream_id": stream_id}})
-        error = (await self.receive(process))["error"]
-        self.assertEqual(error["message"], "inner generator failed")
-        self.assertEqual(error["plugin_id"], "b")
-        self.assertEqual(error["implementation"], "Demo")
-        self.assertEqual(error["method"], "exec")
-        self.assertEqual(error["call_id"], "model")
+        stream_id = (await self.data(process))["stream_id"]
+        await self.next_stream(process, "first", stream_id)
+        first = await self.data(process)
+        self.assertEqual(first["chunk"]["choices"][0]["delta"]["content"], "b:a")
+        await self.next_stream(process, "error", stream_id)
+        error = await self.error(process)
+        self.assertEqual(error["msg"], "inner generator failed")
 
     @unittest.skipUnless(importlib.util.find_spec("httpx"), "HTTP sample requires httpx")
     async def test_real_http_model_sample_streams_before_upstream_finishes_and_completes(self):
@@ -487,18 +565,15 @@ class Demo(ChainModelHook):
             await self.call(process, "stream", {"model": "plugin:http_model/default", "stream": True,
                                                 "messages": []},
                             point="ModelHook", method="exec", location="plugin:http_model/default")
-            stream_id = (await self.receive(process))["result"]["stream_id"]
-            await self.send(process, {"id": "first", "method": "stream.next",
-                                     "params": {"stream_id": stream_id}})
-            first = await self.receive(process)
-            self.assertIn("result", first, first)
-            self.assertEqual(first["result"]["chunk"]["choices"][0]["delta"]["content"], "first")
+            stream_id = (await self.data(process))["stream_id"]
+            await self.next_stream(process, "first", stream_id, "stream")
+            first = await self.data(process)
+            self.assertEqual(first["chunk"]["choices"][0]["delta"]["content"], "first")
             self.assertFalse(release.is_set())
             release.set()
             for index in range(3):
-                await self.send(process, {"id": f"tail-{index}", "method": "stream.next",
-                                         "params": {"stream_id": stream_id}})
-                result = (await self.receive(process))["result"]
+                await self.next_stream(process, f"tail-{index}", stream_id, "stream")
+                result = await self.data(process)
                 if index == 1:
                     self.assertEqual(result["chunk"]["usage"]["total_tokens"], 2)
                 if index == 2:
@@ -506,7 +581,7 @@ class Demo(ChainModelHook):
             await self.call(process, "completed", {"model": "plugin:http_model/default", "stream": False,
                                                    "messages": []},
                             point="ModelHook", method="exec", location="plugin:http_model/default")
-            result = (await self.receive(process))["result"]
+            result = await self.data(process)
             self.assertEqual(result["kind"], "completed")
             self.assertEqual(result["response"]["choices"][0]["message"]["content"], "done")
         finally:

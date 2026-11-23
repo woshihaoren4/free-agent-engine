@@ -12,7 +12,7 @@ pub struct Receipt {
     #[serde(default)]
     pub supplemented: bool,
     #[serde(default)]
-    pub outcome: Option<crate::protocol::RoundOutcome>,
+    pub outcome: Option<crate::session_host::StoredOutcome>,
 }
 fn path(home: &Path, id: &str) -> Result<PathBuf, ProtocolError> {
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -85,7 +85,7 @@ pub fn finish(
     home: &Path,
     id: &str,
     key: &Key,
-    outcome: crate::protocol::RoundOutcome,
+    outcome: crate::session_host::StoredOutcome,
 ) -> Result<(), ProtocolError> {
     let mut receipt = read(home, id, key, None)?
         .ok_or_else(|| ProtocolError::new("acceptance_store", "Missing terminal receipt"))?;

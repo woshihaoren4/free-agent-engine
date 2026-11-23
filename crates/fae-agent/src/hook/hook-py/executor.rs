@@ -1,4 +1,5 @@
 //! Framed multiplexed Python bridge. The read loop never waits for business work.
+use crate::protocol::{Message, RequestPath, RequestPayload, ResponseCode, ResponseMessage};
 use crate::{
     plugin::{manager::PluginRecord, *},
     *,
@@ -25,6 +26,7 @@ use tokio::{
 
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 type Reply = oneshot::Sender<anyhow::Result<Value>>;
+type PendingReply = (Message, Reply);
 struct Manifest(PathBuf);
 impl Drop for Manifest {
     fn drop(&mut self) {
@@ -49,6 +51,31 @@ async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> anyhow::Result<Val
     reader.read_exact(&mut bytes).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+fn request(
+    id: &str,
+    path: RequestPath,
+    session_id: Option<SessionId>,
+    payload: Value,
+) -> anyhow::Result<Message> {
+    Ok(serde_json::from_value(json!({
+        "version": protocol::VERSION, "request_id": id, "session_id": session_id,
+        "path": path, "payload": payload
+    }))?)
+}
+async fn write_frame(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &impl serde::Serialize,
+) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= MAX_FRAME,
+        "invalid plugin frame length"
+    );
+    writer.write_u32(bytes.len() as u32).await?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
 pub async fn inspect(id: &str, source: &Path) -> anyhow::Result<PluginDeclaration> {
     if source.is_dir() {
         let d: PluginDeclaration =
@@ -66,15 +93,26 @@ pub async fn inspect(id: &str, source: &Path) -> anyhow::Result<PluginDeclaratio
     );
     let mut child = command("fae_plugin._inspect").arg(id).arg(source).spawn()?;
     let mut stdout = child.stdout.take().unwrap();
-    let value = timeout(Duration::from_secs(5), read_frame(&mut stdout)).await??;
+    let message = request(
+        &wd_tools::uuid::v4(),
+        RequestPath::PluginInspect,
+        None,
+        json!({"id":id,"source":source.to_string_lossy()}),
+    )?;
+    write_frame(child.stdin.as_mut().unwrap(), &message).await?;
+    let response: ResponseMessage =
+        serde_json::from_value(timeout(Duration::from_secs(5), read_frame(&mut stdout)).await??)?;
     let status = timeout(Duration::from_secs(5), child.wait()).await??;
     anyhow::ensure!(
-        status.success() && value.get("error").is_none(),
+        status.success()
+            && response.request_id == message.request_id.clone().unwrap()
+            && response.path == message.as_request()?.path().response()
+            && response.payload.code == ResponseCode::Success,
         "plugin_config_invalid: {}",
-        value
+        response.payload.msg
     );
     Ok(
-        serde_json::from_value::<PluginDeclaration>(value["result"].clone())?
+        serde_json::from_value::<PluginDeclaration>(serde_json::to_value(response.payload.data)?)?
             .normalize(id, Some(PluginEngine::Py))?,
     )
 }
@@ -85,11 +123,11 @@ pub struct PythonExecutor {
     members: Vec<PluginRecord>,
 }
 struct Worker {
-    _child: Mutex<Child>,
+    _child: tokio::sync::Mutex<Child>,
     write: mpsc::Sender<Value>,
     control: mpsc::Sender<Value>,
-    pending: Mutex<HashMap<String, Reply>>,
-    calls: Mutex<HashMap<String, Weak<Call>>>,
+    pending: Mutex<HashMap<String, PendingReply>>,
+    calls: Mutex<HashMap<String, Weak<PluginCall>>>,
     host_slots: Arc<tokio::sync::Semaphore>,
     healthy: AtomicBool,
     failed: tokio::sync::watch::Sender<bool>,
@@ -109,16 +147,18 @@ impl std::fmt::Debug for Worker {
         f.write_str("PythonWorker")
     }
 }
-struct Call {
+struct PluginCall {
     id: String,
     worker: Weak<Worker>,
     ctx: Ctx,
     root: Ctx,
     metadata: Value,
+    point: String,
+    method: String,
+    next_members: Mutex<std::collections::HashSet<String>>,
     deadline: Instant,
     members: HashMap<String, (String, String)>,
     contexts: Mutex<HashMap<String, Ctx>>,
-    views: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<ContextStateView>>>>,
     streams: tokio::sync::Mutex<HashMap<String, ChatCompletionResponseStream>>,
     tool: Mutex<Option<ToolResponse>>,
     receipts: tokio::sync::Mutex<HashMap<String, Value>>,
@@ -126,11 +166,10 @@ struct Call {
     release_requested: AtomicBool,
     terminal_controls: AtomicUsize,
     streaming: AtomicBool,
-    json_output: bool,
 }
 // A state-changing RPC must enqueue its acknowledgement before invalidation,
 // even if an outer runtime drops the invocation as soon as the state changes.
-struct TerminalControl(Arc<Call>);
+struct TerminalControl(Arc<PluginCall>);
 impl Drop for TerminalControl {
     fn drop(&mut self) {
         if self.0.terminal_controls.fetch_sub(1, Ordering::SeqCst) == 1
@@ -140,13 +179,13 @@ impl Drop for TerminalControl {
         }
     }
 }
-struct Lease(Arc<Call>);
+struct Lease(Arc<PluginCall>);
 impl Drop for Lease {
     fn drop(&mut self) {
         self.0.release();
     }
 }
-impl Call {
+impl PluginCall {
     fn release(&self) {
         self.release_requested.store(true, Ordering::SeqCst);
         if self.terminal_controls.load(Ordering::SeqCst) > 0 {
@@ -169,44 +208,56 @@ impl Call {
                 let _ = ctx.set_state(ContextState::cancelled("plugin invocation released"));
             }
         }
-        if let Some(worker) = self.worker.upgrade() {
-            worker.calls.lock().unwrap().remove(&self.id);
-            let frame = json!({"method":"release","params":{"call_id":self.id}});
-            if let Err(mpsc::error::TrySendError::Full(frame)) = worker.control.try_send(frame) {
-                let sender = worker.control.clone();
-                tokio::spawn(async move {
-                    let _ = sender.send(frame).await;
-                });
-            }
-        }
     }
 }
 impl Worker {
-    async fn rpc(&self, method: &str, params: Value, deadline: Instant) -> anyhow::Result<Value> {
+    async fn rpc(
+        &self,
+        method: RequestPath,
+        params: Value,
+        deadline: Instant,
+    ) -> anyhow::Result<Value> {
         let id = wd_tools::uuid::v4();
         self.rpc_id(id, method, params, deadline).await
     }
     async fn rpc_id(
         &self,
         id: String,
-        method: &str,
+        method: RequestPath,
         params: Value,
         deadline: Instant,
     ) -> anyhow::Result<Value> {
         let (send, receive) = oneshot::channel();
+        let session_id = params
+            .get("contexts")
+            .and_then(Value::as_object)
+            .and_then(|c| c.values().next())
+            .and_then(|c| c.get("session_id"))
+            .filter(|s| !s.is_null())
+            .map(|s| serde_json::from_value(s.clone()))
+            .transpose()?
+            .or_else(|| {
+                params
+                    .get("call_id")
+                    .or_else(|| params.get("access")?.get("call_id"))
+                    .unwrap_or(&Value::Null)
+                    .as_str()
+                    .and_then(|id| self.calls.lock().unwrap().get(id).and_then(Weak::upgrade))
+                    .and_then(|call| call.ctx.scope().ok())
+                    .and_then(|s| s.execution.as_ref().map(|e| e.session.key().session_id))
+            });
+        let message = request(&id, method, session_id, params)?;
         {
             let mut pending = self.pending.lock().unwrap();
             anyhow::ensure!(pending.len() < 256, "plugin_busy: requests");
-            pending.insert(id.clone(), send);
+            pending.insert(id.clone(), (message.clone(), send));
         }
         let _pending = Pending {
             worker: self,
             id: id.clone(),
         };
         let result = tokio::time::timeout_at(deadline, async {
-            self.write
-                .send(json!({"id":id,"method":method,"params":params}))
-                .await?;
+            self.write.send(serde_json::to_value(message)?).await?;
             receive.await?
         })
         .await;
@@ -220,7 +271,7 @@ impl Worker {
         self.healthy.store(false, Ordering::SeqCst);
         *self.last_error.lock().unwrap() = Some(error.into());
         self.failed.send_replace(true);
-        for (_, reply) in self.pending.lock().unwrap().drain() {
+        for (_, (_, reply)) in self.pending.lock().unwrap().drain() {
             let _ = reply.send(Err(anyhow::anyhow!("plugin_worker_unavailable: {error}")));
         }
     }
@@ -238,18 +289,39 @@ impl PythonExecutor {
         let mut child = spawn?;
         let mut stdout = child.stdout.take().unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        let ready = timeout(Duration::from_secs(5), read_frame(&mut stdout)).await??;
+        let ready: Message = serde_json::from_value(
+            timeout(Duration::from_secs(5), read_frame(&mut stdout)).await??,
+        )?;
         let _ = tokio::fs::remove_file(&file).await;
+        let RequestPayload::PluginWorkerHello(hello) = ready.as_request()? else {
+            anyhow::bail!("plugin_startup_failed: expected worker hello");
+        };
+        let expected = members
+            .iter()
+            .flat_map(|r| (0..r.declaration.mounts.len()).map(move |i| format!("{}:{i}", r.id)))
+            .collect::<Vec<_>>();
         anyhow::ensure!(
-            ready["method"] == "ready"
-                && ready["params"]["protocol_version"] == 1
-                && ready["params"]["api_version"] == API_VERSION,
-            "plugin_startup_failed: {ready}"
+            hello.api_version == API_VERSION
+                && hello.instances == expected
+                && ready.session_id.is_none(),
+            "plugin_startup_failed: incompatible worker"
         );
+        write_frame(
+            &mut stdin,
+            &ResponseMessage::success(
+                &ready,
+                None,
+                "ready",
+                Some(protocol::ResponsePayload::PluginWorkerHello(
+                    protocol::Empty {},
+                )),
+            )?,
+        )
+        .await?;
         let (write, mut queue) = mpsc::channel::<Value>(128);
         let (control, mut controls) = mpsc::channel::<Value>(64);
         let worker = Arc::new(Worker {
-            _child: Mutex::new(child),
+            _child: tokio::sync::Mutex::new(child),
             write,
             control,
             pending: Mutex::new(HashMap::new()),
@@ -297,23 +369,29 @@ impl PythonExecutor {
                 let Some(worker) = weak.upgrade() else {
                     break;
                 };
-                let id = frame["id"].as_str().unwrap_or("").to_owned();
-                if frame["method"] == "host.call" {
-                    let call_id = frame["params"]["call_id"].as_str().unwrap_or("");
-                    let call = worker
-                        .calls
-                        .lock()
-                        .unwrap()
-                        .get(call_id)
-                        .and_then(Weak::upgrade);
+                if frame["path"]
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("/request/"))
+                {
+                    let message: Message = match serde_json::from_value(frame) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            worker.fail(&error.to_string());
+                            break;
+                        }
+                    };
+                    let call = worker.call_for(&message);
                     let permit = worker.host_slots.clone().try_acquire_owned();
                     let sender = worker.control.clone();
                     let control = call
                         .as_ref()
                         .filter(|_| {
                             matches!(
-                                frame["params"]["method"].as_str(),
-                                Some("context.cancel" | "context.cancel_run" | "context.set_state")
+                                message.as_request().map(|p| p.path()).ok(),
+                                Some(
+                                    RequestPath::PluginContextCancel
+                                        | RequestPath::SessionExecutionStop
+                                )
                             )
                         })
                         .map(|call| {
@@ -325,7 +403,7 @@ impl PythonExecutor {
                             (Some(call), Ok(_permit)) => {
                                 let mut released = call.released.subscribe();
                                 tokio::select! {
-                                    r=tokio::time::timeout_at(call.deadline,call.host(&id,&frame["params"]))=>
+                                    r=tokio::time::timeout_at(call.deadline,call.host(&message))=>
                                         r.unwrap_or_else(|_|Err(anyhow::anyhow!("HostCallTimeout"))),
                                     _=released.changed()=>Err(anyhow::anyhow!("HandleExpired")),
                                 }
@@ -334,66 +412,102 @@ impl PythonExecutor {
                             _ => Err(anyhow::anyhow!("plugin_busy: host_requests")),
                         };
                         let reply = match result {
-                            Ok(result) => json!({"id":id,"result":result}),
+                            Ok(result) => json!({"version":protocol::VERSION,
+                                "request_id":message.request_id,"session_id":message.session_id,
+                                "path":message.as_request().unwrap().path().response(),
+                                "payload":{"code":0,"msg":"ok","data":result}}),
                             Err(error) => {
                                 let text = error.to_string();
-                                json!({"id":id,"error":{"code":error_code(&error),"message":text,
-                                    "resource":text.strip_prefix("plugin_busy: ")}})
+                                serde_json::to_value(
+                                    ResponseMessage::error(&message, error_code(&error), text)
+                                        .unwrap(),
+                                )
+                                .unwrap()
                             }
+                        };
+                        let reply = match serde_json::from_value::<ResponseMessage>(reply) {
+                            Ok(response) => serde_json::to_value(response).unwrap(),
+                            Err(error) => serde_json::to_value(
+                                ResponseMessage::error(
+                                    &message,
+                                    ResponseCode::InternalError,
+                                    format!("plugin response schema: {error}"),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap(),
                         };
                         let _ = sender.send(reply).await;
                         drop(control);
                     });
-                } else if let Some(reply) = worker.pending.lock().unwrap().remove(&id) {
-                    let result = if let Some(error) = frame.get("error") {
-                        Err(anyhow::anyhow!("Python plugin: {error}"))
-                    } else {
-                        Ok(frame["result"].clone())
+                } else {
+                    let response: ResponseMessage = match serde_json::from_value(frame) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            worker.fail(&error.to_string());
+                            break;
+                        }
                     };
-                    let _ = reply.send(result);
+                    let pending = worker
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .remove(response.request_id.as_str());
+                    if let Some((request, reply)) = pending {
+                        let result = if let Err(error) = response.validate_for(&request) {
+                            Err(anyhow::anyhow!("plugin response binding mismatch: {error}"))
+                        } else if response.payload.code != ResponseCode::Success {
+                            Err(anyhow::anyhow!(
+                                "Python plugin ({}): {}",
+                                response.payload.code as u16,
+                                response.payload.msg
+                            ))
+                        } else {
+                            serde_json::to_value(response.payload.data).map_err(Into::into)
+                        };
+                        let _ = reply.send(result);
+                    }
                 }
             }
         });
         Ok(Self { worker, members })
     }
 }
-fn error_code(error: &anyhow::Error) -> &str {
+fn error_code(error: &anyhow::Error) -> ResponseCode {
+    if let Some(error) = error.downcast_ref::<SessionControlError>() {
+        return match error {
+            SessionControlError::Conflict(_) => ResponseCode::Conflict,
+            SessionControlError::NotFound(_) => ResponseCode::NotFound,
+            SessionControlError::Invalid(_) => ResponseCode::BadRequest,
+        };
+    }
     let text = error.to_string();
     for (hint, code) in [
-        ("HandleExpired", "handle_expired"),
-        ("terminal", "context_finished"),
-        ("ContextFinished", "context_finished"),
-        ("ContextUnavailable", "context_unavailable"),
-        ("not bound", "context_unavailable"),
-        ("StateViewClosed", "state_view_closed"),
-        ("UnsupportedOutputType", "unsupported_output_type"),
-        ("SessionUnavailable", "session_unavailable"),
-        ("SessionBusy", "session_busy"),
-        ("HostCallTimeout", "host_call_timeout"),
-        ("plugin_busy", "plugin_busy"),
-        ("already bound", "scope_already_bound"),
-        ("InvalidStateTransition", "invalid_state_transition"),
-        ("InvalidScope", "invalid_scope"),
-        ("stack capacity", "stack_capacity_exceeded"),
-        ("invalid context state", "invalid_state_transition"),
+        ("HandleExpired", ResponseCode::NotFound),
+        ("terminal", ResponseCode::Conflict),
+        ("ContextFinished", ResponseCode::Conflict),
+        ("SessionUnavailable", ResponseCode::NotFound),
+        ("HostCallTimeout", ResponseCode::Unavailable),
+        ("plugin_busy", ResponseCode::Conflict),
+        ("unsupported", ResponseCode::BadRequest),
     ] {
         if text.contains(hint) {
             return code;
         }
     }
-    "plugin_error"
+    ResponseCode::InternalError
 }
 #[async_trait::async_trait]
 impl PluginExecutor for PythonExecutor {
     fn status(&self) -> Value {
         let calls = self.worker.calls.lock().unwrap();
         json!({"healthy":self.worker.healthy.load(Ordering::SeqCst),
-            "pid":self.worker._child.lock().unwrap().id(),
+            "pid":self.worker._child.try_lock().ok().and_then(|child|child.id()),
             "last_error":self.worker.last_error.lock().unwrap().clone(),
             "active_calls":calls.values().filter_map(Weak::upgrade)
-                .filter(|c| !c.streaming.load(Ordering::SeqCst)).count(),
+                .filter(|c| !*c.released.borrow() && !c.streaming.load(Ordering::SeqCst)).count(),
             "active_streams":calls.values().filter_map(Weak::upgrade)
-                .filter(|c| c.streaming.load(Ordering::SeqCst)).count(),
+                .filter(|c| !*c.released.borrow() && c.streaming.load(Ordering::SeqCst)).count(),
             "pending_requests":self.worker.pending.lock().unwrap().len()})
     }
     async fn invoke(
@@ -432,19 +546,21 @@ impl PluginExecutor for PythonExecutor {
             contexts.insert(key.clone(), ctx.clone());
             payload.insert(
                 key.clone(),
-                plugin::codec::context(ctx, key, root, &metadata),
+                serde_json::to_value(plugin::codec::context(ctx, key))?,
             );
         }
-        let call = Arc::new(Call {
+        let call = Arc::new(PluginCall {
             id: id.clone(),
             worker: Arc::downgrade(&self.worker),
             ctx: ctx.clone(),
             root: root.clone(),
             metadata,
+            point: point.into(),
+            method: method.into(),
+            next_members: Mutex::new(std::collections::HashSet::new()),
             deadline: Instant::now() + Duration::from_millis(budget),
             members,
             contexts: Mutex::new(contexts),
-            views: tokio::sync::Mutex::new(HashMap::new()),
             streams: tokio::sync::Mutex::new(HashMap::new()),
             tool: Mutex::new(None),
             receipts: tokio::sync::Mutex::new(HashMap::new()),
@@ -452,9 +568,6 @@ impl PluginExecutor for PythonExecutor {
             release_requested: AtomicBool::new(false),
             terminal_controls: AtomicUsize::new(0),
             streaming: AtomicBool::new(false),
-            // SingleAgentPlan outputs serde_json::Value; model/tool tasks own
-            // native response types. Unscheduled plugin children accept JSON.
-            json_output: point == "SingleAgentHook",
         });
         let lease = Lease(call.clone());
         let argument = match argument {
@@ -480,6 +593,13 @@ impl PluginExecutor for PythonExecutor {
             anyhow::ensure!(calls.len() < 96, "plugin_busy: calls");
             calls.insert(id.clone(), Arc::downgrade(&call));
         }
+        let execution = ctx.scope().ok().and_then(|s| s.execution.clone());
+        if let Some(binding) = &execution {
+            binding.session.report(&binding.execution_id, ExecutionReport::ResourceRegistered {
+                invocation_id: binding.invocation_id.clone(),
+                resource_id: RequestId::new(id.clone())?,
+            })?;
+        }
         let watched = call.clone();
         let mut failed = self.worker.failed.subscribe();
         tokio::spawn(async move {
@@ -488,6 +608,7 @@ impl PluginExecutor for PythonExecutor {
                 tokio::select! {
                 _=watched.root.terminal()=>{},
                 _=watched.ctx.terminal()=>{},
+                _=watched.ctx.cancellation()=>{},
                 _=tokio::time::sleep_until(watched.deadline)=>{},
                 _=failed.changed()=>{},
                 _=released.changed()=>{},
@@ -498,9 +619,34 @@ impl PluginExecutor for PythonExecutor {
             if !*released.borrow() {
                 let _ = released.changed().await;
             }
+            if let Some(worker) = watched.worker.upgrade() {
+                // Release is a correlated control request; its reply proves Python
+                // closed generators and stopped the owned business task.
+                if worker.rpc(RequestPath::PluginCallRelease,json!({"call_id":watched.id}),
+                    Instant::now() + Duration::from_secs(5)).await.is_err() {
+                    worker.fail("plugin cleanup failed");
+                    let mut child = worker._child.lock().await;
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                worker.calls.lock().unwrap().remove(&watched.id);
+            }
             watched.streams.lock().await.clear();
-            watched.views.lock().await.clear();
             watched.tool.lock().unwrap().take();
+            let contexts = std::mem::take(&mut *watched.contexts.lock().unwrap());
+            for (handle, child) in contexts {
+                if !handle.contains("/child/") { continue; }
+                if let Ok(scope) = child.scope() {
+                    if let Some(binding) = &scope.execution {
+                        let _ = binding.session.cleaned(&binding.execution_id, &binding.invocation_id);
+                    }
+                }
+                drop(child);
+            }
+            if let Some(binding) = execution {
+                let _ = binding.session.report(&binding.execution_id,
+                    ExecutionReport::ResourceReleased(RequestId::new(watched.id.clone()).unwrap()));
+            }
         });
         let group = ctx
             .scope()
@@ -511,21 +657,23 @@ impl PluginExecutor for PythonExecutor {
                     .map(|b| json!([s.user.user_id,b.session_id]).to_string())
             })
             .unwrap_or_else(|| {
-                root.plugin_run()
-                    .map(|r| r.run_id.clone())
+                root.plugin_execution()
+                    .map(|r| r.execution_id.to_string())
                     .unwrap_or_else(|| "static".into())
             });
         let result = tokio::select! {
-            result=self.worker.rpc_id(id.clone(),"call",json!({"point":point,"method":method,"location":location,
+            result=self.worker.rpc_id(id.clone(),RequestPath::PluginInvoke,json!({"point":point,"method":method,"location":location,
                 "contexts":payload,"argument":argument,"group":group,"timeout_ms":budget,
                 "model_members":call.metadata.get("model_members")}),call.deadline)=>result?,
             _=root.terminal()=>anyhow::bail!("ContextFinished"),
             _=ctx.terminal()=>anyhow::bail!("ContextFinished"),
+            _=ctx.cancellation()=>anyhow::bail!("ContextFinished"),
         };
         anyhow::ensure!(
             !root.state().current().is_terminal() && !ctx.state().current().is_terminal(),
             "ContextFinished"
         );
+        protocol::validate_hook_value(point, method, &result, true)?;
         if (point == "ModelHook" && method == "exec") || method == "on_model_resp" {
             let model = match result["kind"].as_str() {
                 Some("completed") => {
@@ -599,7 +747,7 @@ impl PluginExecutor for PythonExecutor {
                                 Instant::now() + Duration::from_secs(if first { 30 } else { 60 }),
                             );
                             let response = tokio::select! {
-                                r=worker.rpc("stream.next",json!({"stream_id":id}),deadline)=>r,
+                                r=worker.rpc(RequestPath::PluginStreamNext,json!({"stream_id":id,"call_id":call.id,"access":null}),deadline)=>r,
                                 _=call.root.terminal()=>Err(anyhow::anyhow!("ContextFinished")),
                                 _=call.ctx.terminal()=>Err(anyhow::anyhow!("ContextFinished")),
                             };
@@ -653,334 +801,4 @@ impl PluginExecutor for PythonExecutor {
     }
 }
 
-impl Call {
-    async fn host(&self, request_id: &str, frame: &Value) -> anyhow::Result<Value> {
-        anyhow::ensure!(!*self.released.borrow(), "HandleExpired");
-        let member = frame["member"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?;
-        let (plugin_id, revision) = self
-            .members
-            .get(member)
-            .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?;
-        let method = frame["method"].as_str().unwrap_or("");
-        let p = &frame["params"];
-        let handle = p["handle"].as_str().unwrap_or(member);
-        if method == "output.json_snapshot" && handle == "unsupported-output" {
-            anyhow::bail!("UnsupportedOutputType");
-        }
-        let ctx = self
-            .contexts
-            .lock()
-            .unwrap()
-            .get(handle)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?;
-        anyhow::ensure!(
-            handle == member || handle.starts_with(&format!("{member}/")),
-            "HandleExpired"
-        );
-        anyhow::ensure!(
-            !self.root.state().current().is_terminal() || method == "context.cancel_run",
-            "ContextFinished"
-        );
-        if method == "context.get_engine" {
-            return Ok(json!({"engine_id":format!("{:p}",Arc::as_ptr(&ctx.get_engine()))}));
-        }
-        if method == "context.get_session" {
-            return plugin::codec::session(&ctx, handle);
-        }
-        if method == "context.scope" {
-            return plugin::codec::scope(&ctx, handle);
-        }
-        if method == "output.json_snapshot" {
-            anyhow::bail!("UnsupportedOutputType");
-        }
-        if method.starts_with("stream.") {
-            let stream_id = p["stream_id"].as_str().unwrap_or("");
-            let mut streams = self.streams.lock().await;
-            if method == "stream.close" {
-                streams.remove(stream_id);
-                return Ok(Value::Null);
-            }
-            let stream = streams
-                .get_mut(stream_id)
-                .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?;
-            return match stream.next().await {
-                Some(chunk) => Ok(json!({"eof":false,"chunk":chunk?})),
-                None => Ok(json!({"eof":true})),
-            };
-        }
-        if method.starts_with("state.") {
-            if method == "state.subscribe" {
-                let id = format!("{member}/state/{}", wd_tools::uuid::v4());
-                let mut views = self.views.lock().await;
-                anyhow::ensure!(views.len() < 64, "plugin_busy: subscriptions");
-                views.insert(id.clone(), Arc::new(tokio::sync::Mutex::new(ctx.state())));
-                self.contexts.lock().unwrap().insert(id.clone(), ctx);
-                return Ok(json!({"handle":id}));
-            }
-            if method == "state.close" {
-                self.views.lock().await.remove(handle);
-                self.contexts.lock().unwrap().remove(handle);
-                return Ok(Value::Null);
-            }
-            let view = self
-                .views
-                .lock()
-                .await
-                .get(handle)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("StateViewClosed"))?;
-            if method == "state.changed" {
-                view.lock()
-                    .await
-                    .changed()
-                    .await
-                    .map_err(|_| anyhow::anyhow!("StateViewClosed"))?;
-                return Ok(Value::Null);
-            }
-            return Ok(plugin::codec::state(&ctx.state().current()));
-        }
-        if method == "context.stacks" {
-            let q = &p["query"];
-            return plugin::codec::stacks(ctx.stacks(ContextStackQuery {
-                tree: q["tree"].as_bool().unwrap_or(false),
-                task_id: string(q, "task_id"),
-                plan_id: string(q, "plan_id"),
-                executor: string(q, "executor"),
-                phase: if q["phase"].is_null() {
-                    None
-                } else {
-                    Some(plugin::codec::phase(&q["phase"])?)
-                },
-                after_sequence: q["after_sequence"].as_u64(),
-                limit: q["limit"].as_u64().map(|v| v as usize),
-            })?);
-        }
-        // Mutation IDs are idempotent throughout an invocation.
-        let mut receipts = self.receipts.lock().await;
-        if let Some(value) = receipts.get(request_id) {
-            return Ok(value.clone());
-        }
-        anyhow::ensure!(receipts.len() < 256, "plugin_busy: receipts");
-        let result = match method {
-            "session.send" => {
-                let text = p["text"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("invalid text"))?;
-                anyhow::ensure!(
-                    !text.trim().is_empty() && text.len() <= 64 * 1024,
-                    "invalid message text"
-                );
-                let session = ctx
-                    .get_session()?
-                    .ok_or_else(|| anyhow::anyhow!("SessionUnavailable"))?;
-                let scope = ctx.scope()?;
-                anyhow::ensure!(!ctx.state().current().is_terminal(), "ContextFinished");
-                let message_id = format!("{}:{request_id}", self.id);
-                let data = SessionEventData::Custom {
-                    event_type: "plugin_message".into(),
-                    content: json!({"message_id":message_id,"plugin_id":plugin_id,"revision":revision,"text":text}),
-                };
-                let turn = self.metadata["turn_id"].as_u64().or(scope.turn_id);
-                let mut emit = || {
-                    if let (Some(agent), Some(turn)) = (&scope.agent_id, turn) {
-                        session.emit_agent(turn, agent, "plugin", data.clone())
-                    } else {
-                        session.emit(SessionEvent {
-                            workflow_id: scope.workflow_id.clone(),
-                            parent_agent_name: None,
-                            node_id: scope.node_id.clone(),
-                            turn_id: turn,
-                            agent_name: scope.agent_id.clone(),
-                            source: "plugin".into(),
-                            data: data.clone(),
-                        })
-                    }
-                };
-                self.root.with_active(&mut || {
-                    if self.root.same_context(&ctx) {
-                        emit()
-                    } else {
-                        ctx.with_active(&mut emit)
-                    }
-                })?;
-                json!({"message_id":message_id})
-            }
-            "context.cancel" | "context.cancel_run" => {
-                let target = if method == "context.cancel_run" {
-                    &self.root
-                } else {
-                    &ctx
-                };
-                if !target.state().current().is_cancelled() {
-                    target.set_state(ContextState::cancelled(
-                        p["reason"].as_str().unwrap_or("Cancelled by plugin"),
-                    ))?;
-                }
-                if self.ctx.state().current().is_terminal()
-                    || self.root.state().current().is_terminal()
-                {
-                    json!({"_invocation_terminal":true,"result":null})
-                } else {
-                    Value::Null
-                }
-            }
-            "context.set_state" => {
-                let state = &p["state"];
-                let state = match state["kind"].as_str() {
-                    Some("created") => ContextState::Created,
-                    Some("running") => ContextState::Running,
-                    Some("failed") => ContextState::failed(
-                        state["error"]["message"]
-                            .as_str()
-                            .unwrap_or("Plugin failed"),
-                    ),
-                    Some("cancelled") => ContextState::cancelled(
-                        state["reason"].as_str().unwrap_or("Plugin cancelled"),
-                    ),
-                    Some("succeeded") => {
-                        anyhow::ensure!(
-                            handle.starts_with(&format!("{member}/child/"))
-                                || (handle == member && self.json_output),
-                            "UnsupportedOutputType"
-                        );
-                        ContextState::succeeded(state["output"]["json"].clone())
-                    }
-                    _ => anyhow::bail!("invalid state"),
-                };
-                let result = json!(match ctx.set_state(state)? {
-                    ContextStateUpdate::Applied => "applied",
-                    ContextStateUpdate::Unchanged => "unchanged",
-                });
-                if self.ctx.state().current().is_terminal()
-                    || self.root.state().current().is_terminal()
-                {
-                    json!({"_invocation_terminal":true,"result":result})
-                } else {
-                    result
-                }
-            }
-            "context.append_stack" => {
-                let entry = &p["entry"];
-                json!(ctx.append_stack(ContextStackDraft {
-                    task_meta: plugin::codec::meta(&entry["task_meta"])?,
-                    phase: plugin::codec::phase(&entry["phase"])?,
-                    parent_entry_id: entry["parent_entry_id"].as_u64(),
-                    elapsed_ms: entry["elapsed_ms"].as_u64(),
-                    message: string(entry, "message")
-                })?)
-            }
-            "context.fork" => {
-                let spec = &p["spec"];
-                let parent = ctx.scope()?;
-                let session = if spec["session"].is_null() {
-                    None
-                } else {
-                    let h = spec["session"]["session"]["handle"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?;
-                    anyhow::ensure!(
-                        h == member || h.starts_with(&format!("{member}/")),
-                        "HandleExpired"
-                    );
-                    self.contexts
-                        .lock()
-                        .unwrap()
-                        .get(h)
-                        .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?
-                        .scope()?
-                        .session
-                        .clone()
-                };
-                let todo = match spec["todo"]["kind"].as_str().unwrap_or("auto") {
-                    "auto" => TodoContextBinding::Auto,
-                    "inherit" => TodoContextBinding::Inherit,
-                    "clear" => TodoContextBinding::Clear,
-                    "bind" => {
-                        anyhow::ensure!(spec["todo"]["scope"]["handle"] == handle, "HandleExpired");
-                        TodoContextBinding::Bind(
-                            parent
-                                .todo
-                                .clone()
-                                .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?,
-                        )
-                    }
-                    _ => anyhow::bail!("invalid todo binding"),
-                };
-                anyhow::ensure!(
-                    self.contexts.lock().unwrap().len() < 128,
-                    "plugin_busy: contexts"
-                );
-                let child = ctx.fork(ContextChildSpec {
-                    timer_source: if spec["timer_source"].is_null() {
-                        None
-                    } else {
-                        Some(plugin::codec::source_from_json(&spec["timer_source"])?)
-                    },
-                    timer_workspace: string(spec, "timer_workspace").map(PathBuf::from),
-                    session,
-                    agent_id: string(spec, "agent_id"),
-                    workflow_id: string(spec, "workflow_id"),
-                    node_id: string(spec, "node_id"),
-                    turn_id: spec["turn_id"].as_u64(),
-                    execution: spec["execution"].as_bool().unwrap_or(false),
-                    workspace: string(spec, "workspace").map(PathBuf::from),
-                    todo,
-                    ..Default::default()
-                })?;
-                let id = format!("{member}/child/{}", wd_tools::uuid::v4());
-                let result = plugin::codec::context(&child, &id, &self.root, &self.metadata);
-                self.contexts.lock().unwrap().insert(id, child);
-                result
-            }
-            "context.bind_scope" => {
-                if ctx.scope().is_ok() {
-                    anyhow::bail!("scope already bound");
-                }
-                let scope = &p["scope"];
-                anyhow::ensure!(
-                    matches!(*ctx.state().current(), ContextState::Created),
-                    "InvalidStateTransition"
-                );
-                // Only user identity already supplied by this invocation may be used.
-                let user = self
-                    .ctx
-                    .scope()
-                    .map_err(|_| anyhow::anyhow!("ContextUnavailable"))?
-                    .user
-                    .clone();
-                anyhow::ensure!(scope["user"]["user_id"] == user.user_id, "InvalidScope");
-                anyhow::ensure!(
-                    scope["session"].is_null()
-                        && scope["todo"].is_null()
-                        && scope["timer_execution"].is_null()
-                        && scope["parent_scope_id"].is_null(),
-                    "InvalidScope: unbound root cannot fabricate host references"
-                );
-                let mut binding = ContextScope::root(user.user_id.clone());
-                binding.scope_id = scope["scope_id"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("InvalidScope"))?
-                    .into();
-                binding.user = user;
-                binding.agent_id = string(scope, "agent_id");
-                binding.workflow_id = string(scope, "workflow_id");
-                binding.node_id = string(scope, "node_id");
-                binding.turn_id = scope["turn_id"].as_u64();
-                binding.workspace = string(scope, "workspace").map(PathBuf::from);
-                binding.execution_origin = string(scope, "execution_origin");
-                ctx.bind_scope(binding)?;
-                plugin::codec::context(&ctx, handle, &self.root, &self.metadata)
-            }
-            _ => anyhow::bail!("unsupported host method {method}"),
-        };
-        receipts.insert(request_id.into(), result.clone());
-        Ok(result)
-    }
-}
-fn string(value: &Value, key: &str) -> Option<String> {
-    value[key].as_str().map(str::to_owned)
-}
+mod capabilities;

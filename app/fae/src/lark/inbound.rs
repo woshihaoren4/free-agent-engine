@@ -3,7 +3,7 @@ use super::{
     identity::{receipt_id, session_id},
     store::Record,
 };
-use crate::protocol::SessionBinding;
+use crate::session_host::LarkPrincipal as SessionBinding;
 use larksuite_oapi_sdk_rs::events::im::P2MessageReceiveV1;
 
 pub fn parse(

@@ -1,5 +1,5 @@
 use super::card::Card;
-use crate::protocol::SessionBinding;
+use crate::session_host::LarkPrincipal as SessionBinding;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ pub struct Record {
     pub legacy_reply_in_thread: Option<bool>,
     #[serde(default)]
     pub received_seq: u64,
-    #[serde(default = "crate::protocol::legacy_mapping_version")]
+    #[serde(default = "crate::session_host::legacy_mapping_version")]
     pub session_mapping_version: u16,
     #[serde(default)]
     pub inbound_thread_id: String,

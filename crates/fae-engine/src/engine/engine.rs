@@ -27,6 +27,79 @@ impl Debug for Engine {
 }
 
 impl Engine {
+    /// Run a prepared Session execution. The coordinator retains the public result.
+    pub async fn execute_session<Env>(
+        &self,
+        execution: fae_agent::ExecutionHandle,
+        env: Env,
+    ) -> anyhow::Result<()>
+    where
+        Env: Debug + Send + Sync + 'static,
+    {
+        use fae_agent::{
+            ExecutionOutcome,
+            protocol::{ContentBlock, ErrorInfo},
+        };
+        let ctx = execution.ctx.clone();
+        let result = match self.call(ctx.clone(), to_plan_ty::<Env>(), env).await {
+            Ok(mut plan) => {
+                if ctx.cancel_requested() {
+                    plan.abort(-1, "execution cancelled during preparation".into())
+                        .await;
+                    let _ = ctx.set_state(ContextState::cancelled(
+                        "execution cancelled during preparation",
+                    ));
+                    drop(plan);
+                    Err(anyhow::anyhow!("execution cancelled during preparation"))
+                } else {
+                    match execution.session.running(&execution.execution_id) {
+                        Ok(()) => Self::run_plan(plan, ctx.clone()).await,
+                        Err(error) => {
+                            plan.abort(-1, error.to_string()).await;
+                            drop(plan);
+                            let _ = ctx.set_state(ContextState::cancelled(error.to_string()));
+                            Err(error.into())
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
+        let outcome = match &*ctx.state().current() {
+            ContextState::Succeeded { output } if result.is_ok() => match output.json_snapshot() {
+                Ok(value) => ExecutionOutcome::Succeeded {
+                    result: vec![ContentBlock::Json { value }],
+                },
+                Err(error) => ExecutionOutcome::Failed {
+                    error: ErrorInfo {
+                        code: "unsupported_result".into(),
+                        message: error.to_string(),
+                    },
+                },
+            },
+            ContextState::Cancelled { reason } => ExecutionOutcome::Cancelled {
+                reason: reason.to_string(),
+            },
+            _ => ExecutionOutcome::Failed {
+                error: ErrorInfo {
+                    code: "execution_failed".into(),
+                    message: result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "plan did not produce a public result".into()),
+                },
+            },
+        };
+        // Preparation failures have no PlanRuntime to report root cleanup.
+        // A dispatched plan has already reported it after abort/save and removal.
+        let _ = ctx.invocation_finished();
+        execution
+            .session
+            .finishing(&execution.execution_id, outcome)?;
+        result
+    }
+
     pub fn new(plan_builders: HashMap<String, Box<dyn PlanBuilder>>, rt: RT) -> Self {
         Self::with_plan_hooks(plan_builders, Vec::new(), rt)
     }
@@ -45,15 +118,7 @@ impl Engine {
     }
 
     pub fn ctx(&self) -> Ctx {
-        let ctx = Ctx::new(EngineContext::into_arc(self.clone()));
-        if let Some(manager) = &self.plugins {
-            ctx.bind_plugin_run(Arc::new(fae_agent::plugin::PluginRun {
-                snapshot: manager.snapshot(),
-                root: ctx.downgrade(),
-                run_id: wd_tools::uuid::v4(),
-            }));
-        }
-        ctx
+        Ctx::new(EngineContext::into_arc(self.clone()))
     }
 
     pub fn with_plugins(mut self, plugins: Arc<fae_agent::plugin::PluginManager>) -> Self {
@@ -62,8 +127,19 @@ impl Engine {
     }
 
     pub fn ctx_with_scope(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
-        let ctx = self.ctx();
+        let execution_id = scope
+            .execution
+            .as_ref()
+            .map(|binding| binding.execution_id.clone());
+        let ctx = Ctx::new(EngineContext::into_arc(self.clone()));
         ctx.bind_scope(scope)?;
+        if let (Some(manager), Some(execution_id)) = (&self.plugins, execution_id) {
+            ctx.bind_plugin_execution(Arc::new(fae_agent::plugin::PluginExecutionBinding {
+                snapshot: manager.snapshot(),
+                root: ctx.downgrade(),
+                execution_id,
+            }));
+        }
         Ok(ctx)
     }
 
@@ -210,7 +286,7 @@ impl fae_agent::Engine for Engine {
         let builder = self
             .plan_builder(&ty)
             .ok_or_else(|| anyhow::anyhow!("plan builder is not registered for `{ty}`"))?;
-        let child = ctx.fork(builder.child_spec(&mut env).await?)?;
+        let child = ctx.fork(builder.prepare_child_spec(ctx, &mut env).await?)?;
         let plan = self.build_plan(builder, child.clone(), env).await?;
         Ok((child, plan))
     }

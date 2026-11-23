@@ -7,7 +7,7 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn init(&mut self) -> anyhow::Result<PlanNext> {
-        if self.session.cancel_requested() {
+        if self.ctx.cancel_requested() {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
@@ -26,6 +26,7 @@ impl Plan for SingleAgentPlan {
                 "query is empty and has no input attachments"
             );
             self.query_prepared = true;
+            self.ctx.initial_input_applied()?;
             self.unsaved_messages[0] =
                 SessionMessage::user_with_images(self.input.clone(), self.images.clone());
         }
@@ -49,7 +50,7 @@ impl Plan for SingleAgentPlan {
         if let Some(todo_plan) = &mut self.todo_plan {
             return todo_plan.next(task_result).await;
         }
-        if self.session.cancel_requested() {
+        if self.ctx.cancel_requested() {
             self.finish_on_drop = true;
             return Ok(PlanNext::End);
         }
@@ -103,6 +104,7 @@ impl Plan for SingleAgentPlan {
                 let task_id = task_result.meta.id.clone();
                 let response = TaskResp::<ModelResponse>::try_from_response(&mut task_result)
                     .ok_or_else(|| anyhow::anyhow!("expected ModelResponse"))?;
+                self.model_output_ctx = Some(response.ctx.clone());
                 let response = self
                     .template
                     .hook
@@ -140,8 +142,7 @@ impl Plan for SingleAgentPlan {
                 );
                 self.unsaved_messages.clear();
 
-                if let Some(pending) = self.session.finish_or_take_pending() {
-                    self.append_user_inputs(pending).await?;
+                if self.apply_execution_inputs().await? > 0 {
                     Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
                 } else {
                     self.finish_on_drop = true;

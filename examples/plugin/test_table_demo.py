@@ -58,7 +58,9 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
     async def test_routes_each_tool_in_either_chain_order(self):
         with tempfile.TemporaryDirectory() as directory:
             session = SimpleNamespace(send=AsyncMock())
-            ctx = SimpleNamespace(scope=AsyncMock(return_value=SimpleNamespace(workspace=directory)),
+            ctx = SimpleNamespace(export_context=AsyncMock(return_value=SimpleNamespace(
+                                      latest_execution_view=SimpleNamespace(
+                                          effective=SimpleNamespace(workspace=directory)))),
                                   session=session)
             chart, table = CHART["Table2Tool"](), TABLE["TableImageTool"]()
             chart._channel = table._channel = "fae_table_image"
@@ -104,7 +106,10 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
         inner = AsyncMock()
         with self.assertRaises(ValueError):
             await tool.exec(SimpleNamespace(session=None,
-                                           scope=AsyncMock(return_value=SimpleNamespace(workspace=None))),
+                                           export_context=AsyncMock(return_value=SimpleNamespace(
+                                               latest_execution_view=None,
+                                               session_config=SimpleNamespace(
+                                                   workspace=SimpleNamespace(root=None))))),
                             ToolRequest({"tool_name": "fae_table_image__line_chart",
                                          "arguments": json.dumps({**ARGUMENTS, "y": ["bad"] * 3})}),
                             next=HookNext(inner, lambda value: None))
@@ -112,6 +117,44 @@ class ChainTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DemoTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("FAE_TEST_BINARY"),
+                         "Set FAE_TEST_BINARY to a freshly built fae executable")
+    def test_single_agent_and_echo_model_use_public_context_and_output(self):
+        with tempfile.TemporaryDirectory(prefix="fae-hook-demo-") as directory:
+            home = Path(directory) / "home"
+            (home / "agents").mkdir(parents=True)
+            for agent_file in ("plugin_demo_config.json", "plugin_demo_prompt.txt"):
+                shutil.copy(ROOT / "agents" / agent_file, home / "agents" / agent_file)
+            with socket.socket() as port:
+                port.bind(("127.0.0.1", 0))
+                server_port = port.getsockname()[1]
+            command = [str(Path(os.environ["FAE_TEST_BINARY"]).resolve()),
+                       "--fae-home", str(home), "--workspace", directory, "--color", "never"]
+            env = {**os.environ,
+                   "FAE_PLUGIN_PYTHON": os.environ.get("FAE_PLUGIN_PYTHON", os.sys.executable)}
+
+            def run(*arguments):
+                result = subprocess.run([*command, *arguments], env=env, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                return result.stdout
+
+            try:
+                for plugin in ("single_agent", "echo_model"):
+                    run("plugin", "install", str(ROOT / plugin))
+                run("server", "start", "--port", str(server_port))
+                output = run("agent", "--agent-id", "plugin_demo", "  hello plugin  ")
+                self.assertIn("[single-agent-plugin] agent=plugin_demo", output)
+                self.assertIn("[model-plugin] hello plugin", output)
+                partitions = list((home / "session/plugin_demo/master").glob("*.jsonl"))
+                self.assertEqual(len(partitions), 1)
+                messages = [json.loads(line) for line in partitions[0].read_text().splitlines()]
+                self.assertEqual(messages[0]["content"], "hello plugin")
+                self.assertFalse(any("[single-agent-plugin]" in message["content"]
+                                     for message in messages))
+            finally:
+                run("server", "stop")
+
     @unittest.skipUnless(os.environ.get("FAE_TEST_BINARY"),
                          "Set FAE_TEST_BINARY to a freshly built fae executable")
     def test_table_demo_selects_line_chart(self):
@@ -198,7 +241,7 @@ class DemoTests(unittest.TestCase):
                     self.assertTrue(status[plugin]["loaded"], status)
                     self.assertEqual(status[plugin]["chain_order"], ["table_line_chart", "table_image"])
                 kind = "line chart" if suffix == "line_chart" else "table"
-                output = run("agent", "--agent-id", "table_demo", "--session-id", "table-choice-test",
+                output = run("agent", "--agent-id", "table_demo",
                              f"Generate only a {kind} from " + json.dumps(arguments))
                 marker = "[table2-plugin]" if suffix == "line_chart" else "[table-image-plugin]"
                 other = "[table-image-plugin]" if suffix == "line_chart" else "[table2-plugin]"

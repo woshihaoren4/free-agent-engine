@@ -22,7 +22,8 @@ impl Composer {
     }
     pub(super) fn delete(&mut self) {
         if let Some(next) = self.text[self.cursor..].chars().next() {
-            self.text.drain(self.cursor..self.cursor.saturating_add(next.len_utf8()));
+            self.text
+                .drain(self.cursor..self.cursor.saturating_add(next.len_utf8()));
             self.follow_cursor();
         }
     }
@@ -39,11 +40,17 @@ impl Composer {
         }
     }
     pub(super) fn move_home(&mut self) {
-        self.cursor = self.text[..self.cursor].rfind('\n').map(|position| position + 1).unwrap_or(0);
+        self.cursor = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|position| position + 1)
+            .unwrap_or(0);
         self.follow_cursor();
     }
     pub(super) fn move_end(&mut self) {
-        self.cursor = self.text[self.cursor..].find('\n').map(|offset| self.cursor + offset).unwrap_or(self.text.len());
+        self.cursor = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
         self.follow_cursor();
     }
     pub(super) fn take(&mut self) -> Option<String> {
@@ -57,17 +64,30 @@ impl Composer {
         let width = width.max(1);
         let (mut row, mut column) = (0usize, 0usize);
         for character in self.text[..self.cursor].chars() {
-            if character == '\n' { row += 1; column = 0; continue; }
+            if character == '\n' {
+                row += 1;
+                column = 0;
+                continue;
+            }
             let character_width = character.to_string().width().max(1);
-            if column + character_width > width { row += 1; column = 0; }
+            if column + character_width > width {
+                row += 1;
+                column = 0;
+            }
             column += character_width;
-            if column == width { row += 1; column = 0; }
+            if column == width {
+                row += 1;
+                column = 0;
+            }
         }
         (column as u16, row as u16)
     }
     pub(super) fn visual_lines(&self, width: usize) -> usize {
         let width = width.max(1);
-        self.text.split('\n').map(|line| line.width().max(1).div_ceil(width)).sum()
+        self.text
+            .split('\n')
+            .map(|line| line.width().max(1).div_ceil(width))
+            .sum()
     }
     pub(super) fn vertical_scroll(&self, width: usize, visible_height: u16) -> u16 {
         let follow_scroll = self.max_vertical_scroll(width, visible_height);
@@ -83,12 +103,16 @@ impl Composer {
     pub(super) fn scroll_down(&mut self, lines: u16) {
         self.scroll_back = self.scroll_back.saturating_sub(lines);
     }
-    pub(super) fn follow_cursor(&mut self) { self.scroll_back = 0; }
+    pub(super) fn follow_cursor(&mut self) {
+        self.scroll_back = 0;
+    }
 }
 
 pub(super) fn parse_steer(input: &str) -> Option<&str> {
     let content = input.strip_prefix("/steer")?;
-    if !content.starts_with(char::is_whitespace) { return None; }
+    if !content.starts_with(char::is_whitespace) {
+        return None;
+    }
     let content = content.trim();
     (!content.is_empty()).then_some(content)
 }

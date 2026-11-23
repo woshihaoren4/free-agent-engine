@@ -9,7 +9,12 @@ pub struct ProtocolError {
 
 impl ProtocolError {
     pub fn new(code: &str, message: impl ToString) -> Self {
-        Self { code: code.into(), message: message.to_string(), retryable: false, detail: None }
+        Self {
+            code: code.into(),
+            message: message.to_string(),
+            retryable: false,
+            detail: None,
+        }
     }
 }
 

@@ -31,7 +31,7 @@ JSON 2.0 卡片需要飞书客户端 7.20 或更新版本。
 ```bash
 fae init --agent-id assistant --model gpt-5
 # 创建 ~/.fae/agents/assistant_prompt.txt，并按需修改 assistant_config.json。
-fae agent --agent-id assistant --session-id lark-setup "Reply with OK only."
+fae agent --agent-id assistant "Reply with OK only."
 ```
 
 初始化网关，指定 Agent 执行任务的工作区：
@@ -212,8 +212,8 @@ fae lark start
 fae lark status
 ```
 
-已有 actor 的 Agent 配置会被冻结；修改 Agent config 或 prompt 后，
-需要在话题外开启新会话验证新配置，不能假定旧话题立即重新加载。
+每次 Execution 固定 Agent config、prompt 和内容指纹；修改定义后下一次
+Execution 重新加载，正在执行的任务及其子调用继续使用原定义。
 
 需要完全停止网关和主服务时，依次执行：
 
@@ -258,7 +258,8 @@ fae server stop
 
 新话题使用含 `Typing` 表情的回复显示接收状态，不额外添加 reaction；
 话题内的后续输入使用 `Typing` reaction，最终回复投递后移除。
-网关只投递完整轮次结束后的最终答案，隐藏中间模型输出、工具调用、推理和子 Agent 内部消息。
+网关按 Invocation 与响应区分模型分支，最终回复保留对应输出。插件 Content
+作为独立通知去重，成功或取消不会覆盖已经产生的插件通知。
 长回复分页；错误带 `ERROR`；卡片发送失败时可降级为文本并提示。
 
 ## 7. 状态、日志与排错
@@ -296,3 +297,10 @@ fae server show
 不会盲目重跑已可能产生副作用的工具；先检查记录与实际结果，再决定是否重新提交任务。
 接收记录保留期和空闲 actor 回收不会清除持久化话题绑定。
 工作区和会话隔离不构成文件系统沙箱，实际访问能力仍由 Agent 工具与运行环境决定。
+
+主服务与网关必须同时升级到公共协议 v4。网关在宿主认证后使用标准
+session/create/get/subscribe 和 execution/start/steer/stop/get；逻辑身份为
+`(open_id, session_id)`，目标与旧历史分区另行解析。外部消息自动补充由网关
+显式选择 steer，公共 start 忙时返回冲突。stop 检查预期 execution_id，
+结束事件在子调用、插件流及 Worker 资源完成清理后发布。
+持久接收文件中的旧 round_id 保留读取兼容，不表示协议仍支持旧路由。

@@ -8,8 +8,10 @@ mod plugin;
 mod restart;
 mod workflow;
 
-use crate::protocol::{ControlMessage, InitArgsDto, ServerMessage};
 use args::{Cli, Command, ServerCommand};
+use fae_agent::protocol::{
+    Empty, InitializeRequest, InitializeResult, RequestPayload, ResponsePayload,
+};
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let home = paths::home(cli.fae_home)?;
@@ -143,7 +145,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(
-                            &client::control(&home, &config, ControlMessage::Status).await?
+                            &client::control(
+                                &home,
+                                &config,
+                                RequestPayload::EngineStatus(Empty {})
+                            )
+                            .await?
                         )?
                     );
                 } else {
@@ -183,24 +190,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let response = client::control(
                 &home,
                 &config,
-                ControlMessage::Initialize(InitArgsDto {
+                RequestPayload::EngineInitialize(InitializeRequest {
                     agent_id: args.agent_id.clone(),
                     model: args.model,
                     force: args.force,
                 }),
             )
             .await?;
-            let ServerMessage::Initialized {
+            let ResponsePayload::EngineInitialize(InitializeResult {
                 config_path,
                 skill_count,
-            } = response
+            }) = response
             else {
                 anyhow::bail!("Unexpected init response");
             };
             println!(
                 "Initialized agent `{}`.\nConfig: {}\nEnabled {} tools and {} installed skills.",
                 args.agent_id,
-                config_path.display(),
+                config_path,
                 fae_engine::DEFAULT_TOOL_NAMES.len(),
                 skill_count
             );

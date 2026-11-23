@@ -42,7 +42,7 @@ impl WorkflowEnv {
 mod tests {
     use serde_json::json;
 
-    use crate::{Session, SessionEvent, SessionEventData};
+    use crate::{SessionEvent, SessionEventData, SessionIo};
 
     use super::*;
 

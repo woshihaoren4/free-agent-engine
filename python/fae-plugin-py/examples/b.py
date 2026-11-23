@@ -5,6 +5,7 @@ def plugin_config() -> dict:
     return {
         "registration_mode": "chain",
         "plugin_version": "1.0.0",
+        "fae_plugin_api_version": "0.2.0",
         "description": "包裹下一层，或在命中条件时短路",
         "mounts": [{"point": "SingleAgentHook", "implementation": "B"}],
     }

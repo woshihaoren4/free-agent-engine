@@ -26,6 +26,7 @@ impl ModelResponse {
                         crate::ContextStackPhase::Succeeded,
                     ));
                 }
+                let _ = ctx.invocation_finished();
             }
             Self::Streaming(stream) => {
                 let inner = std::mem::replace(stream, Box::pin(tokio_stream::empty()));
@@ -81,6 +82,9 @@ impl TrackedModelStream {
                 .ctx
                 .append_stack(crate::ContextStackDraft::new(self.meta.clone(), phase));
         }
+        // Drop the source before acknowledging cleanup, including cancellation.
+        self.inner = Box::pin(tokio_stream::empty());
+        let _ = self.ctx.invocation_finished();
     }
 }
 impl tokio_stream::Stream for TrackedModelStream {

@@ -224,7 +224,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 
 ## 8. 为不同任务隔离会话
 
-日常会话：
+为不同职责分别准备 Agent 配置（以下仅展示 `agent` 区段）：
 
 ```json
 {
@@ -238,7 +238,7 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 }
 ```
 
-发布审查会话：
+发布审查 Agent：
 
 ```json
 {
@@ -252,14 +252,24 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 }
 ```
 
-分别运行：
+分别运行，不传 session ID 时各自创建新会话：
 
 ```bash
 fae agent --agent-id assistant
 fae agent --agent-id release-reviewer
 ```
 
-不要让用途无关的 Agent 共享 `session_id`。需要无历史上下文时，将 `history_turns` 设为 `0`。
+配置里的 `session_id` 不选择 CLI 会话，`user_id` 也不能覆盖宿主身份。
+在 TUI 用 `/status` 取得实际 ID，再恢复同一任务：
+
+```bash
+fae agent --agent-id assistant --session-id <existing-daily-id>
+fae agent --agent-id release-reviewer --session-id <existing-review-id>
+```
+
+未知 ID 返回 `404`，不能通过此参数创建指定 ID；Agent 目标不匹配会冲突。
+在空闲 TUI 用 `/session new` 开始新任务，用 `/session id=<id>` 切换已有会话。
+需要无历史上下文时，将 `history_turns` 设为 `0`。
 
 ## 9. 使用自定义 FAE Home
 
@@ -381,7 +391,8 @@ fae agent --agent-id reviewer "List the MCP tools available to you."
 
 ### 历史不符合预期
 
-- 检查 `agent.user_id` 和 `agent.session_id`。
+- 用 `/status` 检查实际用户、Session ID 和目标；config 中的用户与会话字段会被宿主覆盖。
+- 检查是否省略了 `--session-id` 而创建新会话；恢复必须传已有 ID。
 - 检查 `history_turns` 是否为 0 或过小。
 - 检查运行时是否使用了不同的 `--fae-home`。
 - `/clear` 只清空界面，不会删除持久化历史。

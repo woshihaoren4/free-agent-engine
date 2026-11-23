@@ -16,6 +16,10 @@ description: Configures, runs, and troubleshoots FAE agents and the Lark gateway
   `<FAE_HOST>/session/<agent-id>/<user-id>/todo/<plan-id>.json`，按外层 todo 编排计划隔离。
 - 使用 `<agent-id>_prompt.txt` 管理 Agent 的角色、行为和输出要求。
 - Agent 本地运行和验证使用 `fae agent`；飞书接入配置与操作使用 `fae lark`。
+- CLI 不传 `--session-id` 时由宿主创建新会话；恢复上下文时使用已存在的 ID，
+  不通过修改 config 中的 `agent.session_id` 选择 CLI 会话。
+- 每次 Execution 固定定义、工作区和插件快照；修改 config 或 prompt 后，
+  下一次执行重新加载，当前执行及其子调用继续使用原快照。
 - Lark 网关使用独立的 `<FAE_HOST>/lark.config`；处理网关任务时先阅读
   [references/lark-gateway.md](references/lark-gateway.md)。
 - 本 Skill 只处理 Agent 与网关命令及配置，不展开底层实现。
@@ -116,7 +120,8 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 改模型或上下文：编辑 `model`。
 - 改 Agent 的简短职责说明：编辑 `agent.desc`；该 Agent 被挂载为子 Agent 时，父 Agent 只会看到此说明。
 - 改身份或输出风格：编辑 prompt，避免把行为规则散落到 config。
-- 改会话隔离：修改 `agent.user_id` 或 `agent.session_id`。
+- 改会话隔离：创建新会话；继续已有上下文时使用 `--session-id <existing-id>`。
+  用户身份由宿主认证确定，Agent config 不能覆盖它。
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 允许 Agent 维护当前用户长期记忆：在 `tools` 中保留 `memory_update`。
 - 允许 Agent 跟踪当前运行中的任务进度：在 `tools` 中保留 `todo`。
@@ -162,6 +167,10 @@ fae init --agent-id reviewer --model gpt-5 --force
 4. 检查 Tool、Skill 和 MCP 名称是否真实存在。
 5. 使用 `fae agent --agent-id <id> "reply with OK"` 做最小运行验证。
 6. 根据错误定位配置加载、模型连接、能力路由或会话历史问题。
+
+恢复会话时若返回 `404`，检查是否使用同一 home、用户和已存在的 session ID；
+目标冲突时检查该会话是否绑定当前 Agent。执行忙时不能再 start 或修改会话配置，
+应补充当前执行或等待其完成。具体命令见 Agent API 参考。
 
 网关问题按 Lark 参考文件检查 `lark.config`、离线/在线校验、网关与主服务状态以及
 `<FAE_HOST>/lark/gateway.log`。

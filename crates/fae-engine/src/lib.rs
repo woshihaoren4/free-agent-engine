@@ -3,12 +3,14 @@ mod engine;
 mod engine_rt;
 #[cfg(all(test, feature = "python"))]
 mod plugin_tests;
+mod session;
 mod timer;
 mod tools;
 
 pub use context::*;
 pub use engine::*;
 pub use engine_rt::*;
+pub use session::*;
 pub use tools::*;
 
 impl Engine {
@@ -42,7 +44,7 @@ impl Engine {
 mod tests {
     use super::*;
     use fae_agent::{
-        Ctx, EventType, FAEWorkflowMetadataLoader, Session, SessionEventData, TaskMeta, TaskReq,
+        Ctx, EventType, FAEWorkflowMetadataLoader, SessionEventData, SessionIo, TaskMeta, TaskReq,
         TaskResp, TaskType, ToolRequest, ToolRespItem, ToolResponse, UserMemoryQuery,
         UserMemoryResponse, WorkflowAction, WorkflowEnv, WorkflowMetadataBuilder,
     };

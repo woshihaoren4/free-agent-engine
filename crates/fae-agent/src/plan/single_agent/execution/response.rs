@@ -102,11 +102,6 @@ impl SingleAgentPlan {
                 return Err(error);
             }
         };
-        let pending = if tool_calls.is_empty() && !content.trim().is_empty() {
-            self.session.take_pending_inputs()
-        } else {
-            Vec::new()
-        };
         let disposition = if matches!(
             finish_reason,
             Some(FinishReason::Length | FinishReason::ContentFilter | FinishReason::FunctionCall)
@@ -116,7 +111,7 @@ impl SingleAgentPlan {
             crate::session::ModelResponseDisposition::ToolCalls
         } else if content.trim().is_empty() {
             crate::session::ModelResponseDisposition::Discarded
-        } else if !pending.is_empty() || !self.persist_session {
+        } else if !self.persist_session {
             crate::session::ModelResponseDisposition::Continue
         } else {
             crate::session::ModelResponseDisposition::Final
@@ -175,8 +170,8 @@ impl SingleAgentPlan {
             self.unsaved_messages
                 .push(SessionMessage::assistant(content));
 
-            if !pending.is_empty() {
-                self.append_user_inputs(pending).await?;
+            let applied = self.apply_execution_inputs().await?;
+            if applied > 0 {
                 return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
             }
 

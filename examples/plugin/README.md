@@ -4,9 +4,15 @@
 `table_line_chart`、`table_image` 使用 `chain`，共用工具通道。`plugin.config` 声明挂载位置，
 `plugin.py` 实现类。宿主已包含 Python 插件支持。
 
+全部示例显式声明 `fae_plugin_api_version: "0.2.0"`，要求公共 v4 宿主与对应 SDK。
+`plugin_version: "1.0.0"` 是示例自身版本，与宿主 API 版本分别管理。
+
+不传 `--session-id` 时由宿主创建新 Session；该选项仅用于连接已存在的会话。
+在 TUI 查看 session ID，后续使用 `--session-id <已有ID>` 或 `/session id=<已有ID>`。
+
 | 目录 / 加载 ID | 接口 | 可见效果 |
 | --- | --- | --- |
-| `single_agent` | SingleAgentHook | 查询 ctx/scope/state，session 发提示消息，记录日志，清理输入及补充 prompt |
+| `single_agent` | SingleAgentHook | 查询 SessionSummary/ContextData，session 发 Content，记录日志，清理输入及补充 prompt |
 | `table_image` | ChainToolsHook | 表格生成 `fae_table_image__generate`，由 Python/Pillow 生成表格 PNG |
 | `table_line_chart` | ChainToolsHook | 折线图生成 `fae_table_image__line_chart`，由 Python/Pillow 生成折线图 PNG |
 | `echo_model` | ModelHook | 最后一条用户文本前添加 `[model-plugin] `，支持完整及逐块流式响应 |
@@ -45,21 +51,23 @@ fae plugin show '*'
 修改示例后，执行 `fae plugin install <对应目录>` 覆盖安装，运行中的服务即时加载。
 使用 `fae plugin uninstall <id>` 即时卸载运行时插件，保留源码并更新配置。
 服务未运行时，安装和卸载只更新文件及配置，下次启动按配置加载。
-修改 Agent 配置后，使用新 session ID 运行，避免已存在会话的冻结配置。
+修改 Agent 定义后，下一次 Execution 重新加载；当前 Execution 及其子调用保持原定义和指纹。
 环境变量需在服务启动前设置；已经运行的服务不会继承客户端的新环境变量。
 
 ## 1. Single Agent：ctx、session 和日志
 
 ```bash
-fae agent --agent-id plugin_demo --session-id hook-demo "  你好，插件  "
+fae agent --agent-id plugin_demo "  你好，插件  "
 ```
 
 首先看到 `[single-agent-plugin] agent=plugin_demo，已收到请求，开始处理。`，
 随后看到模型响应 `[model-plugin] 你好，插件`。`on_query` 去除了两端空白，
 `on_prompt` 补充了一句规则；没有重写的方法继续默认透传。
 
-代码演示 `ctx.agent_id/run_id/user_id`、`await ctx.scope()`、
-`ctx.state().current()` 和订阅关闭，以及 `ctx.session.send()` 的消息回执。
+代码演示固定的 `ctx.execution_id/invocation_id`、`await ctx.read_summary()`、
+`await ctx.export_context()` 和 `ctx.session.send([TextContent(...)])` 的 output 回执。
+用户、执行状态、实际 Agent 和 workspace 从公共 DTO 读取；运行中使用
+`latest_execution_view.effective.workspace`，即本次固定的执行目录。
 session 可能为空，示例先检查再发送。提示消息不进入模型历史。
 日志使用 `logging` 写入 stderr，可在 `$FAE_HOST/server/server.log` 中查看
 `[single-agent-plugin]` 的上下文、发送回执及 `on_save` 记录。
@@ -82,10 +90,10 @@ session 可能为空，示例先检查再发送。提示消息不进入模型历
 已有模型配置可直接用于这个 Agent。
 
 ```bash
-fae agent --agent-id table_demo --session-id table-demo --workspace /tmp \
+fae agent --agent-id table_demo --workspace /tmp \
   '请生成表格，path 为 plugin-table.png，x 为 ["Jan","Feb","Mar"]，y 为 [120,180,150]，title 为 Sales。'
 
-fae agent --agent-id table_demo --session-id line-demo --workspace /tmp \
+fae agent --agent-id table_demo --workspace /tmp \
   '请生成折线图，path 为 plugin-line.png，x 为 ["Jan","Feb","Mar"]，y 为 [120,180,150]，title 为 Sales，x_label 为 Month，y_label 为 Revenue。'
 ```
 
@@ -164,12 +172,14 @@ FAE_TEST_BINARY="$PWD/target/debug/fae" \
 本地 OpenAI 测试服务分别根据表格和折线图请求选择工具；验证两个工具均可见、
 每次只执行所选插件、只产生对应的 session 提示及一张真实 PNG。
 单元测试还验证两种 chain 加载顺序均可分派工具，随后停止服务并清理临时目录。
+另一个本地服务用例加载 single_agent 和 echo_model，验证公共上下文读取、
+独立插件输出、输入清理以及通知不写入历史。
 未设置 `FAE_TEST_BINARY` 时只运行绘图及 chain 单元测试。
 
 ## 3. Model：带标识回显
 
 ```bash
-fae agent --agent-id model_demo --session-id model-demo "hello model"
+fae agent --agent-id model_demo "hello model"
 ```
 
 预期响应为 `[model-plugin] hello model`。这个模型本地运行，不需要模型凭据；
@@ -184,5 +194,5 @@ Agent 正常流式调用它，`request.stream=False` 时也返回合法完整响
 体验完后执行 `fae server stop` 停止这个独立 home 的服务。
 完整 SDK API 见 [Python SDK](../../python/fae-plugin-py/README.md)。
 
-更新已有模型示例时，重新复制 `echo_model` 目录并执行 `fae plugin echo_model`。
+更新已有模型示例时，执行 `fae plugin install examples/plugin/echo_model`。
 旧版本 plugin.config 中的 model 字段已移除；判断逻辑改在 match_model 中实现。

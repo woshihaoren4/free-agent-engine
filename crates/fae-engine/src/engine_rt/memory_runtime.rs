@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, HashMap},
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
     sync::{Arc, OnceLock, Weak},
 };
@@ -153,6 +153,7 @@ impl UserMemoryRuntime {
         if ctx.scope()?.user.user_id != *user_id {
             return Err(anyhow::anyhow!("memory request user does not match context user").into());
         }
+        let owner = user_id.clone();
         let resp = match req {
             UserMemoryRequest::Query { user_id } => self.query(&user_id).await?,
             UserMemoryRequest::Update {
@@ -167,6 +168,21 @@ impl UserMemoryRuntime {
             }
             UserMemoryRequest::Delete { user_id, id } => self.delete(&user_id, id).await?,
         };
+        if let Some(binding) = ctx.scope()?.execution.as_ref() {
+            let memories = match &resp {
+                UserMemoryResponse::Memories { memories, .. } => Some(memories.clone()),
+                _ => match self.query(&owner).await? {
+                    UserMemoryResponse::Memories { memories, .. } => Some(memories),
+                    _ => None,
+                },
+            };
+            if let Some(memories) = memories {
+                let _ = binding.session.report(
+                    &binding.execution_id,
+                    fae_agent::ExecutionReport::MemoryLoaded(memories),
+                );
+            }
+        }
         if meta.publisher.is_empty() {
             meta.publisher = Self::ID.to_string();
         }
@@ -243,7 +259,9 @@ impl RuntimeSelectExec<UserMemoryRequest, UserMemoryResponse, UserMemoryQuery, U
 
 fn memory_lock(path: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
-    let key = if path.is_absolute() { path.to_owned() } else {
+    let key = if path.is_absolute() {
+        path.to_owned()
+    } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
     // Canonicalize the nearest existing ancestor to unify aliases before a file exists.
@@ -251,16 +269,25 @@ fn memory_lock(path: &Path) -> Arc<Mutex<()>> {
     let mut suffix = Vec::new();
     let key = loop {
         if let Ok(base) = ancestor.canonicalize() {
-            break suffix.iter().rev().fold(base, |base, part: &std::ffi::OsString| base.join(part));
+            break suffix
+                .iter()
+                .rev()
+                .fold(base, |base, part: &std::ffi::OsString| base.join(part));
         }
-        let Some(name) = ancestor.file_name() else { break key };
+        let Some(name) = ancestor.file_name() else {
+            break key;
+        };
         suffix.push(name.to_owned());
-        let Some(parent) = ancestor.parent() else { break key };
+        let Some(parent) = ancestor.parent() else {
+            break key;
+        };
         ancestor = parent;
     };
     let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap();
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { return lock; }
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
     let lock = Arc::new(Mutex::new(()));
     locks.insert(key, Arc::downgrade(&lock));
     lock

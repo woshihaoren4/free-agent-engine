@@ -49,10 +49,10 @@ use async_openai::types::chat::{
 };
 use fae_agent::{
     Ctx, FAEWorkflowMetadataLoader, McpQuery, McpRequest, McpResponse, McpToolInfo, ModelResponse,
-    Session, SessionEventData, SessionInput, SessionMessage, SessionMessageRole, SessionOutput,
-    SessionRequest, SessionResponse, SingleAgentConfig, SingleAgentPlanBuilder, SingleAgentSource,
-    SkillInfo, TaskMeta, TaskReq, TaskType, ToolRequest, ToolRespItem, ToolResponse, Tools,
-    WorkflowAction, WorkflowCondition, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
+    SessionEventData, SessionIo, SessionMessage, SessionMessageRole, SessionOutput, SessionRequest,
+    SessionResponse, SingleAgentConfig, SingleAgentPlanBuilder, SingleAgentSource, SkillInfo,
+    TaskMeta, TaskReq, TaskType, ToolRequest, ToolRespItem, ToolResponse, Tools, WorkflowAction,
+    WorkflowCondition, WorkflowEnv, WorkflowMetadata, WorkflowMetadataBuilder,
 };
 use fae_engine::EngineBuilder;
 use serde::{Deserialize, Serialize};
@@ -655,7 +655,7 @@ fn read_user_input() -> anyhow::Result<Option<String>> {
     }
 }
 
-async fn print_session(session: &impl Session<SessionInput, SessionOutput>) -> anyhow::Result<()> {
+async fn print_session(session: &impl SessionIo<SessionOutput>) -> anyhow::Result<()> {
     while let Some(event) = session.answer().await? {
         let terminal = event.is_terminal();
         match event.event_data()? {

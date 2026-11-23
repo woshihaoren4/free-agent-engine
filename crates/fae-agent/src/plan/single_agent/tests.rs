@@ -340,7 +340,7 @@ mod tests {
 
         let builder = SingleAgentPlanBuilder::with_home_dir(&home);
         let agents = builder
-            .resolve_sub_agents("coordinator", &["researcher".to_string()])
+            .resolve_sub_agents(&Ctx::null(), "coordinator", &["researcher".to_string()])
             .await
             .unwrap();
 
@@ -360,7 +360,7 @@ mod tests {
     async fn builder_rejects_self_and_duplicate_sub_agents() {
         let builder = SingleAgentPlanBuilder::with_home_dir("/unused");
         let self_error = builder
-            .resolve_sub_agents("reviewer", &["reviewer".to_string()])
+            .resolve_sub_agents(&Ctx::null(), "reviewer", &["reviewer".to_string()])
             .await
             .unwrap_err();
         assert!(self_error.to_string().contains("cannot mount itself"));
@@ -384,7 +384,11 @@ mod tests {
             .await
             .unwrap();
         let duplicate_error = SingleAgentPlanBuilder::with_home_dir(&home)
-            .resolve_sub_agents("reviewer", &["worker".to_string(), "worker".to_string()])
+            .resolve_sub_agents(
+                &Ctx::null(),
+                "reviewer",
+                &["worker".to_string(), "worker".to_string()],
+            )
             .await
             .unwrap_err();
         assert!(duplicate_error.to_string().contains("more than once"));
@@ -411,7 +415,7 @@ mod tests {
             .unwrap();
 
         let error = SingleAgentPlanBuilder::with_home_dir(&home)
-            .resolve_sub_agents("reviewer", &["worker".to_string()])
+            .resolve_sub_agents(&Ctx::null(), "reviewer", &["worker".to_string()])
             .await
             .unwrap_err();
 
@@ -1543,82 +1547,13 @@ user-defined rules, and other long-term facts."
         Ok(())
     }
 
-    #[tokio::test]
-    async fn session_rejects_calls_before_binding() {
+    #[test]
+    fn plan_output_transport_rejects_reuse_while_running() {
         let session = CommonSession::new();
-        let error = session
-            .call(SessionInput::NewChat("hello".into()))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("not bound"));
-    }
-
-    #[tokio::test]
-    async fn session_mode_can_change_between_turns() {
-        let session = CommonSession::new();
-        session
-            .bind(SingleAgentBinding {
-                rt: RT::null(),
-                engine: Ctx::null().get_engine(),
-                template: test_template(),
-                mode: None,
-            })
-            .await
-            .unwrap();
+        assert_eq!(session.activate_turn().unwrap(), 1);
+        assert!(session.activate_turn().is_err());
         session.finish_turn();
-
-        session.set_mode(Some("todo")).await.unwrap();
-        assert_eq!(
-            session.inner.binding.read().await.as_ref().unwrap().mode,
-            Some(SingleAgentMode::Todo)
-        );
-
-        session.set_mode(None).await.unwrap();
-        assert_eq!(
-            session.inner.binding.read().await.as_ref().unwrap().mode,
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn new_chat_cancels_the_active_plan_before_starting_another() {
-        let session = CommonSession::new();
-        let ctx = Ctx::null();
-        let template = test_template();
-        let turn_id = session
-            .bind(SingleAgentBinding {
-                rt: RT::null(),
-                engine: ctx.get_engine(),
-                template: template.clone(),
-                mode: None,
-            })
-            .await
-            .unwrap();
-        let mut plan =
-            SingleAgentPlan::new(ctx, template, "first".to_string(), turn_id, session.clone());
-
-        let next_session = session.clone();
-        let next_chat = tokio::spawn(async move {
-            next_session
-                .call(SessionInput::NewChat("second".into()))
-                .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !session.cancel_requested() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-
-        assert!(matches!(plan.init().await.unwrap(), PlanNext::End));
-        drop(plan);
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), next_chat)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
+        assert_eq!(session.activate_turn().unwrap(), 2);
     }
 
     #[test]
@@ -1729,19 +1664,11 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
-    async fn active_plan_appends_new_call_to_current_messages() {
+    async fn appended_user_input_preserves_current_messages() {
         let session = CommonSession::new();
         let ctx = Ctx::null();
         let template = test_template();
-        let turn_id = session
-            .bind(SingleAgentBinding {
-                rt: RT::null(),
-                engine: ctx.get_engine(),
-                template: template.clone(),
-                mode: None,
-            })
-            .await
-            .unwrap();
+        let turn_id = session.activate_turn().unwrap();
         let mut plan = SingleAgentPlan::new(
             ctx.clone(),
             template,
@@ -1750,10 +1677,6 @@ user-defined rules, and other long-term facts."
             session.clone(),
         );
 
-        session
-            .call(SessionInput::Supplement("second".into()))
-            .await
-            .unwrap();
         plan.init().await.unwrap();
         assert!(matches!(
             plan.next(empty_memory_response(ctx.clone())).await.unwrap(),
@@ -1773,6 +1696,9 @@ user-defined rules, and other long-term facts."
             PlanNext::Tasks(_)
         ));
 
+        plan.append_user_inputs(vec![AgentInput::text("second")])
+            .await
+            .unwrap();
         let user_messages = plan
             .messages
             .iter()
@@ -1797,31 +1723,21 @@ user-defined rules, and other long-term facts."
     }
 
     #[tokio::test]
-    async fn compression_completion_reads_supplement_before_model_call() {
+    async fn user_input_after_compression_is_in_the_next_model_request() {
         let session = CommonSession::new();
         let ctx = Ctx::null();
         let template = test_template();
-        let turn_id = session
-            .bind(SingleAgentBinding {
-                rt: RT::null(),
-                engine: ctx.get_engine(),
-                template: template.clone(),
-                mode: None,
-            })
-            .await
-            .unwrap();
+        let turn_id = session.activate_turn().unwrap();
         let mut plan =
             SingleAgentPlan::new(ctx, template, "first".to_string(), turn_id, session.clone());
         plan.prepare_messages(Vec::new(), None).await.unwrap();
-        session
-            .call(SessionInput::Supplement("new constraint".into()))
+        plan.apply_compression("condensed context".to_string())
             .await
             .unwrap();
-
-        let mut task = plan
-            .apply_compression("condensed context".to_string())
+        plan.append_user_inputs(vec![AgentInput::text("new constraint")])
             .await
             .unwrap();
+        let mut task = plan.next_model_task().await.unwrap();
 
         assert_eq!(task.meta.ty, TaskType::Model);
         let request = TaskReq::<CreateChatCompletionRequest>::try_from_request(&mut task).unwrap();
@@ -1847,15 +1763,7 @@ user-defined rules, and other long-term facts."
             "read_file".to_string(),
             CallableRoute::Tool("read_file".to_string()),
         );
-        let turn_id = session
-            .bind(SingleAgentBinding {
-                rt: RT::null(),
-                engine: ctx.get_engine(),
-                template: template.clone(),
-                mode: None,
-            })
-            .await
-            .unwrap();
+        let turn_id = session.activate_turn().unwrap();
         let mut plan = SingleAgentPlan::new(
             ctx.clone(),
             template,
@@ -1921,10 +1829,6 @@ user-defined rules, and other long-term facts."
         };
         let tool_task_id = tool_tasks[0].meta.id.clone();
 
-        session
-            .call(SessionInput::Supplement("second".into()))
-            .await
-            .unwrap();
         let next = plan
             .next(
                 TaskResp {
@@ -1940,6 +1844,9 @@ user-defined rules, and other long-term facts."
             .await
             .unwrap();
 
+        plan.append_user_inputs(vec![AgentInput::text("second")])
+            .await
+            .unwrap();
         assert!(matches!(next, PlanNext::Tasks(_)));
         assert!(matches!(
             plan.messages.as_slice(),
@@ -2239,7 +2146,7 @@ user-defined rules, and other long-term facts."
         )
         .await
         .unwrap();
-        plan.append_user_inputs(vec![SessionInputData::text("  supplement  ")])
+        plan.append_user_inputs(vec![AgentInput::text("  supplement  ")])
             .await
             .unwrap();
         assert_eq!(

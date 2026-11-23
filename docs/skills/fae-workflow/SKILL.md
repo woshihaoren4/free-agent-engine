@@ -13,6 +13,10 @@ description: Creates and runs FAE workflows from JSON configuration. Invoke when
 - 配置文件放在 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
 - 文件名、配置中的 `id`、运行命令中的 workflow ID 必须一致。
 - `desc` 必须简洁说明 workflow 的用途；配置给 Agent 后会进入模型 prompt。
+- 每次 `fae workflow` 创建新 Session 并显式启动 Execution；单纯创建、查询或订阅
+  Session 不执行图。
+- 执行前固定 Workflow、引用 Agent、工作区及插件快照；修改定义后下一次执行重新加载。
+  嵌套流程与 Runtime 共享 Session/Execution，使用独立 Invocation。
 - 优先复用 `fae` 已注册的 `tool`、`workflow`、`single_agent`、`session`、`python`
   action 和 `workflow.compression` custom action。
 - 仅当用户需要新的 `custom` action，或要把 Workflow 嵌入其他 Rust 应用时，才修改代码和
@@ -128,5 +132,8 @@ fae workflow echo-input --input '{"message":"hello"}'
 5. 检查 action 依赖：工具名、Agent 配置、子 workflow、Python 解释器或自定义 runtime。
 6. 检查并行汇合的每个活跃分支是否都能到达汇合节点。
 7. 需要查看实时节点和 action 事件时，加 `--interactive` 重跑；默认模式只输出最终 JSON。
+
+重跑会启动新的 Execution；服务重启不会自动续跑。先核对失败执行已产生的副作用，
+再选择测试输入。`session` action 操作历史存储，不用于启动、补充或停止 Execution。
 
 不要通过改 Rust 绕过配置校验。若现有 action 无法表达需求，再明确新增 runtime 的必要性。
