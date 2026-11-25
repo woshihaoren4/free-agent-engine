@@ -1,9 +1,13 @@
 """Capabilities belong to one PluginCall; public DTOs contain no capability handles."""
 from __future__ import annotations
-from typing import Any
+from typing import Any, NoReturn
 from .engine import Engine
 from .session import Session
 from .types import ContextChildSpec, ContextData, SessionSummary, ContextStack, ContextStackQuery, encode
+
+
+class _QueryCompleted(BaseException):
+    """Unwind the current query hook after the host accepts its final result."""
 
 
 class Context:
@@ -58,6 +62,14 @@ class Context:
 
     async def cancel_local(self, reason: str = "Cancelled by plugin") -> None:
         await self._call("/request/plugin/context/cancel", reason=reason)
+
+    async def complete_query(self, text: str) -> NoReturn:
+        """Send final text and successfully end on_query; this call does not return."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Query result must be nonempty text")
+        await self._call("/request/plugin/context/complete_query", text=text)
+        self._host.call_owner.query_completed = True
+        raise _QueryCompleted()
 
     async def cancel_execution(self, request_id: str) -> Any:
         if self.session is None:

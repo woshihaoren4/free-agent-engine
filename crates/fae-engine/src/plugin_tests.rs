@@ -391,6 +391,7 @@ async fn install_overwrites_files_and_directories_and_uninstall_records_lifecycl
     );
     let directory = sources.path().join("demo");
     std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("plugin.config"), r#"{"id":"demo"}"#).unwrap();
     std::fs::write(directory.join("data.txt"), "directory").unwrap();
     install(dir.path(), &directory).unwrap();
     assert!(!dir.path().join("plugins/demo.py").exists());
@@ -498,21 +499,21 @@ async fn startup_loads_only_configured_plugins_and_propagates_failures() {
         "SingleAgentHook",
         "class Demo(SingleAgentHook): pass",
     );
-    let directory = dir.path().join("plugins/directory");
+    let directory = dir.path().join("plugins/Directory-Release");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("plugin.py"),
         "from fae_plugin import SingleAgentHook\nclass Demo(SingleAgentHook): pass\n",
     )
     .unwrap();
-    fae_agent::plugin::config::install(dir.path(), &directory).unwrap();
     std::fs::write(
         directory.join("plugin.config"),
-        serde_json::json!({"plugin_version":"1.0.0","description":"directory","engine":"py",
+        serde_json::json!({"id":"directory","plugin_version":"1.0.0","description":"directory","engine":"py",
             "mounts":[{"point":"SingleAgentHook","implementation":"plugin.py:Demo"}]})
         .to_string(),
     )
     .unwrap();
+    fae_agent::plugin::config::install(dir.path(), &directory).unwrap();
     std::fs::write(
         dir.path().join("plugins/broken.py"),
         "raise RuntimeError('broken plugin')",
@@ -525,6 +526,71 @@ async fn startup_loads_only_configured_plugins_and_propagates_failures() {
     assert_eq!(snapshot.nodes.len(), 2);
     assert!(snapshot.nodes.contains_key("single"));
     assert!(snapshot.nodes.contains_key("directory"));
+    assert_eq!(
+        snapshot.nodes["directory"].members[0].source,
+        directory.canonicalize().unwrap()
+    );
+    manager.load("directory").await.unwrap();
+    assert_eq!(manager.install(&directory).await.unwrap(), "directory");
+    assert_eq!(
+        manager.status("directory").unwrap()["directory"]["loaded"],
+        true
+    );
+
+    // Explicit relative paths can also refer to nested directories.
+    let nested = dir.path().join("plugins/releases/Directory-Release");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::rename(&directory, &nested).unwrap();
+    let mut config = fae_agent::plugin::config::PluginsConfig::read(dir.path()).unwrap();
+    config.plugins[1].directory_path = "releases/Directory-Release".into();
+    config.write(dir.path()).unwrap();
+    manager.load_all().await.unwrap();
+    manager.load("directory").await.unwrap();
+    assert_eq!(
+        manager.snapshot().nodes["directory"].members[0].source,
+        nested.canonicalize().unwrap()
+    );
+
+    // Empty paths fall back to ID-based discovery, including legacy manifests.
+    let legacy = dir.path().join("plugins/directory");
+    std::fs::rename(&nested, &legacy).unwrap();
+    config.plugins[1].directory_path.clear();
+    let mut legacy_config = serde_json::to_value(&config).unwrap();
+    for plugin in legacy_config["plugins"].as_array_mut().unwrap() {
+        plugin.as_object_mut().unwrap().remove("directory_path");
+    }
+    std::fs::write(
+        dir.path().join("plugins/plugins.config"),
+        legacy_config.to_string(),
+    )
+    .unwrap();
+    manager.load_all().await.unwrap();
+    manager.load("directory").await.unwrap();
+    assert_eq!(
+        manager.snapshot().nodes["directory"].members[0].source,
+        legacy.canonicalize().unwrap()
+    );
+
+    // An explicit directory path takes priority over an ID-named file.
+    std::fs::write(
+        dir.path().join("plugins/directory.py"),
+        "raise RuntimeError('wrong source')",
+    )
+    .unwrap();
+    config.plugins[1].directory_path = "directory".into();
+    config.write(dir.path()).unwrap();
+    manager.load_all().await.unwrap();
+    manager.load("directory").await.unwrap();
+
+    let previous = manager.snapshot();
+    for invalid in ["../outside", "/absolute", "single.py", "missing"] {
+        config.plugins[1].directory_path = invalid.into();
+        config.write(dir.path()).unwrap();
+        assert!(manager.load_all().await.is_err());
+        assert!(Arc::ptr_eq(&previous, &manager.snapshot()));
+    }
+    config.plugins[1].directory_path = "directory".into();
+    config.write(dir.path()).unwrap();
     assert!(manager.status("*").unwrap().get("broken").is_none());
     fae_agent::plugin::config::install(dir.path(), &dir.path().join("plugins/broken.py")).unwrap();
     let restarted = PluginManager::new(dir.path());
@@ -1247,6 +1313,178 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
     .await
     .unwrap();
     assert!(binding.session.read_summary().active_execution.is_none());
+}
+
+#[tokio::test]
+async fn query_completion_sends_final_output_and_skips_later_plugins() {
+    for mode in ["direct", "chain"] {
+        let dir = tempfile::tempdir().unwrap();
+        if mode == "chain" {
+            for id in ["outer", "middle"] {
+                write(
+                    dir.path(),
+                    id,
+                    "chain",
+                    "SingleAgentHook",
+                    r#"class Demo(ChainSingleAgentHook):
+    async def on_query(self,ctx,value,*,next):
+        result = await next(value)
+        if value == 'byte --models':
+            raise RuntimeError('completed query resumed outer chain')
+        return result
+"#,
+                );
+            }
+        }
+        let base = if mode == "chain" {
+            "ChainSingleAgentHook"
+        } else {
+            "SingleAgentHook"
+        };
+        let next = if mode == "chain" { ",*,next" } else { "" };
+        write(
+            dir.path(),
+            "command",
+            mode,
+            "SingleAgentHook",
+            &format!(
+                "class Demo({base}):\n    async def on_query(self,ctx,value{next}):\n        if value.strip() == 'byte --models':\n            await ctx.complete_query('model table')\n            raise RuntimeError('completion must not return')\n        return {}\n",
+                if mode == "chain" {
+                    "await next(value)"
+                } else {
+                    "value"
+                }
+            ),
+        );
+        write(
+            dir.path(),
+            "later",
+            "direct",
+            "SingleAgentHook",
+            "class Demo(SingleAgentHook):\n    async def on_query(self,ctx,value):\n        return value+' later'",
+        );
+        let (manager, engine, adapter) = setup(dir.path()).await;
+        manager.load_all().await.unwrap();
+        let (ctx, probe) = root(&engine, "alice");
+        let agent = SingleAgentInfo {
+            name: "fae".into(),
+            desc: "".into(),
+            user_id: "alice".into(),
+            session_id: "s".into(),
+            metadata: Default::default(),
+        };
+        let query = adapter
+            .on_query(
+                &SingleAgentHookContext {
+                    ctx: &ctx,
+                    plan_id: "p",
+                    turn_id: 1,
+                    agent: &agent,
+                    task_id: None,
+                },
+                "byte --models".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(query, "byte --models");
+        assert!(matches!(
+            &*ctx.state().current(),
+            ContextState::Succeeded { .. }
+        ));
+        assert_eq!(
+            ctx.result::<serde_json::Value>().await.unwrap(),
+            "model table"
+        );
+        let outputs = probe.outputs().await;
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            outputs[0].content,
+            vec![fae_agent::protocol::ContentBlock::Text {
+                text: "model table".into()
+            }]
+        );
+        assert!(matches!(&outputs[0].source,
+            fae_agent::protocol::OutputSource::PluginResult { plugin_id } if plugin_id == "command"));
+        let (normal, normal_probe) = root(&engine, "bob");
+        assert_eq!(
+            adapter
+                .on_query(
+                    &SingleAgentHookContext {
+                        ctx: &normal,
+                        plan_id: "p",
+                        turn_id: 1,
+                        agent: &agent,
+                        task_id: None
+                    },
+                    "hello".into()
+                )
+                .await
+                .unwrap(),
+            "hello later"
+        );
+        assert!(!normal.state().current().is_terminal());
+        assert!(normal_probe.outputs().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn query_completion_is_rejected_outside_query_and_on_child_contexts() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "restricted",
+        "direct",
+        "SingleAgentHook",
+        r#"class Demo(SingleAgentHook):
+    async def on_query(self,ctx,value):
+        child = await ctx.fork(ContextChildSpec(operation='test'))
+        try:
+            await child.complete_query('invalid child result')
+        except Exception as error:
+            assert 'on_query context' in str(error)
+        else:
+            raise RuntimeError('child completed its parent')
+        await child.cancel_local()
+        return value
+    async def on_prompt(self,ctx,value):
+        try:
+            await ctx.complete_query('invalid prompt result')
+        except Exception as error:
+            assert 'on_query context' in str(error)
+        else:
+            raise RuntimeError('prompt completed query')
+        return value
+"#,
+    );
+    let (manager, engine, adapter) = setup(dir.path()).await;
+    manager.load_all().await.unwrap();
+    let (ctx, probe) = root(&engine, "alice");
+    assert_eq!(prompt(&adapter, &ctx, "prompt").await.unwrap(), "prompt");
+    let agent = SingleAgentInfo {
+        name: "fae".into(),
+        desc: "".into(),
+        user_id: "alice".into(),
+        session_id: "s".into(),
+        metadata: Default::default(),
+    };
+    assert_eq!(
+        adapter
+            .on_query(
+                &SingleAgentHookContext {
+                    ctx: &ctx,
+                    plan_id: "p",
+                    turn_id: 1,
+                    agent: &agent,
+                    task_id: None
+                },
+                "hello".into()
+            )
+            .await
+            .unwrap(),
+        "hello"
+    );
+    assert!(!ctx.state().current().is_terminal());
+    assert!(probe.outputs().await.is_empty());
 }
 
 #[tokio::test]

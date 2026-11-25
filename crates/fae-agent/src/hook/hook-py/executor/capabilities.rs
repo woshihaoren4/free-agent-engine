@@ -102,6 +102,7 @@ impl PluginCall {
             | PluginHostSession(p) => Some(p),
             PluginContextFork(p) => Some(&p.access),
             PluginContextCancel(p) => Some(&p.access),
+            PluginContextCompleteQuery(p) => Some(&p.access),
             PluginOutputSend(p) => Some(&p.access),
             PluginNext(p) => Some(&p.access),
             PluginContextStacks(p) => Some(&p.access),
@@ -153,6 +154,33 @@ impl PluginCall {
         }
         anyhow::ensure!(receipts.len() < 256, "plugin_busy: receipts");
         let result = match payload {
+            PluginContextCompleteQuery(p) => {
+                anyhow::ensure!(
+                    self.point == "SingleAgentHook"
+                        && self.method == "on_query"
+                        && p.access.binding.handle == p.access.member,
+                    "complete_query is only available on the on_query context"
+                );
+                anyhow::ensure!(!p.text.trim().is_empty(), "query result must not be empty");
+                let binding = require_execution()?;
+                let mut completion = self.query_completion.lock().unwrap();
+                anyhow::ensure!(completion.is_none(), "query is already completed");
+                binding.session.report(
+                    &binding.execution_id,
+                    ExecutionReport::Output {
+                        invocation_id: binding.invocation_id.clone(),
+                        output_id: format!("{}:{id}", self.id),
+                        source: protocol::OutputSource::PluginResult {
+                            plugin_id: self.members[&p.access.member].0.clone(),
+                        },
+                        content: vec![protocol::ContentBlock::Text {
+                            text: p.text.clone(),
+                        }],
+                    },
+                )?;
+                *completion = Some(p.text.clone());
+                json!({})
+            }
             PluginContextGet(_) => {
                 serde_json::to_value(require_execution()?.session.read_summary())?
             }

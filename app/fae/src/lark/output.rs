@@ -13,6 +13,12 @@ pub fn ingest(record: &mut Record, message: &Message) {
     }
     match &message.payload {
         MessagePayload::Event(EventPayload::OutputDelta(delta)) => {
+            // complete_query results are delivered from the authoritative
+            // ExecutionFinished outcome, just like the final model answer.
+            if matches!(delta.source, OutputSource::PluginResult { .. }) {
+                record.seq = seq;
+                return;
+            }
             if matches!(
                 delta.source,
                 OutputSource::Plugin { .. } | OutputSource::Runtime
@@ -194,6 +200,19 @@ mod tests {
                 "plugin",
             ),
         );
+        for seq in [6, 7] {
+            ingest(
+                &mut record,
+                &delta(
+                    seq,
+                    "root",
+                    OutputSource::PluginResult {
+                        plugin_id: "p".into(),
+                    },
+                    "final",
+                ),
+            );
+        }
         assert_eq!(record.responses.len(), 2);
         assert_eq!(record.responses[0].text, "child");
         assert_eq!(record.responses[1].text, "root continuation");
@@ -207,7 +226,9 @@ mod tests {
                 }],
             },
         );
+        assert_eq!(record.responses.len(), 1);
         assert_eq!(record.responses[0].text, "final");
+        assert_eq!(record.plugin_messages.len(), 1);
         assert_eq!(record.plugin_messages[0].text, "plugin");
     }
     #[test]

@@ -43,6 +43,10 @@ fae plugin show '*'
 ```
 
 服务按 `plugins/plugins.config` 中的安装顺序加载启用插件，任一加载错误使启动失败。
+目录插件在 `plugin.config` 中声明 `id`，格式为 `[a-z][a-z0-9_]{0,63}`，
+目录名称可以与 ID 不同。安装保留目录名，并在安装清单的 `directory_path` 中记录
+相对 `<fae_home>/plugins/` 的路径；该字段省略或为空时，依次查找 `<id>.py`、
+`<id>/` 和 `<id>.js`。
 两个绘图插件都挂在 `fae_table_image` 通道，
 通过工具名分派：每个插件在 `desc`、`exec` 中处理自己的工具，其他工具交给 `next`。
 加载顺序可以互换；一次调用只生成所选工具的一张图，由模型根据需求选择工具。
@@ -50,6 +54,9 @@ fae plugin show '*'
 
 修改示例后，执行 `fae plugin install <对应目录>` 覆盖安装，运行中的服务即时加载。
 使用 `fae plugin uninstall <id>` 即时卸载运行时插件，保留源码并更新配置。
+`SingleAgentHook.on_query(ctx, query)` 在记忆与模型任务前处理当前输入。
+查询命令可调用 `await ctx.complete_query(text)` 发送最终文本并成功结束执行；
+该调用不返回，并跳过后续查询钩子。此能力仅允许在 `on_query` 的原始上下文中使用。
 服务未运行时，安装和卸载只更新文件及配置，下次启动按配置加载。
 修改 Agent 定义后，下一次 Execution 重新加载；当前 Execution 及其子调用保持原定义和指纹。
 环境变量需在服务启动前设置；已经运行的服务不会继承客户端的新环境变量。

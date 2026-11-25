@@ -526,6 +526,19 @@ mod tests {
 
     #[tokio::test]
     async fn waits_for_finished_then_retries_final_reply_without_placeholder() {
+        use fae_agent::protocol::OutputSource;
+        for source in [
+            OutputSource::Model,
+            OutputSource::PluginResult {
+                plugin_id: "byte_agent_plan".into(),
+            },
+        ] {
+            assert_final_reply(source).await;
+        }
+    }
+
+    async fn assert_final_reply(source: fae_agent::protocol::OutputSource) {
+        use fae_agent::{ExecutionId, ExecutionOutcome, InvocationId, SessionId, protocol::*};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (tx, mut calls) = tokio::sync::mpsc::channel(32);
@@ -615,9 +628,24 @@ mod tests {
             "q".into(),
             None,
         );
-        let mut card = Card::new("response".into());
-        card.text = "streamed text".into();
-        record.responses.push(card);
+        let delta = Message::event(
+            SessionId::new(record.session_id.clone()).unwrap(),
+            "stream".into(),
+            1,
+            None,
+            EventPayload::OutputDelta(OutputDelta {
+                execution_id: ExecutionId::new("execution").unwrap(),
+                invocation_id: InvocationId::new("invocation").unwrap(),
+                output_id: "response".into(),
+                source,
+                content: vec![ContentBlock::Text {
+                    text: "streamed text".into(),
+                }],
+            }),
+        )
+        .unwrap();
+        super::super::output::ingest(&mut record, &delta);
+        assert!(record.plugin_messages.is_empty());
         store.insert(record).unwrap();
         let writer = Writer {
             sdk,
@@ -625,9 +653,19 @@ mod tests {
         };
         writer.flush(&id).await.unwrap();
         assert!(calls.try_recv().is_err());
-        assert!(store.get(&id).responses[0].card_id.is_none());
+        assert!(store.get(&id).responses.iter().all(|c| c.card_id.is_none()));
         store
-            .update(&id, |r| r.outcome = Some("succeeded".into()))
+            .update(&id, |r| {
+                super::super::output::recover_terminal(
+                    r,
+                    "execution",
+                    ExecutionOutcome::Succeeded {
+                        result: vec![ContentBlock::Text {
+                            text: "streamed text".into(),
+                        }],
+                    },
+                );
+            })
             .unwrap();
         writer.flush(&id).await.unwrap_err();
         let card = store.get(&id).responses[0].clone();

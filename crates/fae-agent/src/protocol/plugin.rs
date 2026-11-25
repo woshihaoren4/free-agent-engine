@@ -30,6 +30,7 @@ impl super::RequestPayload {
             | PluginHostSession(p) => Some(p),
             PluginContextFork(p) => Some(&p.access),
             PluginContextCancel(p) => Some(&p.access),
+            PluginContextCompleteQuery(p) => Some(&p.access),
             PluginOutputSend(p) => Some(&p.access),
             PluginNext(p) => Some(&p.access),
             PluginContextStacks(p) => Some(&p.access),
@@ -265,6 +266,13 @@ pub struct PluginCancel {
 pub struct PluginOutput {
     pub access: PluginAccess,
     pub content: Content,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginQueryCompletion {
+    pub access: PluginAccess,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

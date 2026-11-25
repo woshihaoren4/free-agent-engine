@@ -14,7 +14,7 @@ from typing import Any
 from ._host import BoundHost, Host
 from ._protocol import Writer, read_frame, reader, request, response, hook_value
 from .chain import HookNext
-from .context import Context
+from .context import Context, _QueryCompleted
 from .errors import HookCancelled, MissingChainHandler, PluginHostError
 from .registration import register
 from .types import API_VERSION, ModelRequest, ModelResponse, NativeObject, ToolRequest, ToolResponse, SessionMessage, UserMemory, encode, json_value
@@ -29,6 +29,7 @@ class PluginCall:
     deadline: float
     group: str
     terminal: bool = False
+    query_completed: bool = False
     released: bool = False
     task: asyncio.Task[Any] | None = None
     streams: set[str] = field(default_factory=set)
@@ -334,6 +335,8 @@ class Worker:
 
             async def layer(index: int, value: Any) -> Any:
                 invocation.check()
+                if invocation.query_completed:
+                    raise _QueryCompleted()
                 check_value(point, method, value, output=False)
                 if index == len(matching):
                     if point != "SingleAgentHook":
@@ -358,6 +361,8 @@ class Worker:
                                 await host.call("/request/plugin/next", {
                                     "access": host.access(), "point": point, "method": method,
                                     "argument": self.next_wire(next_value, record.key)})
+                                if invocation.query_completed:
+                                    raise _QueryCompleted()
                                 return slot["result"]
                             finally:
                                 invocation.next_slots.pop(record.key, None)
@@ -367,6 +372,8 @@ class Worker:
                     else:
                         result = await self.method(getattr(record.object, method), ctx, value)
                     invocation.check()
+                    if invocation.query_completed:
+                        raise _QueryCompleted()
                     check_value(point, method, result, output=True)
                     if isinstance(result, ModelResponse) and result.is_streaming:
                         if not hasattr(result, "_member"):
@@ -386,6 +393,8 @@ class Worker:
                     if record.mode == "direct" and index + 1 < len(matching):
                         result = await layer(index + 1, result)
                     return result
+                except _QueryCompleted:
+                    raise
                 except BaseException as error:
                     if not getattr(error, "details", {}).get("plugin_id"):
                         setattr(error, "details", {**getattr(error, "details", {}),
@@ -428,6 +437,8 @@ class Worker:
             else:
                 result = encode(output)
             await self.result(invocation.id, result=result)
+        except _QueryCompleted:
+            await self.result(invocation.id, result=invocation.params["argument"])
         except asyncio.CancelledError:
             await self.result(invocation.id, error=HookCancelled("Plugin call cancelled"), control=True)
         except BaseException as error:
@@ -592,6 +603,9 @@ class Worker:
             wire = self.next_wire(slot["result"], access["member"])
             hook_value(invocation.params["point"], invocation.params["method"], wire, output=True)
             await self.result(frame["request_id"], result=wire)
+        except _QueryCompleted:
+            slot["result"] = slot["input"]
+            await self.result(frame["request_id"], result=self.next_wire(slot["result"], access["member"]))
         except BaseException as error:
             await self.result(frame["request_id"], error=error, control=True)
 

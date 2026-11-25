@@ -162,6 +162,7 @@ struct PluginCall {
     streams: tokio::sync::Mutex<HashMap<String, ChatCompletionResponseStream>>,
     tool: Mutex<Option<ToolResponse>>,
     receipts: tokio::sync::Mutex<HashMap<String, Value>>,
+    query_completion: Mutex<Option<String>>,
     released: tokio::sync::watch::Sender<bool>,
     release_requested: AtomicBool,
     terminal_controls: AtomicUsize,
@@ -526,7 +527,9 @@ impl PluginExecutor for PythonExecutor {
             "plugin_worker_unavailable"
         );
         let id = wd_tools::uuid::v4();
-        let budget = if method != "match_model" && (point == "ModelHook" || method == "on_model_resp") {
+        // Model matching can refresh provider credentials and discover remote models.
+        // Give it the same I/O budget as model execution.
+        let budget = if point == "ModelHook" || matches!(method, "on_model_resp" | "on_query") {
             120_000
         } else {
             1000
@@ -564,6 +567,7 @@ impl PluginExecutor for PythonExecutor {
             streams: tokio::sync::Mutex::new(HashMap::new()),
             tool: Mutex::new(None),
             receipts: tokio::sync::Mutex::new(HashMap::new()),
+            query_completion: Mutex::new(None),
             released: tokio::sync::watch::channel(false).0,
             release_requested: AtomicBool::new(false),
             terminal_controls: AtomicUsize::new(0),
@@ -674,6 +678,11 @@ impl PluginExecutor for PythonExecutor {
             "ContextFinished"
         );
         protocol::validate_hook_value(point, method, &result, true)?;
+        if let Some(text) = call.query_completion.lock().unwrap().take() {
+            ctx.initial_input_applied()?;
+            ctx.set_state(ContextState::succeeded(Value::String(text)))?;
+            return Ok(PluginValue::Json(result));
+        }
         if (point == "ModelHook" && method == "exec") || method == "on_model_resp" {
             let model = match result["kind"].as_str() {
                 Some("completed") => {

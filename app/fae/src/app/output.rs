@@ -15,6 +15,12 @@ impl AgentOutputStream {
         delta: &OutputDelta,
         workflow: bool,
     ) -> anyhow::Result<()> {
+        if matches!(delta.source, OutputSource::PluginResult { .. }) {
+            let id = format!("{}:{}", delta.invocation_id, delta.output_id);
+            if !self.plugin_messages.insert(id) {
+                return Ok(());
+            }
+        }
         if let OutputSource::Plugin { plugin_id } = &delta.source {
             let id = format!("{}:{}", delta.invocation_id, delta.output_id);
             if self.plugin_messages.insert(id) {
@@ -78,6 +84,27 @@ pub async fn stream(client: &mut Client, workflow: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_result_prints_once_without_notification_prefix() {
+        let mut writer = Vec::new();
+        let mut output = AgentOutputStream::default();
+        let delta = OutputDelta {
+            execution_id: fae_agent::ExecutionId::new("execution").unwrap(),
+            invocation_id: fae_agent::InvocationId::new("invocation").unwrap(),
+            output_id: "result".into(),
+            source: OutputSource::PluginResult {
+                plugin_id: "byte_agent_plan".into(),
+            },
+            content: vec![ContentBlock::Text {
+                text: "model table".into(),
+            }],
+        };
+        output.write_delta(&mut writer, &delta, false).unwrap();
+        output.write_delta(&mut writer, &delta, false).unwrap();
+        output.finish(&mut writer).unwrap();
+        assert_eq!(String::from_utf8(writer).unwrap(), "model table\n");
+    }
+
     #[test]
     fn public_deltas_separate_outputs_and_deduplicate_plugin_messages() {
         let mut writer = Vec::new();

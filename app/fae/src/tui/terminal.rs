@@ -120,6 +120,7 @@ pub struct TerminalUi {
     messages: Vec<Message>,
     child_streams: HashMap<String, Vec<BufferedMessage>>,
     output_receipts: std::collections::HashSet<String>,
+    invocation_agents: HashMap<(fae_agent::ExecutionId, fae_agent::InvocationId), String>,
     composer: Composer,
     attachments: Vec<String>,
     file_browser: Option<FileBrowser>,
@@ -242,6 +243,7 @@ impl TerminalUi {
             messages: Vec::new(),
             child_streams: HashMap::new(),
             output_receipts: std::collections::HashSet::new(),
+            invocation_agents: HashMap::new(),
             composer: Composer::default(),
             attachments: Vec::new(),
             file_browser: None,
@@ -321,15 +323,38 @@ impl TerminalUi {
         self.subject = subject.into();
     }
 
-    pub fn set_execution_model(&mut self, model: Option<&fae_agent::ModelRef>) {
-        self.model = model
-            .map(|model| format!("{}/{}", model.provider, model.model))
-            .unwrap_or_else(|| "—".into());
+    pub fn set_execution_model(&mut self, model: &fae_agent::ModelRef) {
+        // Agent mode keeps the configured model, including during sub-agent calls.
+        if self.mode == Mode::Workflow && !model.model.trim().is_empty() {
+            self.model.clone_from(&model.model);
+        }
     }
 
     pub fn finish_execution(&mut self) {
         finalize_execution_messages(&mut self.messages);
+        self.invocation_agents.clear();
         self.state = RunState::Completed;
+    }
+
+    pub fn apply_invocation_changed(&mut self, changed: &fae_agent::protocol::InvocationChanged) {
+        if let Some(model) = &changed.invocation.model {
+            self.set_execution_model(model);
+        }
+        if let Some(name) = changed
+            .invocation
+            .agent_id
+            .as_ref()
+            .or(changed.invocation.workflow_id.as_ref())
+            .filter(|name| !name.trim().is_empty())
+        {
+            self.invocation_agents.insert(
+                (
+                    changed.execution_id.clone(),
+                    changed.invocation.invocation_id.clone(),
+                ),
+                name.clone(),
+            );
+        }
     }
 
     pub fn workflow_result(&mut self, output: &Value) {
@@ -604,63 +629,16 @@ impl TerminalUi {
         &mut self,
         delta: &fae_agent::protocol::OutputDelta,
     ) -> anyhow::Result<()> {
-        use fae_agent::protocol::{ContentBlock, OutputSource};
-        let stream_id = format!(
-            "{}:{}:{}",
-            delta.execution_id, delta.invocation_id, delta.output_id
-        );
-        if matches!(
-            delta.source,
-            OutputSource::Plugin { .. } | OutputSource::Runtime
-        ) && !self.output_receipts.insert(stream_id.clone())
-        {
-            return Ok(());
-        }
-        for block in &delta.content {
-            match block {
-                ContentBlock::Text { text } if delta.source == OutputSource::Model => {
-                    self.append_stream(
-                        MessageKind::Assistant,
-                        &format!("Assistant [{}]", delta.invocation_id),
-                        stream_id.clone(),
-                        text.clone(),
-                    );
-                }
-                ContentBlock::Json { value } if delta.source == OutputSource::Tool => {
-                    let event: fae_agent::SessionEventData = serde_json::from_value(value.clone())?;
-                    if let fae_agent::SessionEventData::ToolOutput {
-                        output, completed, ..
-                    } = event
-                    {
-                        self.finish_stream();
-                        self.messages.push(Message::new(
-                            MessageKind::Tool,
-                            format!(
-                                "{} tool [{}]",
-                                if completed { "Completed" } else { "Running" },
-                                delta.invocation_id
-                            ),
-                            pretty_json_text(&output),
-                            None,
-                        ));
-                    }
-                }
-                _ => {
-                    self.finish_stream();
-                    let title = match &delta.source {
-                        OutputSource::Plugin { plugin_id } => format!("Plugin {plugin_id}"),
-                        _ => format!("Output [{}]", delta.invocation_id),
-                    };
-                    let text = match block {
-                        ContentBlock::Text { text } => text.clone(),
-                        ContentBlock::Json { value } => pretty_value(value),
-                        ContentBlock::Resource { resource } => resource.uri.clone(),
-                    };
-                    self.messages
-                        .push(Message::new(MessageKind::System, title, text, None));
-                }
-            }
-        }
+        let agent_name = self
+            .invocation_agents
+            .get(&(delta.execution_id.clone(), delta.invocation_id.clone()))
+            .unwrap_or(&self.agent_name);
+        apply_output_delta(
+            &mut self.messages,
+            &mut self.output_receipts,
+            delta,
+            agent_name,
+        )?;
         self.scroll_from_bottom = 0;
         Ok(())
     }
@@ -1753,6 +1731,92 @@ fn push_log_message(messages: &mut Vec<Message>, log: CapturedLog) {
     ));
 }
 
+fn apply_output_delta(
+    messages: &mut Vec<Message>,
+    output_receipts: &mut std::collections::HashSet<String>,
+    delta: &fae_agent::protocol::OutputDelta,
+    agent_name: &str,
+) -> anyhow::Result<()> {
+    use fae_agent::protocol::{ContentBlock, OutputSource};
+    let stream_id = format!(
+        "{}:{}:{}",
+        delta.execution_id, delta.invocation_id, delta.output_id
+    );
+    if matches!(
+        delta.source,
+        OutputSource::Plugin { .. } | OutputSource::PluginResult { .. } | OutputSource::Runtime
+    ) && !output_receipts.insert(stream_id.clone())
+    {
+        return Ok(());
+    }
+    for block in &delta.content {
+        match block {
+            ContentBlock::Text { text } if delta.source == OutputSource::Model => {
+                append_stream_message(
+                    messages,
+                    MessageKind::Assistant,
+                    &agent_title(agent_name, "Assistant"),
+                    stream_id.clone(),
+                    text.clone(),
+                );
+            }
+            ContentBlock::Json { value } if matches!(delta.source, OutputSource::Tool { .. }) => {
+                let OutputSource::Tool { tool_name } = &delta.source else {
+                    unreachable!()
+                };
+                let tool_name = tool_name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or("tool");
+                let event: fae_agent::SessionEventData = serde_json::from_value(value.clone())?;
+                let (label, content) = match event {
+                    SessionEventData::ToolCall { arguments, .. } => ("Called", arguments),
+                    SessionEventData::ToolOutput {
+                        output, completed, ..
+                    } => (if completed { "Completed" } else { "Running" }, output),
+                    _ => continue,
+                };
+                for message in messages.iter_mut() {
+                    message.stream_id = None;
+                }
+                messages.push(Message::new(
+                    MessageKind::Tool,
+                    agent_title(agent_name, &format!("{label} {tool_name}")),
+                    pretty_json_text(&content),
+                    None,
+                ));
+            }
+            _ => {
+                for message in messages.iter_mut() {
+                    message.stream_id = None;
+                }
+                let title = match &delta.source {
+                    OutputSource::Plugin { plugin_id }
+                    | OutputSource::PluginResult { plugin_id } => {
+                        agent_title(agent_name, &format!("Plugin {plugin_id}"))
+                    }
+                    _ => agent_title(agent_name, "Output"),
+                };
+                let text = match block {
+                    ContentBlock::Text { text } => text.clone(),
+                    ContentBlock::Json { value } => pretty_value(value),
+                    ContentBlock::Resource { resource } => resource.uri.clone(),
+                };
+                let is_result = matches!(delta.source, OutputSource::PluginResult { .. });
+                let kind = if is_result {
+                    MessageKind::Assistant
+                } else {
+                    MessageKind::System
+                };
+                let mut message = Message::new(kind, title, text, None);
+                message.render_markdown = is_result;
+                messages.push(message);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn append_stream_message(
     messages: &mut Vec<Message>,
     kind: MessageKind,
@@ -2162,6 +2226,124 @@ mod tests {
         assert_eq!(messages[1].title, "researcher: Assistant");
         assert_eq!(messages[1].content, "partial");
         assert!(messages.iter().all(|message| message.stream_id.is_none()));
+    }
+
+    #[test]
+    fn plugin_results_render_like_model_answers_and_deduplicate_replays() {
+        use fae_agent::protocol::{ContentBlock, OutputDelta, OutputSource};
+        let mut messages = Vec::new();
+        let mut receipts = std::collections::HashSet::new();
+        let mut delta = OutputDelta {
+            execution_id: fae_agent::ExecutionId::new("execution").unwrap(),
+            invocation_id: fae_agent::InvocationId::new("invocation").unwrap(),
+            output_id: "result".into(),
+            source: OutputSource::PluginResult {
+                plugin_id: "byte_agent_plan".into(),
+            },
+            content: vec![ContentBlock::Text {
+                text: "**模型列表**".into(),
+            }],
+        };
+        apply_output_delta(&mut messages, &mut receipts, &delta, "fae").unwrap();
+        apply_output_delta(&mut messages, &mut receipts, &delta, "fae").unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].kind, MessageKind::Assistant);
+        assert_eq!(messages[0].title, "fae: Plugin byte_agent_plan");
+        assert!(messages[0].expanded);
+        assert!(messages[0].render_markdown);
+        assert!(messages[0].stream_id.is_none());
+        let heading = &transcript_text(&messages, true, 0).lines[0].spans[0];
+        assert_eq!(heading.style.fg, Some(Color::Green));
+        assert!(heading.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!heading.content.contains("[+]"));
+        assert_eq!(
+            message_content_lines(&messages[0], false)[0].to_string(),
+            " 模型列表"
+        );
+
+        delta.execution_id = fae_agent::ExecutionId::new("next-execution").unwrap();
+        apply_output_delta(&mut messages, &mut receipts, &delta, "fae").unwrap();
+        assert_eq!(messages.len(), 2);
+        delta.output_id = "progress".into();
+        delta.source = OutputSource::Plugin {
+            plugin_id: "byte_agent_plan".into(),
+        };
+        apply_output_delta(&mut messages, &mut receipts, &delta, "fae").unwrap();
+        assert_eq!(messages[2].kind, MessageKind::System);
+        assert_eq!(messages[2].title, "fae: Plugin byte_agent_plan");
+        assert!(!messages[2].expanded);
+        assert!(!messages[2].render_markdown);
+    }
+
+    #[test]
+    fn output_headings_use_names_and_streams_keep_invocation_identity() {
+        use fae_agent::protocol::{ContentBlock, OutputDelta, OutputSource};
+        let mut messages = Vec::new();
+        let mut receipts = std::collections::HashSet::new();
+        let mut delta = OutputDelta {
+            execution_id: fae_agent::ExecutionId::new("execution").unwrap(),
+            invocation_id: fae_agent::InvocationId::new("9a4173db-0481-48fe-9977-6bc5179227b3")
+                .unwrap(),
+            output_id: "response".into(),
+            source: OutputSource::Model,
+            content: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
+        };
+        apply_output_delta(&mut messages, &mut receipts, &delta, "researcher").unwrap();
+        apply_output_delta(&mut messages, &mut receipts, &delta, "researcher").unwrap();
+        assert_eq!(messages[0].title, "researcher: Assistant");
+        assert_eq!(messages[0].content, "firstfirst");
+        delta.invocation_id =
+            fae_agent::InvocationId::new("25e40fd1-8a78-498b-9c16-6cbfafe0ed73").unwrap();
+        apply_output_delta(&mut messages, &mut receipts, &delta, "researcher").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].title, "researcher: Assistant");
+        assert_eq!(messages[1].content, "first");
+
+        delta.source = OutputSource::Tool {
+            tool_name: Some("shell".into()),
+        };
+        for (event, expected) in [
+            (
+                SessionEventData::ToolCall {
+                    call_id: "call".into(),
+                    arguments: r#"{"cmd":"pwd"}"#.into(),
+                },
+                "Called shell",
+            ),
+            (
+                SessionEventData::ToolOutput {
+                    call_id: "call".into(),
+                    output: "working".into(),
+                    completed: false,
+                },
+                "Running shell",
+            ),
+            (
+                SessionEventData::ToolOutput {
+                    call_id: "call".into(),
+                    output: "/workspace".into(),
+                    completed: true,
+                },
+                "Completed shell",
+            ),
+        ] {
+            delta.content = vec![ContentBlock::Json {
+                value: serde_json::to_value(event).unwrap(),
+            }];
+            apply_output_delta(&mut messages, &mut receipts, &delta, "researcher").unwrap();
+            let message = messages.last().unwrap();
+            assert_eq!(message.kind, MessageKind::Tool);
+            assert_eq!(message.title, format!("researcher: {expected}"));
+        }
+        delta.source = serde_json::from_value(serde_json::json!({"kind": "tool"})).unwrap();
+        apply_output_delta(&mut messages, &mut receipts, &delta, "fae").unwrap();
+        assert_eq!(messages.last().unwrap().title, "fae: Completed tool");
+        let transcript = super::super::render::plain_transcript(&messages);
+        assert!(!transcript.contains("9a4173db"));
+        assert!(!transcript.contains("25e40fd1"));
     }
 
     #[test]

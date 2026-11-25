@@ -95,7 +95,7 @@ impl PluginManager {
             if id != "*" && id != plugin.id {
                 continue;
             }
-            let source = home.join("plugins").join(&plugin.source);
+            let source = plugin.source_path(home);
             let declaration = if id != "*" && plugin.installed && source.is_dir() {
                 Some(
                     serde_json::from_slice::<PluginDeclaration>(&std::fs::read(
@@ -174,12 +174,15 @@ impl PluginManager {
             let _guard = self.reload.lock().await;
             let mut records = Vec::new();
             for plugin in enabled {
-                let source = self
-                    .home
-                    .join("plugins")
-                    .join(&plugin.source)
+                let source = plugin
+                    .source_path(&self.home)
                     .canonicalize()
                     .with_context(|| format!("plugin source {}", plugin.id))?;
+                anyhow::ensure!(
+                    plugin.directory_path.is_empty() || source.is_dir(),
+                    "plugin directory_path is not a directory: {}",
+                    plugin.id
+                );
                 let declaration = crate::hook::hook_py::executor::inspect(&plugin.id, &source)
                     .await
                     .with_context(|| format!("inspect plugin {}", plugin.id))?;
@@ -457,20 +460,21 @@ fn locate(home: &Path, id: &str) -> anyhow::Result<PathBuf> {
             plugin.installed && plugin.enabled,
             "plugin is not enabled: {id}"
         );
-        return Ok(root.join(&plugin.source));
+        let source = plugin.source_path(home);
+        anyhow::ensure!(
+            plugin.directory_path.is_empty() || source.is_dir(),
+            "plugin directory_path is not a directory: {id}"
+        );
+        return Ok(source);
     }
     let candidates = [
-        root.join(id),
         root.join(format!("{id}.py")),
+        root.join(id),
         root.join(format!("{id}.js")),
     ];
     let existing = candidates
         .into_iter()
-        .filter(|path| path.exists())
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        existing.len() == 1,
-        "plugin_source_invalid: missing or ambiguous plugin {id}"
-    );
-    Ok(existing[0].clone())
+        .find(|path| path.exists())
+        .ok_or_else(|| anyhow::anyhow!("plugin_source_invalid: missing plugin {id}"))?;
+    Ok(existing)
 }

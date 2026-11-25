@@ -43,6 +43,11 @@ dist_dir="${DIST_DIR:-$package_dir/dist}"
 
 "$python_bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "需要 Python >=3.10")'
 
+if [[ ! -r "$package_dir/README.md" || ! -s "$package_dir/README.md" ]]; then
+    printf '构建需要可读且非空的 README：%s\n' "$package_dir/README.md" >&2
+    exit 1
+fi
+
 if [[ "$build_only" == false ]]; then
     export TWINE_USERNAME="${TWINE_USERNAME:-__token__}"
     export TWINE_REPOSITORY_URL="${TWINE_REPOSITORY_URL:-https://upload.pypi.org/legacy/}"

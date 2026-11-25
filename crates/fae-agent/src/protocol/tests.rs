@@ -122,6 +122,10 @@ fn request_examples() -> Vec<(RequestPath, Value)> {
             json!({"access":access(),"reason":null}),
         ),
         (
+            RequestPath::PluginContextCompleteQuery,
+            json!({"access":access(),"text":"result"}),
+        ),
+        (
             RequestPath::PluginOutputSend,
             json!({"access":access(),"content":[{"type":"text","text":"output"}]}),
         ),
@@ -207,6 +211,7 @@ fn response_example(path: RequestPath) -> Value {
         }
         RequestPath::PluginWorkerHello
         | RequestPath::PluginContextCancel
+        | RequestPath::PluginContextCompleteQuery
         | RequestPath::PluginStreamClose
         | RequestPath::PluginCallRelease => json!({}),
         RequestPath::PluginInspect => json!({"registration_mode":"direct","plugin_version":"1.0.0",
@@ -341,6 +346,21 @@ fn every_registered_request_and_response_roundtrips_with_its_own_schema() {
         );
         assert_eq!(serde_json::to_value(decoded).unwrap(), response);
     }
+}
+
+#[test]
+fn plugin_result_output_roundtrips_with_plugin_identity() {
+    let value = json!({
+        "execution_id":"execution-1", "invocation_id":"invocation-1",
+        "output_id":"result", "source":{"kind":"plugin_result","plugin_id":"byte_agent_plan"},
+        "content":[{"type":"text","text":"**models**"}]
+    });
+    let delta: OutputDelta = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        &delta.source,
+        OutputSource::PluginResult { plugin_id } if plugin_id == "byte_agent_plan"
+    ));
+    assert_eq!(serde_json::to_value(delta).unwrap(), value);
 }
 
 #[test]

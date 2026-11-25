@@ -127,6 +127,12 @@ impl SingleAgentHook for CompositeSingleAgentHook {
                 "hook context finished"
             );
             query = hook.on_query(ctx, query).await?;
+            if matches!(
+                &*ctx.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                return Ok(query);
+            }
         }
         anyhow::ensure!(
             !ctx.ctx.state().current().is_terminal(),

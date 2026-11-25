@@ -21,6 +21,19 @@ from fae_plugin.types import encode
 
 
 class TypesTest(unittest.TestCase):
+    def test_directory_declaration_id_is_independent_of_folder_name(self):
+        with tempfile.TemporaryDirectory(prefix="Release-") as directory:
+            source = Path(directory)
+            (source / "plugin.py").write_text("class Demo: pass\n")
+            raw = {"id": "demo", "plugin_version": "1.0.0", "description": "Demo",
+                   "engine": "py", "mounts": [{"point": "ToolsHook",
+                                              "implementation": "plugin.py:Demo"}]}
+            result = normalize(raw, "demo", source)
+            self.assertEqual(result["id"], "demo")
+            self.assertEqual(result["mounts"][0]["channel"], "fae_demo")
+            with self.assertRaisesRegex(ValueError, "ID does not match"):
+                normalize(raw, "other", source)
+
     def test_memory_and_history_use_registered_business_fields(self):
         from fae_plugin import MemoryView, SessionMessageRole, UserMemoryCategory
         value = MemoryView.from_dict({

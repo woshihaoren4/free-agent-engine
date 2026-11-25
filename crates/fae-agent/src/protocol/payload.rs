@@ -443,8 +443,18 @@ pub struct OutputDelta {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OutputSource {
     Model,
-    Tool,
-    Plugin { plugin_id: String },
+    Tool {
+        /// Callable name shown to the model, including MCP and Agent tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+    },
+    Plugin {
+        plugin_id: String,
+    },
+    /// Final answer produced by complete_query, rather than a plugin notification.
+    PluginResult {
+        plugin_id: String,
+    },
     Runtime,
 }
 

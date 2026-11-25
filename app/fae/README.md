@@ -264,20 +264,29 @@ fae plugin uninstall project_context
 
 Install single files or directories into `<fae_home>/plugins/`. Python single files
 provide `plugin_config()`; directories provide JSON `plugin.config`. Plugins
-support Agent hooks, tool channels and complete/streaming model responses.
+installed from directories must declare `id` in `plugin.config`, using
+`[a-z][a-z0-9_]{0,63}`. The directory name can differ from this ID.
+Plugins support Agent hooks, tool channels and complete/streaming model responses.
 `direct` registers separate Rust execution nodes; `chain` runs one Python onion
 chain in installation order.
 
 `<fae_home>/plugins/plugins.config` is the fixed JSON installation manifest.
-The `plugins` array records order, source filename, installation and enablement:
+The `plugins` array records order, source filename, directory path, installation and enablement:
 
 ```json
 {
   "plugins": [
-    {"id": "project_context", "source": "project_context.py", "installed": true, "enabled": true}
+    {"id": "project_context", "source": "project_context.py", "directory_path": "", "installed": true, "enabled": true},
+    {"id": "demo", "source": "Release-v1", "directory_path": "Release-v1", "installed": true, "enabled": true}
   ]
 }
 ```
+
+`directory_path` is relative to `<fae_home>/plugins/` and loads that directory's
+`plugin.config`. An omitted or empty path looks for `<id>.py`, then `<id>/`,
+then `<id>.js`. Existing manifests remain readable. Directory installation
+preserves the source directory name and records it in `directory_path`.
+`source` records the original filename; loading uses `directory_path` or ID lookup.
 
 Startup loads current sources for installed, enabled entries in array order.
 Unlisted sources are not loaded. Any configuration, import, worker or mount

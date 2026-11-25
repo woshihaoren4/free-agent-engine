@@ -108,6 +108,7 @@ requests! {
     PluginContextStacks => "plugin/context/stacks", PluginStacks, Vec<crate::ContextStack>;
     PluginContextFork => "plugin/context/fork", PluginFork, PluginContextRef;
     PluginContextCancel => "plugin/context/cancel", PluginCancel, Empty;
+    PluginContextCompleteQuery => "plugin/context/complete_query", PluginQueryCompletion, Empty;
     PluginOutputSend => "plugin/output/send", PluginOutput, PluginOutputReceipt;
     PluginStreamNext => "plugin/stream/next", PluginStream, Value;
     PluginStreamClose => "plugin/stream/close", PluginStream, Empty;

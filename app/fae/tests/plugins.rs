@@ -84,6 +84,107 @@ async fn plugin_cli_installs_shows_overwrites_and_uninstalls_without_starting_se
 }
 
 #[tokio::test]
+async fn directory_install_uses_declared_id_and_preserves_directory_name() {
+    let fixture = Fixture::new();
+    let source = fixture.0.join("Release-v1");
+    std::fs::create_dir(&source).unwrap();
+    let declaration = serde_json::json!({
+        "id":"demo", "plugin_version":"1.0.0", "description":"directory",
+        "engine":"py", "mounts":[{"point":"ToolsHook","implementation":"plugin.py:Demo"}]
+    });
+    std::fs::write(source.join("plugin.config"), declaration.to_string()).unwrap();
+    std::fs::write(
+        source.join("plugin.py"),
+        "raise RuntimeError('show must not import')",
+    )
+    .unwrap();
+    let installed = fixture
+        .run(&["plugin", "install", source.to_str().unwrap()])
+        .await;
+    assert!(installed.status.success(), "{installed:?}");
+    assert!(String::from_utf8_lossy(&installed.stdout).contains("Installed demo."));
+    let manifest = fixture.0.join("home/plugins/plugins.config");
+    let config: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(config["plugins"][0]["directory_path"], "Release-v1");
+    let shown = fixture.run(&["plugin", "show", "demo"]).await;
+    assert!(shown.status.success(), "{shown:?}");
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["demo"]["declaration"]["id"], "demo");
+    assert_eq!(
+        shown["demo"]["declaration"]["mounts"][0]["channel"],
+        "fae_demo"
+    );
+
+    // Reinstalling the same ID from another directory removes its former source.
+    let replacement = fixture.0.join("Release-v2");
+    std::fs::rename(&source, &replacement).unwrap();
+    let installed = fixture
+        .run(&["plugin", "install", replacement.to_str().unwrap()])
+        .await;
+    assert!(installed.status.success(), "{installed:?}");
+    assert!(!fixture.0.join("home/plugins/Release-v1").exists());
+    assert!(fixture.0.join("home/plugins/Release-v2/plugin.py").exists());
+    // Installing directly from the destination must also work.
+    let installed = fixture
+        .run(&[
+            "plugin",
+            "install",
+            fixture.0.join("home/plugins/Release-v2").to_str().unwrap(),
+        ])
+        .await;
+    assert!(installed.status.success(), "{installed:?}");
+
+    let before = std::fs::read(&manifest).unwrap();
+    // A different ID must not overwrite another plugin's directory.
+    let mut other = declaration.clone();
+    other["id"] = "other".into();
+    std::fs::write(replacement.join("plugin.config"), other.to_string()).unwrap();
+    let conflict = fixture
+        .run(&["plugin", "install", replacement.to_str().unwrap()])
+        .await;
+    assert!(!conflict.status.success(), "{conflict:?}");
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+
+    // ID validation applies to the declaration, regardless of the directory name.
+    other["id"] = "Bad-ID".into();
+    std::fs::write(replacement.join("plugin.config"), other.to_string()).unwrap();
+    let invalid = fixture
+        .run(&["plugin", "install", replacement.to_str().unwrap()])
+        .await;
+    assert!(!invalid.status.success(), "{invalid:?}");
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid plugin ID"));
+    other.as_object_mut().unwrap().remove("id");
+    std::fs::write(replacement.join("plugin.config"), other.to_string()).unwrap();
+    assert!(
+        !fixture
+            .run(&["plugin", "install", replacement.to_str().unwrap()])
+            .await
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    // Switching the same ID between directory and file sources replaces the old path.
+    let file = fixture.0.join("demo.py");
+    std::fs::write(&file, "replacement").unwrap();
+    let installed = fixture
+        .run(&["plugin", "install", file.to_str().unwrap()])
+        .await;
+    assert!(installed.status.success(), "{installed:?}");
+    assert!(!fixture.0.join("home/plugins/Release-v2").exists());
+    let config: Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(config["plugins"][0]["directory_path"], "");
+    std::fs::write(replacement.join("plugin.config"), declaration.to_string()).unwrap();
+    let installed = fixture
+        .run(&["plugin", "install", replacement.to_str().unwrap()])
+        .await;
+    assert!(installed.status.success(), "{installed:?}");
+    assert!(!fixture.0.join("home/plugins/demo.py").exists());
+    let removed = fixture.run(&["plugin", "uninstall", "demo"]).await;
+    assert!(removed.status.success(), "{removed:?}");
+    assert!(fixture.0.join("home/plugins/Release-v2/plugin.py").exists());
+}
+
+#[tokio::test]
 async fn plugin_cli_updates_running_service_without_restart() {
     let fixture = Fixture::new();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -187,7 +288,7 @@ async fn invalid_installed_plugin_fails_foreground_and_background_service_start(
     let fixture = Fixture::new();
     let source = fixture.0.join("broken");
     std::fs::create_dir_all(&source).unwrap();
-    std::fs::write(source.join("plugin.config"), "{ invalid plugin declaration").unwrap();
+    std::fs::write(source.join("plugin.config"), r#"{"id":"broken"}"#).unwrap();
     let installed = fixture
         .run(&["plugin", "install", source.to_str().unwrap()])
         .await;

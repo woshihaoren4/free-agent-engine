@@ -2159,6 +2159,80 @@ user-defined rules, and other long-term facts."
         );
     }
     #[tokio::test]
+    async fn query_completion_ends_before_turn_started_or_memory_tasks() {
+        #[derive(Debug)]
+        struct CompletedQuery;
+        #[async_trait::async_trait]
+        impl SingleAgentHook for CompletedQuery {
+            async fn on_query(
+                &self,
+                ctx: &SingleAgentHookContext<'_>,
+                query: String,
+            ) -> anyhow::Result<String> {
+                if query == "byte --models" {
+                    ctx.ctx
+                        .set_state(crate::ContextState::succeeded(serde_json::json!(
+                            "model table"
+                        )))?;
+                }
+                Ok(query)
+            }
+        }
+        let mut template = test_template();
+        template.hook = Arc::new(CompletedQuery);
+        let ctx = crate::context::test_context(Some(crate::ContextScope::root("user-1")));
+        ctx.set_state(crate::ContextState::Running).unwrap();
+        let session = CommonSession::new();
+        let mut plan = SingleAgentPlan::new(
+            ctx.clone(),
+            template,
+            "byte --models".into(),
+            1,
+            session.clone(),
+        );
+        assert!(matches!(plan.init().await.unwrap(), PlanNext::End));
+        assert!(session.drain_outputs().await.is_empty());
+        assert!(matches!(
+            &*ctx.state().current(),
+            crate::ContextState::Succeeded { .. }
+        ));
+        drop(plan);
+        assert!(session.activate_turn().is_ok());
+        session.finish_turn();
+        let mut template = test_template();
+        template.hook = Arc::new(CompletedQuery);
+        let ctx = crate::context::test_context(Some(crate::ContextScope::root("user-2")));
+        ctx.set_state(crate::ContextState::Running).unwrap();
+        let mut plan = SingleAgentPlan::new(
+            ctx.clone(),
+            template,
+            "hello".into(),
+            1,
+            CommonSession::new(),
+        );
+        assert!(matches!(plan.init().await.unwrap(), PlanNext::Tasks(_)));
+        plan.append_user_inputs(vec![AgentInput::text("byte --models")])
+            .await
+            .unwrap();
+        assert!(matches!(
+            plan.next(
+                TaskResp {
+                    ctx: Ctx::null(),
+                    meta: TaskMeta::default(),
+                    resp: UserMemoryResponse::Memories {
+                        path: PathBuf::new(),
+                        memories: Vec::new()
+                    }
+                }
+                .into_response()
+            )
+            .await
+            .unwrap(),
+            PlanNext::End
+        ));
+    }
+
+    #[tokio::test]
     async fn query_cancellation_stops_before_turn_started() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let mut template = test_template();

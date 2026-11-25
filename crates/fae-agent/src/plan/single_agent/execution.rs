@@ -283,6 +283,7 @@ impl SingleAgentPlan {
     }
 
     async fn emit(&self, source: impl Into<String>, data: SessionEventData) -> anyhow::Result<()> {
+        let source = source.into();
         if let Some(binding) = self
             .ctx
             .scope()
@@ -311,7 +312,8 @@ impl SingleAgentPlan {
                         .clone()
                         .unwrap_or_else(|| self.response_id.clone()),
                 ),
-                SessionEventData::ToolOutput { call_id, .. } => (
+                SessionEventData::ToolCall { call_id, .. }
+                | SessionEventData::ToolOutput { call_id, .. } => (
                     vec![crate::protocol::ContentBlock::Json {
                         value: serde_json::to_value(&data)?,
                     }],
@@ -327,7 +329,9 @@ impl SingleAgentPlan {
                     source: if matches!(data, SessionEventData::ModelOutput { .. }) {
                         crate::protocol::OutputSource::Model
                     } else {
-                        crate::protocol::OutputSource::Tool
+                        crate::protocol::OutputSource::Tool {
+                            tool_name: Some(source),
+                        }
                     },
                     content,
                 },
@@ -418,6 +422,10 @@ impl SingleAgentPlan {
 
     async fn next_model_task(&mut self) -> anyhow::Result<TaskRequest> {
         self.apply_execution_inputs().await?;
+        anyhow::ensure!(
+            !self.ctx.state().current().is_terminal(),
+            "input context finished"
+        );
 
         let request = self.model_request();
         let estimated_tokens = estimated_tokens(&request);
@@ -563,6 +571,12 @@ impl SingleAgentPlan {
                 },
             )?;
             result?;
+            if matches!(
+                &*self.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                break;
+            }
         }
         Ok(count)
     }
@@ -575,6 +589,13 @@ impl SingleAgentPlan {
                 .hook
                 .on_query(&self.hook_context(None), input.text)
                 .await?;
+            if matches!(
+                &*self.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                self.finish_on_drop = true;
+                return Ok(());
+            }
             anyhow::ensure!(
                 !self.ctx.state().current().is_terminal(),
                 "input context finished"

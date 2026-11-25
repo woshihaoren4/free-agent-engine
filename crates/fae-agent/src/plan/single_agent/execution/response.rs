@@ -171,6 +171,13 @@ impl SingleAgentPlan {
                 .push(SessionMessage::assistant(content));
 
             let applied = self.apply_execution_inputs().await?;
+            if matches!(
+                &*self.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                self.finish_on_drop = true;
+                return Ok(PlanNext::End);
+            }
             if applied > 0 {
                 return Ok(PlanNext::Tasks(vec![self.next_model_task().await?]));
             }

@@ -583,6 +583,13 @@ impl Plan for SingleAgentTodoPlan {
                 .hook
                 .on_query(&self.hook_context(None), self.todo.requirement.clone())
                 .await?;
+            if matches!(
+                &*self.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                self.finish_on_drop = true;
+                return Ok(PlanNext::End);
+            }
             anyhow::ensure!(
                 !self.ctx.state().current().is_terminal(),
                 "input context finished"

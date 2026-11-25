@@ -95,7 +95,9 @@ pub async fn run(
     let id = definition(home, &args).await?;
     let create = SessionCreateRequest {
         name: id.clone(),
-        target: PlanTarget::Agent { agent_id: id },
+        target: PlanTarget::Agent {
+            agent_id: id.clone(),
+        },
         workspace: Some(workspace.to_string_lossy().into()),
         options: Default::default(),
         channels: vec![],
@@ -107,11 +109,14 @@ pub async fn run(
         start(&mut client, input, options).await?;
         return super::output::stream(&mut client, false).await;
     }
+    let (agent_config, _) = fae_agent::SingleAgentPlanBuilder::with_home_dir(home)
+        .load_config(&fae_agent::SingleAgentSource::AgentId(id))
+        .await?;
     let mut ui = TerminalUi::new(
         Mode::Agent,
         &client.info.session_config.name,
         Some(client.info.user_info.user_id.to_string()),
-        "—",
+        agent_config.model.model,
         client.sid(),
         color.enabled(),
         no_alt_screen,
@@ -191,13 +196,7 @@ pub async fn run_round(
                     ui.apply_output_delta(&delta)?;
                 }
                 MessagePayload::Event(EventPayload::InvocationChanged(changed)) => {
-                    if let Some(model) = &changed.invocation.model {
-                        ui.set_execution_model(Some(model));
-                    }
-                }
-                MessagePayload::Event(EventPayload::ExecutionStateChanged(changed))
-                    if changed.status == fae_agent::ExecutionStatus::Preparing => {
-                    ui.set_execution_model(None);
+                    ui.apply_invocation_changed(&changed);
                 }
                 MessagePayload::Event(EventPayload::ExecutionFinished(finished)) => {
                     ui.finish_execution();

@@ -14,10 +14,12 @@ def normalize(raw: Any, plugin_id: str, source: Path) -> dict[str, Any]:
     raw = json.loads(json.dumps(json_value(raw), allow_nan=False))
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", plugin_id):
         raise ValueError("Invalid plugin ID")
-    allowed = {"registration_mode", "plugin_version", "fae_plugin_api_version",
+    allowed = {"id", "registration_mode", "plugin_version", "fae_plugin_api_version",
                "description", "engine", "mounts"}
     if set(raw) - allowed:
         raise ValueError("Unknown configuration fields")
+    if "id" in raw and raw["id"] != plugin_id:
+        raise ValueError("Plugin ID does not match configuration")
     raw.setdefault("registration_mode", "direct")
     raw.setdefault("fae_plugin_api_version", API_VERSION)
     RegistrationMode(raw["registration_mode"])

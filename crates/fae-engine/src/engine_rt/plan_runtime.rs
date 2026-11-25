@@ -572,6 +572,13 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
                     next = execution.plan.as_mut().unwrap().next(response) => next,
                     _ = parent_ctx.cancellation() => Err(anyhow::Error::new(fae_agent::Error::ContextAborted)),
                 };
+                if matches!(
+                    &*parent_ctx.state().current(),
+                    ContextState::Succeeded { .. }
+                ) {
+                    ended = true;
+                    break;
+                }
                 match next {
                     Ok(PlanNext::End) => {
                         ended = true;

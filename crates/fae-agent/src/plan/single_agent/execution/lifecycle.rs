@@ -17,6 +17,13 @@ impl Plan for SingleAgentPlan {
                 .hook
                 .on_query(&self.hook_context(None), self.input.clone())
                 .await?;
+            if matches!(
+                &*self.ctx.state().current(),
+                crate::ContextState::Succeeded { .. }
+            ) {
+                self.finish_on_drop = true;
+                return Ok(PlanNext::End);
+            }
             anyhow::ensure!(
                 !self.ctx.state().current().is_terminal(),
                 "input context finished"
@@ -47,6 +54,13 @@ impl Plan for SingleAgentPlan {
     }
 
     async fn next(&mut self, mut task_result: TaskResponse) -> anyhow::Result<PlanNext> {
+        if matches!(
+            &*self.ctx.state().current(),
+            crate::ContextState::Succeeded { .. }
+        ) {
+            self.finish_on_drop = true;
+            return Ok(PlanNext::End);
+        }
         if let Some(todo_plan) = &mut self.todo_plan {
             return todo_plan.next(task_result).await;
         }
@@ -142,7 +156,15 @@ impl Plan for SingleAgentPlan {
                 );
                 self.unsaved_messages.clear();
 
-                if self.apply_execution_inputs().await? > 0 {
+                let applied = self.apply_execution_inputs().await?;
+                if matches!(
+                    &*self.ctx.state().current(),
+                    crate::ContextState::Succeeded { .. }
+                ) {
+                    self.finish_on_drop = true;
+                    return Ok(PlanNext::End);
+                }
+                if applied > 0 {
                     Ok(PlanNext::Tasks(vec![self.next_model_task().await?]))
                 } else {
                     self.finish_on_drop = true;

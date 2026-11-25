@@ -98,6 +98,8 @@ impl PluginMount {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(default)]
     pub registration_mode: RegistrationMode,
     pub plugin_version: String,
@@ -133,6 +135,13 @@ impl PluginDeclaration {
         single_file_engine: Option<PluginEngine>,
     ) -> anyhow::Result<Self> {
         validate_id(id)?;
+        if let Some(declared_id) = &self.id {
+            validate_id(declared_id)?;
+            anyhow::ensure!(
+                declared_id == id,
+                "plugin ID does not match configuration: {id}"
+            );
+        }
         semver::Version::parse(&self.plugin_version)?;
         anyhow::ensure!(
             self.fae_plugin_api_version == API_VERSION,
@@ -254,6 +263,24 @@ mod tests {
         );
         model["mounts"][0]["model"] = "legacy-model".into();
         assert!(serde_json::from_value::<PluginDeclaration>(model).is_err());
+    }
+
+    #[test]
+    fn declared_id_must_match_loading_id() {
+        let mut raw = config();
+        raw["id"] = "example".into();
+        let declaration: PluginDeclaration = serde_json::from_value(raw).unwrap();
+        assert!(
+            declaration
+                .clone()
+                .normalize("example", Some(PluginEngine::Py))
+                .is_ok()
+        );
+        assert!(
+            declaration
+                .normalize("other", Some(PluginEngine::Py))
+                .is_err()
+        );
     }
 
     #[test]

@@ -46,6 +46,12 @@ impl PluginAdapter {
                 .executor
                 .invoke(ctx, &root, point, method, location, metadata.clone(), value)
                 .await?;
+            if point == "SingleAgentHook"
+                && method == "on_query"
+                && matches!(&*ctx.state().current(), ContextState::Succeeded { .. })
+            {
+                break;
+            }
         }
         Ok(value)
     }

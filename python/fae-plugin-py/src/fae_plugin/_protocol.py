@@ -9,7 +9,7 @@ PROTOCOL_VERSION = 4
 
 PLUGIN_PATHS = {
     "worker/hello", "inspect", "invoke", "next", "context/get", "context/export",
-    "context/fork", "context/cancel", "context/stacks", "output/send", "stream/next", "stream/close",
+    "context/fork", "context/cancel", "context/complete_query", "context/stacks", "output/send", "stream/next", "stream/close",
     "call/release", "host/get_engine", "host/get_session",
 }
 SESSION_PATHS = {"execution/steer", "execution/stop", "execution/get"}
@@ -101,6 +101,7 @@ def _payload(suffix: str, payload: dict[str, Any]) -> None:
         "plugin/context/stacks": ({"access", "query"}, set()),
         "plugin/context/fork": ({"access", "spec"}, set()),
         "plugin/context/cancel": ({"access"}, {"reason"}),
+        "plugin/context/complete_query": ({"access", "text"}, set()),
         "plugin/output/send": ({"access", "content"}, set()),
         "plugin/stream/next": ({"call_id", "stream_id"}, {"access"}),
         "plugin/stream/close": ({"call_id", "stream_id"}, {"access"}),
@@ -118,6 +119,9 @@ def _payload(suffix: str, payload: dict[str, Any]) -> None:
         _access(payload["access"])
     if suffix == "plugin/context/fork":
         _object(payload["spec"], {"operation"})
+    if suffix == "plugin/context/complete_query":
+        if not isinstance(payload["text"], str) or not payload["text"].strip():
+            raise ValueError("Query result must be nonempty text")
     if suffix == "plugin/context/stacks":
         from .data import ContextStackQuery
         query = ContextStackQuery.from_dict(payload["query"])
