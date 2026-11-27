@@ -4,7 +4,7 @@ use super::{
     sdk::Sdk,
     store::{State, Store},
 };
-use crate::app::client::{Client, text_content};
+use crate::app::client::Client;
 use fae_agent::{AgentMode, ExecutionOptions, PlanTarget, RequestId, protocol::*};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
@@ -202,6 +202,14 @@ impl Gateway {
         } else {
             identity::session_id(&record.binding)
         };
+        let recovering = record.state != State::Received;
+        // Download before locking the live session or sampling its active execution.
+        // A slow image fetch must not block monitoring or leave the steering target stale.
+        let prepared_input = if recovering {
+            None
+        } else {
+            Some(super::content::input(&self.sdk, &record, record.text.clone()).await?)
+        };
         let shared = self
             .sessions
             .lock()
@@ -219,7 +227,6 @@ impl Gateway {
             identity::owns_session(&record.binding, &record.session_id),
             "Invalid saved Lark session"
         );
-        let recovering = record.state != State::Received;
         let server = crate::app::daemon::discover(&self.home)
             .await?
             .ok_or_else(|| anyhow::anyhow!("服务不可用；本次不会排队或自动重跑"))?;
@@ -387,6 +394,10 @@ impl Gateway {
             } else {
                 record.text.clone()
             };
+            let mut input = prepared_input.unwrap();
+            if let Some(ContentBlock::Text { text: input_text }) = input.first_mut() {
+                *input_text = text;
+            }
             let payload = if steer {
                 let execution_id = status
                     .active_execution
@@ -394,11 +405,11 @@ impl Gateway {
                     .ok_or_else(|| anyhow::anyhow!("没有可补充的执行"))?;
                 RequestPayload::SessionExecutionSteer(ExecutionSteerRequest {
                     execution_id,
-                    input: text_content(text),
+                    input,
                 })
             } else {
                 RequestPayload::SessionExecutionStart(ExecutionStartRequest {
-                    input: text_content(text),
+                    input,
                     target: None,
                     workspace: None,
                     options: Some(ExecutionOptions {

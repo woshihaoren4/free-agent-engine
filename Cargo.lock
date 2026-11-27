@@ -1361,6 +1361,7 @@ dependencies = [
  "http",
  "larksuite-oapi-sdk-rs",
  "libc",
+ "pulldown-cmark",
  "ratatui",
  "rfd",
  "serde",

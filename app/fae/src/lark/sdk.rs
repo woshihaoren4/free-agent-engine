@@ -1,11 +1,13 @@
 use super::config::Config;
 use larksuite_oapi_sdk_rs::service::im::v1::{
-    CreateMessageReactionReqBody, CreateMessageReqBody, Emoji, ReplyMessageReqBody,
+    CreateMessageReactionReqBody, CreateMessageReqBody, Emoji, GetMessageResourceDownloadQuery,
+    ReplyMessageReqBody,
 };
 use larksuite_oapi_sdk_rs::{AccessTokenType, ApiReq, LarkClient, ReqBody, RequestOption};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
+use wd_tools::Base64StdEncode;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MessageResource {
@@ -292,6 +294,53 @@ impl Sdk {
             .ok_or_else(|| anyhow::anyhow!("Message metadata unavailable"))?;
         MessageResource::parse(item)
     }
+    pub async fn image(
+        &self,
+        message: &str,
+        key: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<fae_agent::protocol::ResourceRef> {
+        anyhow::ensure!(super::identity::valid_thread(message), "Invalid message ID");
+        anyhow::ensure!(
+            !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "Invalid Feishu image key"
+        );
+        self.pace().await;
+        let mut response = self
+            .client
+            .im()
+            .message_resource
+            .get_stream_by_query(
+                &GetMessageResourceDownloadQuery::new(message, key, "image"),
+                &RequestOption::default(),
+            )
+            .await?;
+        anyhow::ensure!(
+            response
+                .content_length
+                .is_none_or(|length| length <= max_bytes as u64),
+            "消息图片总大小超过限制"
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.body.next_chunk().await? {
+            anyhow::ensure!(
+                bytes.len().saturating_add(chunk.len()) <= max_bytes,
+                "消息图片总大小超过限制"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        // The endpoint can return octet-stream; inspect the bytes rather than trusting a filename.
+        let media_type = image_media_type(&bytes)
+            .ok_or_else(|| anyhow::anyhow!("飞书资源不是支持的图片（PNG、JPEG、GIF、WebP）"))?;
+        Ok(fae_agent::protocol::ResourceRef {
+            uri: format!("data:{media_type};base64,{}", bytes.base64_encode_std()),
+            media_type: media_type.into(),
+            name: None,
+        })
+    }
     pub async fn thread_reply(
         &self,
         message: &str,
@@ -428,6 +477,20 @@ impl Sdk {
     }
 }
 
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -439,6 +502,12 @@ pub mod tests {
     pub type Requests = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
     pub async fn mock(
         mut handler: impl FnMut(&str, &Value) -> Value + Send + 'static,
+    ) -> (String, Requests, tokio::task::JoinHandle<()>) {
+        mock_bytes(move |path, body| handler(path, body).to_string().into_bytes()).await
+    }
+
+    pub async fn mock_bytes(
+        mut handler: impl FnMut(&str, &Value) -> Vec<u8> + Send + 'static,
     ) -> (String, Requests, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -487,19 +556,50 @@ pub mod tests {
                     continue;
                 }
                 seen.lock().unwrap().push((path.clone(), body.clone()));
-                let value = if path.contains("tenant_access_token") {
+                let body = if path.contains("tenant_access_token") {
                     json!({"code":0,"tenant_access_token":"mock-token","expire":7200})
+                        .to_string()
+                        .into_bytes()
                 } else {
                     handler(&path, &body)
                 };
-                let body = value.to_string();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
             }
         });
         (base, requests, task)
+    }
+
+    #[tokio::test]
+    async fn download_image_checks_endpoint_type_size_and_binary_format() {
+        let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+        let expected = png.clone();
+        let (base, requests, task) = mock_bytes(move |path, _| {
+            assert!(path.ends_with("/om_image/resources/img_one?type=image"));
+            png.clone()
+        })
+        .await;
+        let config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+        }))
+        .unwrap();
+        let sdk = Sdk::for_test(config, base);
+        let resource = sdk.image("om_image", "img_one", 1024).await.unwrap();
+        assert_eq!(resource.media_type, "image/png");
+        assert_eq!(
+            resource.uri,
+            format!("data:image/png;base64,{}", expected.base64_encode_std())
+        );
+        assert!(sdk.image("om_image", "img_one", 2).await.is_err());
+        let count = requests.lock().unwrap().len();
+        assert!(sdk.image("om_image", "../invalid", 1024).await.is_err());
+        assert_eq!(requests.lock().unwrap().len(), count);
+        assert_eq!(image_media_type(b"{\"code\":0}"), None);
+        assert_eq!(image_media_type(b"\xff\xd8\xffjpeg"), Some("image/jpeg"));
+        task.abort();
     }
 }

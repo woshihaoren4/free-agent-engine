@@ -13,6 +13,9 @@ use fae_agent::{
 use tower::Layer;
 use wd_tools::channel::{Channel, Receiver, Sender};
 
+#[path = "model_runtime/responses.rs"]
+mod responses;
+
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(10),
     Duration::from_secs(30),
@@ -119,13 +122,14 @@ where
         client: &Client<C>,
         req: CreateChatCompletionRequest,
     ) -> Result<ModelResponse, OpenAIError> {
+        let req = responses::request(req)?;
         if req.stream.unwrap_or(false) {
-            let stream = client.chat().create_stream(req).await?;
-            return Ok(ModelResponse::Streaming(stream));
+            let stream = client.responses().create_stream(req).await?;
+            return Ok(ModelResponse::Streaming(responses::stream(stream)));
         }
 
-        let response = client.chat().create(req).await?;
-        Ok(ModelResponse::Completed(response))
+        let response = client.responses().create(req).await?;
+        Ok(ModelResponse::Completed(responses::completed(response)?))
     }
 
     async fn request(
@@ -310,6 +314,32 @@ mod tests {
         .to_string()
     }
 
+    fn response_body(text: &str) -> String {
+        serde_json::json!({
+            "id": "offline", "object": "response", "created_at": 0,
+            "model": "offline-model", "status": "completed",
+            "output": [{"type": "message", "id": "msg", "role": "assistant",
+                "status": "completed", "content": [{
+                    "type": "output_text", "text": text, "annotations": []
+                }]}]
+        })
+        .to_string()
+    }
+
+    fn stream_body(text: &str) -> String {
+        let delta = serde_json::json!({
+            "type": "response.output_text.delta", "sequence_number": 1,
+            "item_id": "msg", "output_index": 0, "content_index": 0, "delta": text
+        });
+        let done = serde_json::json!({
+            "type": "response.completed", "sequence_number": 2,
+            "response": serde_json::from_str::<serde_json::Value>(&response_body(text)).unwrap()
+        });
+        format!(
+            "event: response.output_text.delta\ndata: {delta}\n\nevent: response.completed\ndata: {done}\n\n"
+        )
+    }
+
     fn fake_client(status: u16, body: String, calls: Arc<AtomicUsize>) -> Client<OpenAIConfig> {
         Client::new().with_http_service(tower::service_fn(move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -320,6 +350,65 @@ mod tests {
                 .into();
             async move { Ok::<_, async_openai::error::OpenAIError>(response) }
         }))
+    }
+
+    #[tokio::test]
+    async fn model_requests_use_responses_endpoint_and_payload() {
+        for streaming in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let service_calls = calls.clone();
+            let client = Client::new().with_http_service(tower::service_fn(
+                move |factory: async_openai::middleware::HttpRequestFactory| {
+                    let service_calls = service_calls.clone();
+                    async move {
+                        let request = factory.build().await?;
+                        assert_eq!(request.url().path(), "/v1/responses");
+                        let body: serde_json::Value =
+                            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap())
+                                .unwrap();
+                        assert_eq!(body["model"], "offline-model");
+                        assert_eq!(body["input"][0]["role"], "user");
+                        assert_eq!(body["input"][0]["content"], "hello");
+                        assert_eq!(body["stream"], streaming);
+                        assert!(body.get("messages").is_none());
+                        service_calls.fetch_add(1, Ordering::SeqCst);
+                        let response: reqwest::Response = http::Response::builder()
+                            .status(200)
+                            .body(if streaming {
+                                stream_body("done")
+                            } else {
+                                response_body("done")
+                            })
+                            .unwrap()
+                            .into();
+                        Ok::<_, OpenAIError>(response)
+                    }
+                },
+            ));
+            match ModelRuntime::request_once(&client, offline_request(streaming))
+                .await
+                .unwrap()
+            {
+                ModelResponse::Completed(response) => {
+                    assert_eq!(response.choices[0].message.content.as_deref(), Some("done"));
+                }
+                ModelResponse::Streaming(mut stream) => {
+                    assert_eq!(
+                        stream.next().await.unwrap().unwrap().choices[0]
+                            .delta
+                            .content
+                            .as_deref(),
+                        Some("done")
+                    );
+                    assert_eq!(
+                        stream.next().await.unwrap().unwrap().choices[0].finish_reason,
+                        Some(async_openai::types::chat::FinishReason::Stop)
+                    );
+                    assert!(stream.next().await.is_none());
+                }
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[tokio::test]
@@ -346,9 +435,7 @@ class Demo(ModelHook):
             .await
             .with_plugins(manager.clone());
         let calls = Arc::new(AtomicUsize::new(0));
-        let native = serde_json::json!({"id":"native","object":"chat.completion","created":0,
-            "model":"offline-model","choices":[{"index":0,"message":{"role":"assistant","content":"native"},
-            "finish_reason":"stop"}]}).to_string();
+        let native = response_body("native");
         let runtime = ModelRuntime::with_client(fake_client(200, native, calls.clone()))
             .with_plugins(manager);
         let events = runtime.watch().await.unwrap();
@@ -501,15 +588,9 @@ class Demo(ModelHook):
                         let (status, body) = if attempt < failures {
                             (status, error_body("rate_limit_error"))
                         } else if stream {
-                            (200, "data: {\"id\":\"offline\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"offline\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n".to_string())
+                            (200, stream_body("done"))
                         } else {
-                            (200, serde_json::json!({
-                                "id": "offline", "object": "chat.completion", "created": 0,
-                                "model": "offline", "choices": [{
-                                    "index": 0, "message": {"role": "assistant", "content": "done"},
-                                    "finish_reason": "stop"
-                                }]
-                            }).to_string())
+                            (200, response_body("done"))
                         };
                         let response: reqwest::Response = http::Response::builder()
                             .status(status)

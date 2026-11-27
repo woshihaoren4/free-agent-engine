@@ -15,13 +15,23 @@
    - `im:message.group_at_msg:readonly`
    - `im:message:send_as_bot`
    - `im:message.reactions:write_only`
+   - `im:resource`（下载输入消息中的图片）
    - `cardkit:card:write`
 4. 准备应用的 `app_id`、`app_secret` 及租户 `tenant_key`。
 5. 群聊接入时将机器人加入群聊，使用飞书真实的 @机器人 mention。
 
 身份使用发送者的飞书 `open_id`，不需要 `contact:user.employee_id:readonly` 权限。
 消息缺少 `open_id` 时会报错，不会回退到员工 `user_id`、`union_id` 或 `master`。
-网关忽略其他租户、机器人和不支持的聊天类型；目前只支持文本输入。
+网关忽略其他租户、机器人和不支持的聊天类型；支持文本、富文本 `post`、卡片
+`interactive` 和图片 `image` 输入。富文本保留标题、段落、链接及 @用户；
+卡片提取可见文字、按钮链接、嵌套布局中的图片，兼容 JSON 1.0/2.0 和消息 API
+返回的简化结构。配置和按钮回调数据不会作为正文提交。
+文字中的 Markdown 保留格式，Markdown 图片提取为独立图片资源并保留替代文字。
+飞书图片使用当前消息的资源下载接口取回，以图片输入提交给 Agent；公网图片 URL
+直接作为图片资源提交。单条消息最多 20 张不同图片，单张下载最多 4 MiB，
+图片编码后的总大小与正文合计最多 6 MiB。图片下载或格式校验失败会提示错误。
+仅有模板 ID 或卡片 ID、没有展开正文的卡片无法提取内容；未知组件只读取已知可见字段。
+图片理解需要所配置的模型支持图片输入。
 JSON 2.0 卡片需要飞书客户端 7.20 或更新版本。
 
 ## 2. 初始化与首次启动

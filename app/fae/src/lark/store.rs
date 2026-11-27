@@ -40,6 +40,8 @@ pub struct Record {
     #[serde(default)]
     pub message_metadata: super::hook::MessageMetadata,
     pub text: String,
+    #[serde(default)]
+    pub images: Vec<super::content::Image>,
     pub rejection: Option<String>,
     pub state: State,
     pub reaction_id: Option<String>,
@@ -133,6 +135,7 @@ mod tests {
             "thread_create_attempt",
             "thread_reply_message_id",
             "reply_anchor_message_id",
+            "images",
         ] {
             old.as_object_mut().unwrap().remove(field);
         }
@@ -150,6 +153,7 @@ mod tests {
                 .session_mapping_version,
             1
         );
+        assert!(Store::open(&home, 7).unwrap().get(&id).images.is_empty());
         old["session_id"] = "omt_fake".into();
         std::fs::write(path, serde_json::to_vec(&old).unwrap()).unwrap();
         assert!(Store::open(&home, 7).is_err());
@@ -214,6 +218,7 @@ impl Record {
             message_id,
             message_metadata: Default::default(),
             text,
+            images: Vec::new(),
             rejection,
             state: State::Received,
             reaction_id: None,

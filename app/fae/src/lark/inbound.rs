@@ -42,33 +42,57 @@ pub fn parse(
     };
     let mut rejection = None;
     let mut text = String::new();
+    let mut images = Vec::new();
     if !config.allows_user(user) {
         rejection = Some("权限不足".into());
     } else if user.is_empty() {
         rejection = Some("无法识别飞书用户，消息缺少发送者 open_id".into());
-    } else if message.message_type != "text" {
-        rejection = Some("目前只支持文本消息".into());
     } else {
-        text = serde_json::from_str::<serde_json::Value>(&message.content)?["text"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        for mention in &message.mentions {
-            if mention.key.is_empty() {
-                continue;
+        match serde_json::from_str::<serde_json::Value>(&message.content)
+            .map_err(anyhow::Error::from)
+            .and_then(|value| super::content::Body::parse(&message.message_type, &value, bot))
+        {
+            Ok(body) => {
+                text = body.text;
+                images = body.images;
             }
-            text = text.replace(
-                &mention.key,
-                &if mention.open_id() == Some(bot) {
-                    String::new()
-                } else {
-                    format!("@{}", mention.name)
-                },
-            );
+            Err(error) => rejection = Some(format!("无法读取消息内容：{error}")),
+        }
+        for mention in &message.mentions {
+            let name = if mention.open_id() == Some(bot) {
+                String::new()
+            } else {
+                format!("@{}", mention.name)
+            };
+            if message.message_type != "text" {
+                for id in [
+                    Some(mention.key.as_str()),
+                    mention.open_id(),
+                    mention.user_id(),
+                    mention.union_id(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|id| !id.is_empty())
+                {
+                    // Cards use inline <at> markup; posts may use either the ID or event placeholder.
+                    for markup in [
+                        format!("<at id={id}></at>"),
+                        format!("<at id=\"{id}\"></at>"),
+                        format!("<at user_id=\"{id}\"></at>"),
+                        format!("@{id}"),
+                    ] {
+                        text = text.replace(&markup, &name);
+                    }
+                }
+            }
+            if !mention.key.is_empty() {
+                text = text.replace(&mention.key, &name);
+            }
         }
         text = text.trim().to_owned();
-        if text.is_empty() {
-            rejection = Some("请输入需要 Agent 处理的文本".into());
+        if rejection.is_none() && text.is_empty() && images.is_empty() {
+            rejection = Some("请输入需要 Agent 处理的文字或图片".into());
         }
     }
     let id = receipt_id(&config.app_id, &config.tenant_key, &message.message_id);
@@ -83,6 +107,7 @@ pub fn parse(
         text,
         rejection,
     );
+    record.images = images;
     record.root_id = message.root_id.clone();
     record.parent_id = message.parent_id.clone();
     record.message_metadata = super::hook::MessageMetadata {
@@ -115,6 +140,103 @@ pub fn parse(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn rich_input_and_image_only_messages_survive_receipt_serialization() {
+        let config: Config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+        }))
+        .unwrap();
+        for (kind, content, text) in [
+            (
+                "post",
+                json!({"content":[[{"tag":"at","user_id":"ou_bot"},
+                {"tag":"text","text":"看图"},{"tag":"img","image_key":"img_one"}]]}),
+                "看图",
+            ),
+            (
+                "interactive",
+                json!({"body":{"elements":[{"tag":"markdown","content":"看图"},
+                {"tag":"img","img_key":"img_one"}]}}),
+                "看图",
+            ),
+            ("image", json!({"image_key":"img_one"}), ""),
+        ] {
+            let event = serde_json::from_value(json!({
+                "sender":{"sender_id":{"open_id":"ou_a"},"sender_type":"user","tenant_key":"tenant"},
+                "message":{"message_id":"om_input","chat_id":"chat","chat_type":"group",
+                    "message_type":kind,"content":content.to_string(),
+                    "mentions":[{"key":"@_user_1","id":{"open_id":"ou_bot"},"name":"Bot"}]}
+            })).unwrap();
+            let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+            assert_eq!(record.text, text);
+            assert!(record.rejection.is_none());
+            let saved: Record =
+                serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+            assert_eq!(
+                saved.images,
+                vec![super::super::content::Image::Feishu {
+                    key: "img_one".into()
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_unexpanded_content_gets_an_explicit_rejection() {
+        let config: Config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+        }))
+        .unwrap();
+        for content in [
+            "invalid json",
+            "{\"type\":\"template\",\"data\":{\"template_id\":\"id\"}}",
+        ] {
+            let event = serde_json::from_value(json!({
+                "sender":{"sender_id":{"open_id":"ou_a"},"sender_type":"user","tenant_key":"tenant"},
+                "message":{"message_id":"om_input","chat_id":"chat","chat_type":"p2p",
+                    "message_type":"interactive","content":content}
+            })).unwrap();
+            assert!(
+                parse(&config, "ou_bot", event)
+                    .unwrap()
+                    .unwrap()
+                    .rejection
+                    .is_some()
+            );
+        }
+    }
+    #[test]
+    fn rich_mentions_use_event_names_and_remove_bot_placeholders() {
+        let config: Config = serde_json::from_value(json!({
+            "version":1,"app_id":"app","app_secret":"secret","tenant_key":"tenant","agent_id":"fae"
+        }))
+        .unwrap();
+        for (kind, content) in [
+            (
+                "post",
+                json!({"content":[[
+                    {"tag":"at","user_id":"@_user_1"},{"tag":"text","text":"请联系 "},
+                    {"tag":"at","user_id":"ou_alice"}
+                ]]}),
+            ),
+            (
+                "interactive",
+                json!({"elements":[{"tag":"markdown",
+                "content":"<at id=ou_bot></at>请联系 <at id=\"ou_alice\"></at>"}]}),
+            ),
+        ] {
+            let event = serde_json::from_value(json!({
+                "sender":{"sender_id":{"open_id":"ou_user"},"sender_type":"user","tenant_key":"tenant"},
+                "message":{"message_id":"om_input","chat_id":"chat","chat_type":"group",
+                    "message_type":kind,"content":content.to_string(),"mentions":[
+                        {"key":"@_user_1","id":{"open_id":"ou_bot"},"name":"Bot"},
+                        {"key":"@_user_2","id":{"open_id":"ou_alice"},"name":"Alice"}
+                    ]}
+            })).unwrap();
+            let record = parse(&config, "ou_bot", event).unwrap().unwrap();
+            assert_eq!(record.text, "请联系 @Alice");
+        }
+    }
     #[test]
     fn retains_event_metadata_separately_from_normalized_query() {
         let config: Config = serde_json::from_value(json!({

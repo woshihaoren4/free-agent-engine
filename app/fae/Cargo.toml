@@ -27,6 +27,7 @@ wd_tools = { workspace = true }
 larksuite-oapi-sdk-rs = { version = "=0.3.13", features = ["ws"] }
 sha2 = "0.10"
 http = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = "0.15"

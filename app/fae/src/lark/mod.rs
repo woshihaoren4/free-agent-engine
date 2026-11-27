@@ -1,4 +1,5 @@
 mod card;
+mod content;
 pub mod config;
 pub mod hook;
 pub mod identity;
