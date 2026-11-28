@@ -35,13 +35,14 @@ fae workflow <workflow-id> --interactive --input '{"key":"value"}'
 - `<workflow-id>.json` 的文件名和文件内 `id` 必须与命令参数相同。
 - ID 必须是单个非空路径组件，不能包含目录。
 - `FAE_HOST` 支持 `~` 和 `~/...`。
-- `--input` 必须是合法 JSON 值；`@path` 表示从文件读取 JSON。
+- `--input` 必须是合法 JSON 值，缺省为 `{}`；`@path` 表示从文件读取 JSON。
 - `--interactive` 默认关闭；开启后进入 TUI 并实时展示执行事件。
 - 配置在执行前反序列化并完成整图校验。
 
 每次 CLI 调用创建新 Session，再通过标准 execution/start 启动图。
 公共 Session 创建、查询和订阅本身不执行 Workflow；start 忙时返回冲突。
-主服务与客户端只支持公共协议 v4，应一起升级。
+CLI 使用 `/api/0.1.0/session` 上的公共协议 `0.1.0`。直接集成时，创建会话用
+`plan: {"plan_id":"workflow"}` 和 `payload.workflow_id`；启动时用一个 JSON 内容块传入图输入。
 Execution 准备时固定 Workflow、引用 Agent、内容指纹、工作区与插件快照；
 当前图的子流程和 Runtime 继续使用该快照，下一次执行重新加载。
 全局 `--workspace` 指定执行目录，默认传当前目录；它不构成文件系统沙箱。
@@ -311,9 +312,10 @@ Agent 最终文本是节点输出。模型、工具、Skill 和 MCP 事件会进
 
 执行环境约定：
 
-- 系统必须能运行 `python3`。
+- 后台服务环境必须能从 `PATH` 运行 `python3`；工作目录为本次执行的 workspace。
 - `arguments` 是传给脚本的 JSON 值。
-- 脚本必须给变量 `result` 赋一个可 JSON 序列化的值。
+- 将可 JSON 序列化的结果赋给 `result`；不赋值返回 `null`。不要向 stdout 输出调试文本，
+  因为宿主将完整 stdout 解析为一个 JSON 值。
 - `task_type` 可省略，默认是 `workflow.python`。
 
 ### Session
@@ -381,8 +383,8 @@ Delete 仅删除指定历史文件，不等同于 TUI 的会话清理或归档�
 }
 ```
 
-`request` 也可以直接是字符串。节点输出是模型返回的压缩文本。模型读取
-`FAE_DEFAULT_MODEL`，未设置时使用 `gpt-4o-mini`。
+`request` 也可以直接是字符串。节点输出是模型返回的压缩文本；对象可用 `model` 指定模型，
+未指定时读取 `FAE_DEFAULT_MODEL`，再回退到 `gpt-4o-mini`。
 
 其他自定义 runtime：
 
@@ -396,9 +398,10 @@ Delete 仅删除指定历史文件，不等同于 TUI 的会话清理或归档�
 }
 ```
 
-除内置的 `workflow.compression` 外，`custom` 不会自动执行。只有宿主已经注册完全匹配
-`task_type` 的 runtime 时才能使用。标准 `fae` CLI 不会为项目自定义 task type 自动注册
-runtime。
+除内置的 `workflow.compression` 外，`custom` 需要宿主注册匹配 `task_type` 的 Runtime，
+接收 Rust `WorkflowActionRequest` 并返回 `WorkflowActionResponse`。声明同名 `task_types` 的
+Python Runtime 插件接收 JSON `Value`，当前不会自动桥接这一原生节点契约。
+单纯在图中执行 Python 代码时，使用上面的 `python` action。
 
 ## 6. 值模板
 

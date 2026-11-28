@@ -182,6 +182,7 @@ fae --fae-home /path/to/fae-home lark stop
 | `fae lark start --foreground` | 前台运行，用于直接观察日志；不可与已有网关并行启动 |
 | `fae lark status` | 查看状态，不启动网关 |
 | `fae lark stop` | 停止网关，保留共享主服务 |
+| `fae restart` | 校验配置后按依赖顺序重启主服务及已配置的网关；会中断正在运行的执行 |
 | `fae lark whitelist add <open_id>...` | 添加用户并去重，保存配置并热更新白名单 |
 | `fae lark whitelist remove <open_id>...` | 从受限白名单中删除用户，保存配置并热更新 |
 | `fae lark whitelist set [open_id...]` | 替换白名单；不传用户表示拒绝所有用户 |
@@ -270,6 +271,7 @@ fae server stop
 话题内的后续输入使用 `Typing` reaction，最终回复投递后移除。
 网关按 Invocation 与响应区分模型分支，最终回复保留对应输出。插件 Content
 作为独立通知去重，成功或取消不会覆盖已经产生的插件通知。
+模型答案在执行结束后生成最终卡片，不在飞书卡片上逐 token 更新。
 长回复分页；错误带 `ERROR`；卡片发送失败时可降级为文本并提示。
 
 ## 7. 状态、日志与排错
@@ -301,16 +303,14 @@ fae server show
 | `runtime.ready=false` 或启动超时 | 检查主服务状态、长连接和后台日志；前台运行可观察具体错误 |
 | 当前执行数已达上限 | 等待后重试，或在允许范围内调整并发数并重启 |
 | `undelivered` 非零或卡片降级 | 检查发送、reaction、CardKit 权限及网络，结合 `last_error` 和日志判断 |
-| `unsupported_version` | 升级后重启旧主服务；若旧协议无法处理停止命令，核实 PID 后再处理旧进程 |
+| 握手失败或版本不匹配 | 确认网关和主服务来自同一版本、使用同一 home，再重启对应进程 |
 
 网关保留未投递结果并在恢复后重试投递。主服务重启、提交状态不确定或事件重放缺口时，
 不会盲目重跑已可能产生副作用的工具；先检查记录与实际结果，再决定是否重新提交任务。
 接收记录保留期和空闲 actor 回收不会清除持久化话题绑定。
 工作区和会话隔离不构成文件系统沙箱，实际访问能力仍由 Agent 工具与运行环境决定。
 
-主服务与网关必须同时升级到公共协议 v4。网关在宿主认证后使用标准
-session/create/get/subscribe 和 execution/start/steer/stop/get；逻辑身份为
-`(open_id, session_id)`，目标与旧历史分区另行解析。外部消息自动补充由网关
-显式选择 steer，公共 start 忙时返回冲突。stop 检查预期 execution_id，
-结束事件在子调用、插件流及 Worker 资源完成清理后发布。
-持久接收文件中的旧 round_id 保留读取兼容，不表示协议仍支持旧路由。
+网关以专用凭据和飞书主体通过回环地址连接 `/api/0.1.0/lark/session`。
+公共信封使用 `api_version: "0.1.0"`；网关调用标准会话及执行操作。
+逻辑身份为 `(open_id, session_id)`。外部消息自动补充由网关显式选择 `steer`；
+公共 `start` 忙时返回冲突。`stop` 检查预期 `execution_id`，结束事件在子调用和插件资源清理后发布。

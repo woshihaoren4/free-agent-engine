@@ -1,6 +1,6 @@
 ---
 name: fae-workflow
-description: Creates and runs FAE workflows from JSON configuration. Invoke when defining workflow nodes, actions, conditions, templates, nesting, loading, or troubleshooting.
+description: Creates and runs FAE workflows from JSON. Use for fae workflow, nodes, actions, conditions, templates, parallel branches, nested workflows, or troubleshooting.
 ---
 
 # FAE Workflow
@@ -25,11 +25,11 @@ description: Creates and runs FAE workflows from JSON configuration. Invoke when
 ## 标准流程
 
 1. 明确 workflow 的输入 JSON、最终输出和可能产生的副作用。
-2. 选择最简单的图：串行优先；只有独立任务才并行；重试才使用 `loop`。
+2. 选择最简单的图：串行优先；只有独立任务才并行；重复步骤使用有界 `loop`。
 3. 创建 `${FAE_HOST:-~/.fae}/workflows/<workflow-id>.json`。
 4. 使用 `{$input...}` 和 `{$node_id...}` 在节点间传值，并显式配置 end `output`。
 5. 先用 `jq empty <file>` 检查 JSON 语法，再运行 workflow 触发完整图校验。
-6. 用内联 JSON 或 `@input.json` 执行。默认使用非交互模式并将最终 JSON 写入 stdout：
+6. 用内联 JSON 或 `@input.json` 执行。省略输入时为 `{}`。默认使用非交互模式并将最终 JSON 写入 stdout：
 
 ```bash
 fae workflow <workflow-id> --input '{"key":"value"}'

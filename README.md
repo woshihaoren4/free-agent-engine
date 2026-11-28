@@ -55,8 +55,10 @@ stop 检查 execution ID 并等待子调用和插件资源清理。多个客户�
 Engine 保留原生泛型执行接口，通过独立的 EngineAdapters/BridgeRegistry 接入 JSON。
 Plan 使用全局唯一 ID；Runtime 声明 ID 和 TaskType，由 EngineRuntime 统一调度。
 一次执行固定一个 Engine 代际，插件重载先构建并校验完整代际，再原子发布。
-见 [Plan/Runtime 使用说明](docs/faeplan/fae-plan-runtime-plugin-implementation.md)
-与 [可运行示例](examples/plugin/plan_runtime/)。
+见 [插件实现说明](docs/faeplan/plugins.md) 与 [可运行示例](examples/plugin/plan_runtime/)。
+服务、会话协议、Prompt、飞书网关与定时器见 [FAE 实现文档](docs/faeplan/README.md)。
+配置与排错配方见 [Agent Skill](docs/skills/fae-agent/SKILL.md) 和
+[Workflow Skill](docs/skills/fae-workflow/SKILL.md)。仓库安装脚本会分发两个 Skill 及其参考文件。
 
 ## 快速开始
 

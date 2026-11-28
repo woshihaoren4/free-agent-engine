@@ -164,6 +164,10 @@ todo 模式要求 Agent 配置的 `tools` 包含 `todo`。
 
 ## 6. 添加或删除 Skill
 
+使用仓库提供的 `fae-agent`、`fae-workflow` Skill 时，保留完整目录及 `references/`。
+仓库安装脚本会复制这些文件。手工部署可以将目录复制到 `<FAE_HOST>/skills/`，再按名称配置；
+也可直接在配置中使用仓库内 `SKILL.md` 的绝对路径。已有 Agent 需手动更新 `skills`。
+
 按名称添加：
 
 ```json
@@ -194,14 +198,16 @@ todo 模式要求 Agent 配置的 `tools` 包含 `todo`。
 }
 ```
 
-修改后运行：
+保留 `read_file`、`execute_command` 或 `execute_python` 之一供 Agent 读取 Skill。
+修改后验证正文和引用都能读取：
 
 ```bash
-fae agent --agent-id reviewer "List the skills available to you."
+fae agent --agent-id reviewer "Read the fae-agent skill and its Lark gateway reference; report the command that checks credentials."
 ```
 
-若按名称加载失败，确认 Skill 位于
-`${FAE_HOST:-~/.fae}/skills/<skill-name>/SKILL.md`。删除 Skill 时同时删除 config 中对应项。
+若按名称加载失败，先确认 `${FAE_HOST:-~/.fae}/skills/<skill-name>/SKILL.md`；
+此文件不存在时还会检查 `$HOME/.agents/skills/<skill-name>/SKILL.md`。删除 Skill 时同时删除
+config 中对应项。
 
 ## 7. 添加 MCP
 

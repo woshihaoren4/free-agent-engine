@@ -47,7 +47,6 @@ lerna-debug.log*
 examples/test_workspace
 examples/main
 
-/docs/faeplan/
 /docs/plugins/*
 
 .idea

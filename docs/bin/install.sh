@@ -70,6 +70,7 @@ agents_dir="${fae_host}/agents"
 skill_files=(
   "fae-agent/SKILL.md"
   "fae-agent/references/agent-api.md"
+  "fae-agent/references/lark-gateway.md"
   "fae-agent/references/recipes.md"
   "fae-workflow/SKILL.md"
   "fae-workflow/references/recipes.md"

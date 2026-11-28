@@ -1,6 +1,6 @@
 ---
 name: fae-agent
-description: Configures, runs, and troubleshoots FAE agents and the Lark gateway. Use for agent initialization, prompts, models, tools, skills, MCP, sessions, or Feishu(lark) gateway setup and operations.
+description: Configures and runs FAE agents and the Feishu gateway. Use for fae init, models, prompts, tools, timers, skills, MCP, sessions, or fae lark setup and troubleshooting.
 ---
 
 # FAE Agent
@@ -34,7 +34,8 @@ fae init --agent-id reviewer --model gpt-5
 ```
 
 3. 编辑 `${FAE_HOST:-~/.fae}/agents/reviewer_config.json`，只保留 Agent 实际需要的 Tool、
-   Skill 和 MCP。
+   Skill 和 MCP。配置 Skill 时保留 `read_file`、`execute_command` 或 `execute_python`，
+   用于读取 Skill 正文及其引用。
 4. 创建或修改 `${FAE_HOST:-~/.fae}/agents/reviewer_prompt.txt`，写清角色、边界、工作步骤和
    输出要求。
 5. 使用 `fae agent` 启动并验证：
@@ -71,7 +72,7 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
 `fae init`：
 
 - 创建 Agent config 及所需的 home 子目录。
-- 启用全部内置工具。
+- 启用默认内置工具；`agent` 和 `workflow` 由资源列表单独挂载。
 - 收集当前 `<FAE_HOST>/skills/*/SKILL.md` 对应的已安装 Skill。
 - 已有 config 默认不会覆盖；使用 `--force` 才会替换。
 - 不创建也不覆盖 prompt。自定义 Agent 必须准备对应的 prompt 文件。
@@ -110,10 +111,9 @@ Agent ID 必须是单个非空路径组件。配置中的 `agent.name` 必须与
 }
 ```
 
-Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某一次用户请求。运行时会将其包装为
-`<setting>`，并追加 `<skills>`、`<mcp>`、`<sub_agent>` 和 `<workflow>`。如果当前用户存在
-长期记忆，运行时会在加载 History 前以 `<UserMemory>` 标签加入 prompt。需要自定义区段时，在
-`prompt_sections` 中配置英文 `tag` 与 `text`。
+Prompt 文件保存长期指令，运行时包装为 `<setting>`；模型请求还可包含能力目录、`<runtime>`、
+`<Workspace>` 和 `<UserMemory>`。会话历史作为独立消息进入请求。需要自定义区段时，在
+`prompt_sections` 中配置小写英文 `tag` 与 `text`；冲突时按区段的 `priority` 判断。
 
 ## 修改策略
 
@@ -125,6 +125,7 @@ Prompt 文件只保存纯文本 system prompt，不使用 JSON，也不写入某
 - 增减内置工具：修改 `tools`，使用实际注册的工具名。
 - 允许 Agent 维护当前用户长期记忆：在 `tools` 中保留 `memory_update`。
 - 允许 Agent 跟踪当前运行中的任务进度：在 `tools` 中保留 `todo`。
+- 允许 Agent 创建 Cron 定时任务：在 `tools` 中保留 `timer`；每次触发启动新会话。
 - 允许 Agent 联网搜索：在 `tools` 中保留 `volcengine_search`，主服务需设置环境变量
   `ARK_WEB_SEARCH_APIKEY`。
 - 增减 Skill：修改 `skills`，按名称或路径配置。

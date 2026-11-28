@@ -4,4 +4,10 @@ prompt/assistant.txt
 prompt/aitest.txt
 skills/weather/SKILL.md
 skills/drawio-skill.zip
-skills/fae/SKILL.md
+skills/fae-agent/SKILL.md
+skills/fae-agent/references/agent-api.md
+skills/fae-agent/references/lark-gateway.md
+skills/fae-agent/references/recipes.md
+skills/fae-workflow/SKILL.md
+skills/fae-workflow/references/recipes.md
+skills/fae-workflow/references/workflow-api.md

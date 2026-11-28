@@ -4,7 +4,7 @@ FAE Agent Engine 的类型化 Python 插件 SDK，支持 Plan、Runtime，以及
 以及执行上下文读取、Session 输出和子调用。
 
 需要 Python 3.10 或更新版本。SDK 的发行版本与插件 API 版本分别管理；
-SDK 版本为 `0.3.0`；Plan/Runtime 声明插件 API `0.3.0`，
+SDK 版本为 `0.4.0`；Plan/Runtime 声明插件 API `0.3.0`，
 既有 Hook 声明 `0.2.0`。传输协议固定为 `api_version: "0.1.0"`，
 需要对应版本的 FAE 宿主。
 
@@ -91,7 +91,7 @@ fae agent --agent-id fae
 ## 示例与源码
 
 Plan/Runtime 示例见 [plan_runtime](../../examples/plugin/plan_runtime/README.md)；
-协议、原生类型桥接和生命周期见 [实现说明](../../docs/faeplan/fae-plan-runtime-plugin-implementation.md)。
+协议、原生类型桥接和生命周期见 [插件实现说明](../../docs/faeplan/plugins.md)。
 
 完整示例见 [插件示例](https://github.com/woshihaoren4/free-agent-engine/tree/v2-plugins/examples/plugin)
 和 [SDK 示例](https://github.com/woshihaoren4/free-agent-engine/tree/v2-plugins/python/fae-plugin-py/examples)。

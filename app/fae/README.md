@@ -9,7 +9,7 @@ The public envelope uses `api_version: "0.1.0"` and `event`, with raw business
 business value directly in `payload`. Worker bindings are accepted only on the
 authenticated internal worker transport. Plan/Runtime plugins use API `0.3.0`;
 existing Hook plugins use `0.2.0`. See the
-[provider guide](../../docs/faeplan/fae-plan-runtime-plugin-implementation.md).
+[plugin guide](../../docs/faeplan/plugins.md).
 
 ## Background service
 
@@ -89,7 +89,9 @@ The implementation is split into `src/app` (CLI and transport), `src/server`
 (host operations and subscriptions), `src/protocol` (transport settings) and `src/tui`
 (terminal presentation).
 
-Shared wire types live in `fae-agent::protocol`; only v4 is supported.
+Shared wire types live in `fae-agent::protocol`; only `0.1.0` is supported.
+See the [service and session reference](../../docs/faeplan/service-and-session.md)
+for routes and request fields.
 Create/get/subscribe do not start work, including Workflows. Start creates a new
 Execution and returns a conflict while busy. Steer acknowledges acceptance;
 execution/get exposes Queued/Applied/NotApplied input records. Stop checks the
@@ -98,7 +100,7 @@ plugin calls. The Engine coordinator owns ContextData and reusable results.
 Idle configuration changes, conversation clearing and archiving use standard
 Session operations; archived sessions remain readable. Workspace paths use the
 existing JSON files, and history remains in the existing target/user/session
-partition. Update the service, clients and Python SDK together (plugin API 0.2.0).
+partition.
 
 ## Feishu gateway
 
@@ -176,14 +178,15 @@ Enable bot capability, publish the application, select long-connection delivery
 and subscribe to `im.message.receive_v1`. Grant
 `im:message.p2p_msg:readonly`, `im:message.group_at_msg:readonly`,
 `im:message:send_as_bot`, `im:message.reactions:write_only`,
-`cardkit:card:write`.
+and `cardkit:card:write`. Grant `im:resource` to download images attached to incoming messages.
 The sender's Feishu `open_id` is used as the Agent `user_id`; the user ID
 permission `contact:user.employee_id:readonly` is not required for this identity.
 Missing open IDs produce an error instead of falling back to user ID, union ID
 or master. Switching from the previous user ID identity creates separate
 session histories, todo state and user memory; existing data is not migrated.
 Add the bot to the group and @ it; messages from other tenants and bots are ignored.
-Only text input is supported. Card JSON 2.0 needs Feishu client 7.20 or newer.
+The gateway accepts text, rich posts, supported card content and images.
+Card JSON 2.0 output needs Feishu client 7.20 or newer.
 
 The conversation's main Agent receives a `LarkEnvironment` prompt section,
 separate from the user query. It describes the application, tenant, sender
@@ -244,10 +247,10 @@ deadline; records that remain undelivered are retried on the next start.
 The gateway has a private loopback control socket and instance handshake.
 Its start/stop lock is `lark/lark.lock`; `lark/gateway.lock` protects the running
 process.
-Its service credential (`lark/lark.token`) only opens `/v4/lark/session` and cannot
+Its service credential (`lark/lark.token`) only opens `/api/0.1.0/lark/session` and cannot
 initialize agents or stop the service. Session operations are constrained by the
-authenticated Lark binding. Wire protocol v4
-requires restarting previously running services after upgrading.
+authenticated Lark binding. See the [gateway reference](../../docs/faeplan/lark.md)
+for message and recovery behavior.
 
 For live acceptance, test private chat and @bot group chat, a response containing
 both text and tool calls, a failed Agent round, duplicate message delivery,
@@ -447,9 +450,10 @@ the default resolver uses `ContextScope.timer_execution`, inherited by task
 contexts and rebound for child agents. Call `exit()` on the host runtime
 when shutting down; client engine exit does not stop the shared scheduler.
 
-The prompt file is wrapped in `<setting>`. Resolved capabilities are appended
-before history as `<skills>`, `<mcp>`, `<sub_agent>`, and `<workflow>` sections.
-Add arbitrary English-tagged sections through `prompt_sections`:
+The prompt file is wrapped in `<setting>`. The system message can also contain
+capability catalogs, runtime facts, workspace files and user memory. History
+is passed as separate messages. See the [prompt reference](../../docs/faeplan/prompt.md)
+for section priorities. Add custom sections with lowercase English tags through `prompt_sections`:
 
 ```json
 {
@@ -488,7 +492,7 @@ cargo run -p fae -- agent --agent-id fae-coding "你好"
 ```
 
 Use `--workspace` to select the project workspace; it defaults to the current
-directory. Before each single-agent model request, `fae` loads any existing
+directory. When assembling the system message for an agent execution, `fae` loads any existing
 `.fae/workspace.md`, `.fae/rules.md`, `.fae/agents.md`, and `.fae/project.md`
 files from that workspace and appends them to the system prompt:
 

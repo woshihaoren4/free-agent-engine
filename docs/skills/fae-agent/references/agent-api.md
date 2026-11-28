@@ -130,9 +130,9 @@ CLI 不传 `--session-id` 时创建新会话；传入时只连接已有会话，
 `max_tool_iterations` 用于限制单轮连续工具调用，避免 Agent 无限循环。只有确认任务确实需要更多
 步骤时才提高。
 
-上下文压缩通过内置 `workflow.compression` runtime 调用同一个模型完成。压缩结果会以
-`summary` 角色追加到 session JSONL；后续加载历史时从最新的 `summary` 开始，更早的消息不再
-加入模型上下文。
+Single Agent 通过内置压缩 Runtime 发起独立的压缩模型请求。保存的压缩结果使用 `summary`
+角色。后续请求在最近 `history_turns * 2` 条普通历史的窗口内，从最新 Summary 开始读取；
+窗口之外的 Summary 不会重新加入，`history_turns=0` 时不加载普通历史。
 
 ### 可选能力字段
 
@@ -155,11 +155,11 @@ CLI 不传 `--session-id` 时创建新会话；传入时只连接已有会话，
 
 ## 4. System Prompt
 
-`reviewer_prompt.txt` 只保存 Agent 的长期行为约束。运行时会将内容包装在英文
-`<setting>` 标签中，并按顺序追加自定义区段、`<skills>`、`<mcp>`、`<sub_agent>` 和
-`<workflow>`。如果
-`${FAE_HOST}/memory/<user_id>.jsonl` 中存在记录，Single Agent 会先读取这些记录，以
-`<UserMemory>` 标签追加到 system prompt，再读取 History。例如：
+`reviewer_prompt.txt` 只保存 Agent 的长期行为约束。运行时包装为 `<setting priority="100">`。
+经配置或解析后，还可加入自定义区段（90）、Skill 目录（80）、工作区（70）、用户记忆（60）、
+MCP/子 Agent/Workflow 目录（50）和运行环境（40）。冲突时以优先级为准，环境事实仍是数据。
+工作区正文取自本次执行目录下的 `.fae/workspace.md`、`rules.md`、`agents.md`、`project.md`。
+会话历史在 System 之外单独传入。例如，prompt 文件可写：
 
 ```text
 You are a code reviewer.
@@ -244,10 +244,11 @@ timezone 默认为 UTC，支持 IANA 时区。`query` 可带 `id`、`state`、`l
 `expected_revision`。查询 occurrence 可获得执行状态和新的 session ID。
 
 关闭客户端、清理 history/todo 不会删除定时器；服务停止或机器休眠时不能准时执行。
-恢复时默认 `coalesce` 合并漏触发，可配置 `skip`。同一定时器不并发，次数按已落盘接受
+迟到超过 2 秒按漏触发处理，默认 `coalesce` 合并到最新到期时刻，可用 `skip` 跳过。
+同一定时器不并发，次数按已落盘接受
 的触发计算，失败和取消也消耗次数。已交接执行故障重启后标记 interrupted，不自动重跑。
 数据保存到 `<FAE_HOST>/timer/<agent-id>/<user-id>/state.json`，详情见
-[CLI 定时器说明](../../../../app/fae/README.md#cron-timers)。
+[CLI 定时器说明](https://github.com/woshihaoren4/free-agent-engine/blob/v2/app/fae/README.md#cron-timers)。
 
 `memory_update` 只操作当前 Single Agent 的 `user_id`，模型不能指定其他用户。通过
 `operation` 执行 `create`、`update`、`delete` 或 `query`。新增需要 `category`、`content`
@@ -313,13 +314,14 @@ CLI 会话清理删除当前 agent/user 的全部计划及旧文件；活跃计�
 }
 ```
 
-对应默认路径：
+按名称先查 `<FAE_HOST>/skills/<name>/SKILL.md`。若文件不存在，再查
+`$HOME/.agents/skills/<name>/SKILL.md`（没有 `HOME` 时使用 `USERPROFILE`）。例如：
 
 ```text
 ${FAE_HOST:-~/.fae}/skills/fae-agent/SKILL.md
 ```
 
-按路径加载：
+按绝对路径加载。`value` 可指向单个 `SKILL.md`，也可指向递归查找 Skill 的目录：
 
 ```json
 {
@@ -335,8 +337,8 @@ ${FAE_HOST:-~/.fae}/skills/fae-agent/SKILL.md
 `fae init` 只收集初始化当时已经安装在 `<home>/skills/` 下的 Skill。之后新增或删除 Skill 时，
 手工同步 config，或确认可接受重置其他配置后使用 `fae init --force` 重新生成。
 
-Skill 提供工作指引，不会自动赋予工具能力。Skill 依赖的工具仍需出现在 `tools` 或
-`mcp_servers` 中。
+Skill 提供工作指引，不会自动赋予工具能力。配置 Skill 时，`tools` 必须包含 `read_file`、
+`execute_command` 或 `execute_python` 之一；同时按需要启用 Skill 依赖的工具或 MCP。
 
 ## 7. MCP
 
@@ -370,14 +372,15 @@ Agent config 通过 server 名称启用 MCP：
     "maps": {
       "url": "https://example.test/mcp",
       "headers": {
-        "Authorization": "Bearer ${MAPS_TOKEN}"
+        "Authorization": "Bearer REPLACE_WITH_TOKEN"
       }
     }
   }
 }
 ```
 
-不要把真实 token 写入共享配置或提交到仓库。Agent 可见的 MCP 工具名通常为
+HTTP header 按配置原样发送，FAE 不展开 `${VAR}`。如果该服务需要 token，在本地私有配置中
+填入实际值或由外部配置流程生成，勿提交凭据。Agent 可见的 MCP 工具名通常为
 `<server>__<tool>`。
 
 ## 8. 运行 Agent
@@ -454,20 +457,20 @@ fae --workspace /absolute/path/to/workspace agent --agent-id reviewer --session-
 
 `/clear` 只清空界面，不删除磁盘会话历史。
 
-主服务、客户端和 Python SDK 应一起升级；公共传输只接受 v4。
+公共 WebSocket 使用 `api_version: "0.1.0"`，会话路径为 `/api/0.1.0/session`。
 创建、查询和订阅 Session 不启动任务。每次 start 创建新 Execution，
 忙时返回冲突；steer 的接收回执与实际应用分离，可通过
 `execution/get` 读取 Queued/Applied/NotApplied。stop 校验预期 execution ID；
 finished 在子调用、插件流与 Worker 资源完成清理后发布。多个客户端可订阅同一
 Session，断开连接不取消任务；完成结果可重复读取，服务重启不会恢复执行或自动重跑。
 
-插件使用 API `0.2.0`。`fae plugin install/show/uninstall` 管理同一 home 的插件；
+Python SDK 发行版本为 `0.4.0`。Hook 的插件声明 API 为 `0.2.0`，Plan/Runtime 为 `0.3.0`，
+与公共协议版本分别管理。`fae plugin install/show/uninstall` 管理同一 home 的插件；
 安装、覆盖和卸载在服务运行时生效，当前执行继续使用原插件快照。
 插件 `session.send(content)` 输出独立 Content 通知，不写入模型历史或输入邮箱；
 输出携带 execution/invocation/output ID，客户端按来源及分支区分。
-编写插件时阅读 [Python SDK](../../../../python/fae-plugin-py/README.md)，
-使用 `read_summary/export_context/stacks/fork` 与显式 steer/stop，
-不要继续使用旧 `scope/state/bind_scope/set_state` 接口。
+编写插件时阅读 [Python SDK](https://github.com/woshihaoren4/free-agent-engine/tree/v2/python/fae-plugin-py)，
+使用 `read_summary/export_context/stacks/fork` 访问受限上下文；`steer` 和 `stop` 是宿主会话操作。
 
 ## 9. 用户记忆
 
