@@ -1,9 +1,9 @@
 {
-  "version": 4,
-  "session_id": "session-1",
-  "stream_id": "stream-1",
-  "seq": 12,
-  "path": "/event/session/execution/finished",
+  "api_version": "0.1.0",
+  "request_id": null,
+  "session": {"session_id": "session-1", "stream_id": "stream-1", "seq": 12},
+  "plan": null,
+  "event": "/event/session/execution/finished",
   "payload": {
     "execution_id": "execution-1",
     "outcome": {"type": "succeeded", "result": [{"type": "text", "text": "完成"}]}

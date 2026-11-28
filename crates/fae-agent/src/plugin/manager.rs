@@ -45,6 +45,78 @@ pub struct PluginSnapshot {
     pub order: Vec<String>,
 }
 impl PluginSnapshot {
+    /// Validate complete provider topology before publishing a worker snapshot.
+    pub fn validate_providers(&self) -> anyhow::Result<()> {
+        let mut plans = BTreeMap::<String, Option<String>>::new();
+        let mut runtimes =
+            BTreeMap::<String, (String, Vec<crate::TaskType>, Option<RuntimePublicCalls>)>::new();
+        for node in self.nodes.values() {
+            for member in &node.members {
+                for mount in &member.declaration.mounts {
+                    match mount {
+                        PluginMount::Plan {
+                            id, next_plan_id, ..
+                        } => {
+                            anyhow::ensure!(!plans.contains_key(id), "duplicate Plan ID: {id}");
+                            plans.insert(id.clone(), next_plan_id.clone());
+                        }
+                        PluginMount::Runtime {
+                            id,
+                            task_types,
+                            public_calls,
+                            ..
+                        } => {
+                            let mut types = parse_task_types(task_types)?;
+                            types.sort_by_key(|ty| format!("{ty:?}"));
+                            if let Some((owner, previous, calls)) = runtimes.get_mut(id) {
+                                anyhow::ensure!(
+                                    owner == &member.id
+                                        && member.declaration.registration_mode
+                                            == RegistrationMode::Chain,
+                                    "duplicate Runtime ID: {id}"
+                                );
+                                anyhow::ensure!(
+                                    previous == &types,
+                                    "inconsistent Runtime task_types: {id}"
+                                );
+                                if let Some(public) = public_calls {
+                                    if let Some(previous) = calls {
+                                        anyhow::ensure!(
+                                            previous == public,
+                                            "inconsistent Runtime public_calls: {id}"
+                                        );
+                                    } else {
+                                        *calls = Some(public.clone());
+                                    }
+                                }
+                            } else {
+                                runtimes.insert(
+                                    id.clone(),
+                                    (member.id.clone(), types, public_calls.clone()),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for id in plans.keys() {
+            let mut seen = HashSet::new();
+            let mut current = id.as_str();
+            loop {
+                anyhow::ensure!(seen.insert(current), "cyclic Plan chain: {id}");
+                let next = plans
+                    .get(current)
+                    .ok_or_else(|| anyhow::anyhow!("missing next_plan_id: {current}"))?;
+                match next {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn matching(&self, point: &str, location: Option<&str>) -> Vec<Arc<PluginNode>> {
         self.order
             .iter()
@@ -61,12 +133,21 @@ pub struct PluginExecutionBinding {
     pub execution_id: crate::ExecutionId,
 }
 
+type SnapshotFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+pub struct SnapshotPublisher(pub Arc<dyn Fn(Arc<PluginSnapshot>) -> SnapshotFuture + Send + Sync>);
+impl std::fmt::Debug for SnapshotPublisher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SnapshotPublisher")
+    }
+}
 #[derive(Debug)]
 pub struct PluginManager {
     home: PathBuf,
     current: RwLock<Arc<PluginSnapshot>>,
     reload: tokio::sync::Mutex<()>,
     native_tools: RwLock<HashSet<String>>,
+    publisher: RwLock<Option<SnapshotPublisher>>,
 }
 impl PluginManager {
     pub fn new(home: impl Into<PathBuf>) -> Self {
@@ -75,6 +156,7 @@ impl PluginManager {
             current: RwLock::new(Arc::default()),
             reload: tokio::sync::Mutex::new(()),
             native_tools: RwLock::new(HashSet::from(["default".into()])),
+            publisher: RwLock::new(None),
         }
     }
     pub fn snapshot(&self) -> Arc<PluginSnapshot> {
@@ -82,6 +164,22 @@ impl PluginManager {
     }
     pub fn reserve_tool(&self, channel: &str) {
         self.native_tools.write().unwrap().insert(channel.into());
+    }
+    /// The host builds and publishes a complete immutable Engine/adapter pair.
+    /// Failure leaves the current snapshot untouched.
+    pub fn set_snapshot_publisher(
+        &self,
+        publisher: impl Fn(Arc<PluginSnapshot>) -> SnapshotFuture + Send + Sync + 'static,
+    ) {
+        *self.publisher.write().unwrap() = Some(SnapshotPublisher(Arc::new(publisher)));
+    }
+    async fn prepare_publication(&self, snapshot: &Arc<PluginSnapshot>) -> anyhow::Result<()> {
+        snapshot.validate_providers()?;
+        let publisher = self.publisher.read().unwrap().as_ref().map(|p| p.0.clone());
+        if let Some(publisher) = publisher {
+            publisher(snapshot.clone()).await?;
+        }
+        Ok(())
     }
 
     /// Offline inspection never imports a module or calls plugin_config.
@@ -233,7 +331,9 @@ impl PluginManager {
                 );
             }
             self.check_conflicts(&snapshot)?;
-            *self.current.write().unwrap() = Arc::new(snapshot);
+            let snapshot = Arc::new(snapshot);
+            self.prepare_publication(&snapshot).await?;
+            *self.current.write().unwrap() = snapshot;
         }
         Ok(())
     }
@@ -246,8 +346,12 @@ impl PluginManager {
     /// Copy and activate a plugin without restarting the host.
     pub async fn install(&self, source: &Path) -> anyhow::Result<String> {
         let _guard = self.reload.lock().await;
+        let previous_config = PluginsConfig::read(&self.home)?;
         let id = config::install(&self.home, source)?;
-        self.load_locked(&id).await?;
+        if let Err(error) = self.load_locked(&id).await {
+            previous_config.write(&self.home)?;
+            return Err(error);
+        }
         Ok(id)
     }
 
@@ -306,6 +410,10 @@ impl PluginManager {
         }
         let snapshot = Arc::new(PluginSnapshot { nodes, order });
         config::uninstall(&self.home, id)?;
+        if let Err(error) = self.prepare_publication(&snapshot).await {
+            config.write(&self.home)?;
+            return Err(error);
+        }
         *self.current.write().unwrap() = snapshot;
         Ok(())
     }
@@ -413,6 +521,7 @@ impl PluginManager {
             order.retain(|id| nodes.contains_key(id));
             let snapshot = Arc::new(PluginSnapshot { nodes, order });
             self.check_conflicts(&snapshot)?;
+            self.prepare_publication(&snapshot).await?;
             *self.current.write().unwrap() = snapshot;
             // Embedded callers may load a source without installing it.
             if config.plugins.iter().any(|plugin| plugin.id == id) {
@@ -424,6 +533,7 @@ impl PluginManager {
     }
     #[cfg(feature = "python")]
     fn check_conflicts(&self, snapshot: &PluginSnapshot) -> anyhow::Result<()> {
+        snapshot.validate_providers()?;
         let mut routes = HashMap::<(String, String), String>::new();
         for node in snapshot.nodes.values() {
             for r in &node.members {

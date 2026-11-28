@@ -16,6 +16,20 @@ pub struct EngineRuntime {
     event_receiver: Receiver<Event>,
 }
 
+impl Drop for EngineRuntime {
+    fn drop(&mut self) {
+        let runtimes = std::mem::take(&mut self.rts);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                for runtime in runtimes.into_values() {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), runtime.exit())
+                        .await;
+                }
+            });
+        }
+    }
+}
+
 impl Debug for EngineRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineRuntime")
@@ -42,6 +56,25 @@ impl Default for EngineRuntime {
 }
 
 impl EngineRuntime {
+    async fn prepare_plan_task(task: &mut TaskRequest) -> anyhow::Result<()> {
+        if task.meta.ty != TaskType::Plan || !task.payload().is::<serde_json::Value>() {
+            return Ok(());
+        }
+        let target = task
+            .meta
+            .target_plan_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("JSON Plan task requires target_plan_id"))?;
+        let env = task.take_payload();
+        let (ctx, plan) = task
+            .ctx
+            .get_engine()
+            .fork_plan(&task.ctx, fae_agent::PlanCallMeta { plan_id: target }, env)
+            .await?;
+        task.ctx = ctx;
+        task.replace_payload(Box::new(plan));
+        Ok(())
+    }
     pub const ID: &'static str = "engine";
 
     pub fn new() -> Self {
@@ -133,6 +166,9 @@ impl EngineRuntime {
     pub fn runtime(&self, id: &str) -> Option<&dyn Runtime> {
         self.rts.get(id).map(|rt| rt.as_ref())
     }
+    pub fn runtime_arc(&self, id: &str) -> Option<Arc<dyn Runtime>> {
+        self.rts.get(id).cloned()
+    }
 
     pub fn contains_runtime(&self, id: &str) -> bool {
         self.rts.contains_key(id)
@@ -148,7 +184,13 @@ impl EngineRuntime {
         runtime_id: Option<&str>,
     ) -> Vec<Arc<dyn Runtime>> {
         let mut runtimes = match runtime_id {
-            Some(id) => self.rts.get(id).cloned().into_iter().collect(),
+            Some(id) => self
+                .runtime_ids_by_task_type(ty)
+                .filter(|ids| ids.iter().any(|candidate| candidate == id))
+                .and_then(|_| self.rts.get(id))
+                .cloned()
+                .into_iter()
+                .collect(),
             None => self
                 .runtime_ids_by_task_type(ty)
                 .into_iter()
@@ -174,14 +216,17 @@ impl EngineRuntime {
     }
 
     fn forward_events(receiver: Receiver<Event>, runtime: Arc<Self>) {
+        let weak = Arc::downgrade(&runtime);
         tokio::spawn(async move {
             while let Ok(mut event) = receiver.recv().await {
+                let Some(runtime) = weak.upgrade() else { break };
                 if let EventType::TaskResult(result) = &mut event.event_type {
                     result.track_completion();
                 }
                 match &event.event_type {
                     EventType::TaskResult(result)
-                        if !matches!(result.meta.ty, TaskType::Model | TaskType::Tool) =>
+                        if !matches!(result.meta.ty, TaskType::Model | TaskType::Tool)
+                            && !fae_agent::plugin::leases::has_resources(&result.ctx) =>
                     {
                         let _ = result.ctx.set_state(fae_agent::ContextState::succeeded(()));
                         let _ = result.ctx.append_stack(fae_agent::ContextStackDraft::new(
@@ -213,12 +258,14 @@ impl EngineRuntime {
                 }
                 let callback_runtime_id = match &event.event_type {
                     EventType::TaskResult(result)
-                        if !result.meta.plan_id.is_empty() && !result.meta.publisher.is_empty() =>
+                        if !result.meta.plan_run_id.is_empty()
+                            && !result.meta.publisher.is_empty() =>
                     {
                         Some(result.meta.publisher.clone())
                     }
                     EventType::TaskError(error)
-                        if !error.meta.plan_id.is_empty() && !error.meta.publisher.is_empty() =>
+                        if !error.meta.plan_run_id.is_empty()
+                            && !error.meta.publisher.is_empty() =>
                     {
                         Some(error.meta.publisher.clone())
                     }
@@ -383,7 +430,7 @@ mod tests {
                     ctx: fae_agent::Ctx::new(Arc::new(ContextNull)),
                     meta: TaskMeta {
                         id: id.to_string(),
-                        plan_id: format!("{id}-plan"),
+                        plan_run_id: format!("{id}-plan"),
                         publisher: "blocking_callback".to_string(),
                         ..Default::default()
                     },
@@ -462,6 +509,51 @@ mod tests {
 
 #[async_trait::async_trait]
 impl Runtime for EngineRuntime {
+    fn descriptors(&self) -> Vec<fae_agent::RuntimeDescriptor> {
+        let mut descriptors = self
+            .rts
+            .keys()
+            .map(|id| fae_agent::RuntimeDescriptor {
+                id: id.clone(),
+                task_types: self
+                    .rt_by_ty
+                    .iter()
+                    .filter(|(_, ids)| ids.contains(id))
+                    .map(|(ty, _)| ty.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        descriptors.sort_by(|a, b| a.id.cmp(&b.id));
+        descriptors
+    }
+
+    async fn select_on(
+        &self,
+        ctx: &fae_agent::Ctx,
+        meta: &fae_agent::RuntimeCallMeta,
+        cond: &mut fae_agent::AnyType,
+    ) -> fae_agent::Result<fae_agent::AnyType> {
+        let rt = self
+            .runtimes_for_task(&meta.ty, Some(&meta.runtime_id))
+            .await
+            .into_iter()
+            .next()
+            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
+        rt.select_with_context(ctx, meta.ty.clone(), cond).await
+    }
+
+    async fn kill_on(
+        &self,
+        ctx: &fae_agent::Ctx,
+        meta: &fae_agent::RuntimeCallMeta,
+        task_id: &str,
+    ) -> fae_agent::Result<()> {
+        let rt = self
+            .rts
+            .get(&meta.runtime_id)
+            .ok_or(fae_agent::Error::RuntimeNoSupport)?;
+        rt.kill_on(ctx, meta, task_id).await
+    }
     fn id(&self) -> &str {
         Self::ID
     }
@@ -507,6 +599,7 @@ impl Runtime for EngineRuntime {
             return Err(anyhow::anyhow!("context is already terminal").into());
         }
 
+        Self::prepare_plan_task(task).await?;
         let ty = task.meta.ty.clone();
         let original_executor = task.meta.executor.clone();
         let runtime_id = (!original_executor.is_empty()).then_some(original_executor.as_str());
@@ -551,6 +644,7 @@ impl Runtime for EngineRuntime {
             return Err(anyhow::anyhow!("context is already terminal").into());
         }
 
+        Self::prepare_plan_task(task).await?;
         let ty = task.meta.ty.clone();
         let original_executor = task.meta.executor.clone();
         let runtime_id = (!original_executor.is_empty()).then_some(original_executor.as_str());

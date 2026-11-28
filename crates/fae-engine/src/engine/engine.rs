@@ -10,10 +10,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Engine {
+    generation: Arc<String>,
+    plan_routes: Arc<HashMap<String, String>>,
     plan_builders: Arc<HashMap<String, Box<dyn PlanBuilder>>>,
     plan_hooks: Arc<Vec<Box<dyn PlanHookBuilder>>>,
     rt: RT,
     plugins: Option<Arc<fae_agent::plugin::PluginManager>>,
+    plugin_snapshot: Option<Arc<fae_agent::plugin::PluginSnapshot>>,
 }
 
 impl Debug for Engine {
@@ -27,77 +30,9 @@ impl Debug for Engine {
 }
 
 impl Engine {
-    /// Run a prepared Session execution. The coordinator retains the public result.
-    pub async fn execute_session<Env>(
-        &self,
-        execution: fae_agent::ExecutionHandle,
-        env: Env,
-    ) -> anyhow::Result<()>
-    where
-        Env: Debug + Send + Sync + 'static,
-    {
-        use fae_agent::{
-            ExecutionOutcome,
-            protocol::{ContentBlock, ErrorInfo},
-        };
-        let ctx = execution.ctx.clone();
-        let result = match self.call(ctx.clone(), to_plan_ty::<Env>(), env).await {
-            Ok(mut plan) => {
-                if ctx.cancel_requested() {
-                    plan.abort(-1, "execution cancelled during preparation".into())
-                        .await;
-                    let _ = ctx.set_state(ContextState::cancelled(
-                        "execution cancelled during preparation",
-                    ));
-                    drop(plan);
-                    Err(anyhow::anyhow!("execution cancelled during preparation"))
-                } else {
-                    match execution.session.running(&execution.execution_id) {
-                        Ok(()) => Self::run_plan(plan, ctx.clone()).await,
-                        Err(error) => {
-                            plan.abort(-1, error.to_string()).await;
-                            drop(plan);
-                            let _ = ctx.set_state(ContextState::cancelled(error.to_string()));
-                            Err(error.into())
-                        }
-                    }
-                }
-            }
-            Err(error) => Err(error),
-        };
-        let outcome = match &*ctx.state().current() {
-            ContextState::Succeeded { output } if result.is_ok() => match output.json_snapshot() {
-                Ok(value) => ExecutionOutcome::Succeeded {
-                    result: vec![ContentBlock::Json { value }],
-                },
-                Err(error) => ExecutionOutcome::Failed {
-                    error: ErrorInfo {
-                        code: "unsupported_result".into(),
-                        message: error.to_string(),
-                    },
-                },
-            },
-            ContextState::Cancelled { reason } => ExecutionOutcome::Cancelled {
-                reason: reason.to_string(),
-            },
-            _ => ExecutionOutcome::Failed {
-                error: ErrorInfo {
-                    code: "execution_failed".into(),
-                    message: result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "plan did not produce a public result".into()),
-                },
-            },
-        };
-        // Preparation failures have no PlanRuntime to report root cleanup.
-        // A dispatched plan has already reported it after abort/save and removal.
-        let _ = ctx.invocation_finished();
-        execution
-            .session
-            .finishing(&execution.execution_id, outcome)?;
-        result
+    pub(crate) fn with_generation(mut self, generation: String) -> Self {
+        self.generation = Arc::new(generation);
+        self
     }
 
     pub fn new(plan_builders: HashMap<String, Box<dyn PlanBuilder>>, rt: RT) -> Self {
@@ -110,10 +45,13 @@ impl Engine {
         rt: RT,
     ) -> Self {
         Self {
+            generation: Arc::new(wd_tools::uuid::v4()),
+            plan_routes: Arc::new(HashMap::new()),
             plan_builders: Arc::new(plan_builders),
             plan_hooks: Arc::new(plan_hooks),
             rt,
             plugins: None,
+            plugin_snapshot: None,
         }
     }
 
@@ -122,8 +60,57 @@ impl Engine {
     }
 
     pub fn with_plugins(mut self, plugins: Arc<fae_agent::plugin::PluginManager>) -> Self {
+        if self.plugin_snapshot.is_none() {
+            self.plugin_snapshot = Some(plugins.snapshot());
+        }
         self.plugins = Some(plugins);
         self
+    }
+    pub(crate) fn with_plugin_snapshot(
+        mut self,
+        snapshot: Arc<fae_agent::plugin::PluginSnapshot>,
+    ) -> Self {
+        self.plugin_snapshot = Some(snapshot);
+        self
+    }
+
+    pub(crate) fn with_plan_routes(mut self, routes: HashMap<String, String>) -> Self {
+        self.plan_routes = Arc::new(routes);
+        self
+    }
+
+    fn validate_context(&self, ctx: &Ctx) -> anyhow::Result<()> {
+        ctx.scope()?;
+        anyhow::ensure!(
+            ctx.get_engine().generation() == self.generation.as_str(),
+            "Context belongs to a different Engine generation"
+        );
+        anyhow::ensure!(
+            !ctx.state().current().is_terminal() && !ctx.cancel_requested(),
+            "Context is terminal or cancelled"
+        );
+        Ok(())
+    }
+
+    pub async fn execute_plan<Env: Debug + Send + Sync + 'static>(
+        &self,
+        ctx: Ctx,
+        meta: fae_agent::PlanCallMeta,
+        env: Env,
+    ) -> anyhow::Result<()> {
+        fae_agent::Engine::execute_plan(self, ctx, meta, Box::new(env)).await
+    }
+
+    pub async fn execute_runtime<Req: Send + 'static, Resp: Send + 'static>(
+        &self,
+        ctx: Ctx,
+        meta: fae_agent::RuntimeCallMeta,
+        req: Req,
+    ) -> anyhow::Result<fae_agent::TaskResp<Resp>> {
+        let mut response =
+            fae_agent::Engine::execute_runtime(self, ctx, meta, Box::new(req)).await?;
+        fae_agent::TaskResp::try_from_response(&mut response)
+            .ok_or_else(|| anyhow::anyhow!("Runtime response type mismatch"))
     }
 
     pub fn ctx_with_scope(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
@@ -133,11 +120,13 @@ impl Engine {
             .map(|binding| binding.execution_id.clone());
         let ctx = Ctx::new(EngineContext::into_arc(self.clone()));
         ctx.bind_scope(scope)?;
-        if let (Some(manager), Some(execution_id)) = (&self.plugins, execution_id) {
+        if let Some(snapshot) = &self.plugin_snapshot {
             ctx.bind_plugin_execution(Arc::new(fae_agent::plugin::PluginExecutionBinding {
-                snapshot: manager.snapshot(),
+                snapshot: snapshot.clone(),
                 root: ctx.downgrade(),
-                execution_id,
+                execution_id: execution_id.unwrap_or_else(|| {
+                    fae_agent::ExecutionId::new(wd_tools::uuid::v4()).expect("UUID is a valid ID")
+                }),
             }));
         }
         Ok(ctx)
@@ -239,10 +228,10 @@ impl Engine {
             )
         })?;
 
-        self.build_plan(builder, ctx, Box::new(env)).await
+        self.build_with_builder(builder, ctx, Box::new(env)).await
     }
 
-    async fn build_plan(
+    async fn build_with_builder(
         &self,
         builder: &dyn PlanBuilder,
         ctx: Ctx,
@@ -252,7 +241,16 @@ impl Engine {
         let mut plan = match builder.build(self.rt(), ctx, env).await {
             Ok(plan) => plan,
             Err(error) => {
-                let _ = execution_ctx.set_state(ContextState::failed(error.to_string()));
+                execution_ctx.discard_output();
+                let _ = execution_ctx.cleanup().await;
+                let cancellation = execution_ctx
+                    .cancellation_signal()
+                    .and_then(|signal| signal.borrow().clone());
+                let state = match cancellation {
+                    Some(reason) => ContextState::cancelled(reason),
+                    None => ContextState::failed(error.to_string()),
+                };
+                let _ = execution_ctx.set_state(state);
                 return Err(error);
             }
         };
@@ -260,7 +258,16 @@ impl Engine {
         if execution_ctx.scope().is_err() {
             execution_ctx.bind_scope(ContextScope::root(fae_agent::DEFAULT_USER_ID))?;
         }
-        execution_ctx.set_state(ContextState::Running)?;
+        if let Err(error) = execution_ctx.set_state(ContextState::Running) {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                plan.abort(-1, error.to_string()),
+            )
+            .await;
+            execution_ctx.discard_output();
+            let _ = execution_ctx.cleanup().await;
+            return Err(error);
+        }
         for hook in self.plan_hooks.iter() {
             plan = hook.build(plan).await;
         }
@@ -274,6 +281,95 @@ impl Engine {
 
 #[async_trait::async_trait]
 impl fae_agent::Engine for Engine {
+    fn generation(&self) -> &str {
+        self.generation.as_str()
+    }
+    fn create_context(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
+        self.ctx_with_scope(scope)
+    }
+    fn plans(&self) -> Vec<fae_agent::PlanDescriptor> {
+        let mut plans = self
+            .plan_routes
+            .iter()
+            .map(|(id, ty)| fae_agent::PlanDescriptor {
+                id: id.clone(),
+                env_type: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        plans.sort_by(|a, b| a.id.cmp(&b.id));
+        plans
+    }
+    async fn build_plan(
+        &self,
+        ctx: Ctx,
+        meta: fae_agent::PlanCallMeta,
+        env: fae_agent::AnyType,
+    ) -> anyhow::Result<Box<dyn Plan>> {
+        self.validate_context(&ctx)?;
+        let ty = self
+            .plan_routes
+            .get(&meta.plan_id)
+            .ok_or_else(|| anyhow::anyhow!("plan_not_found: {}", meta.plan_id))?;
+        let builder = self
+            .plan_builder(ty)
+            .ok_or_else(|| anyhow::anyhow!("Plan route builder is missing: {ty}"))?;
+        self.build_with_builder(builder, ctx, env).await
+    }
+    async fn fork_plan(
+        &self,
+        ctx: &Ctx,
+        meta: fae_agent::PlanCallMeta,
+        mut env: fae_agent::AnyType,
+    ) -> anyhow::Result<(Ctx, Box<dyn Plan>)> {
+        self.validate_context(ctx)?;
+        let ty = self
+            .plan_routes
+            .get(&meta.plan_id)
+            .ok_or_else(|| anyhow::anyhow!("plan_not_found: {}", meta.plan_id))?;
+        let builder = self
+            .plan_builder(ty)
+            .ok_or_else(|| anyhow::anyhow!("Plan route builder is missing: {ty}"))?;
+        let child = ctx.fork(builder.prepare_child_spec(ctx, &mut env).await?)?;
+        let plan = self.build_with_builder(builder, child.clone(), env).await?;
+        Ok((child, plan))
+    }
+    async fn execute_plan(
+        &self,
+        ctx: Ctx,
+        meta: fae_agent::PlanCallMeta,
+        env: fae_agent::AnyType,
+    ) -> anyhow::Result<()> {
+        let plan = fae_agent::Engine::build_plan(self, ctx.clone(), meta, env).await?;
+        Self::run_plan(plan, ctx).await
+    }
+    async fn execute_runtime(
+        &self,
+        ctx: Ctx,
+        meta: fae_agent::RuntimeCallMeta,
+        req: fae_agent::AnyType,
+    ) -> anyhow::Result<fae_agent::TaskResponse> {
+        self.validate_context(&ctx)?;
+        let mut task = fae_agent::TaskRequest::from_parts(
+            ctx,
+            fae_agent::TaskMeta {
+                id: wd_tools::uuid::v4(),
+                executor: meta.runtime_id,
+                ty: meta.ty,
+                ..Default::default()
+            },
+            req,
+        );
+        Ok(fae_agent::Runtime::exec(&*self.rt, &mut task).await?)
+    }
+    async fn select_on(
+        &self,
+        ctx: &Ctx,
+        meta: fae_agent::RuntimeCallMeta,
+        mut cond: fae_agent::AnyType,
+    ) -> anyhow::Result<fae_agent::AnyType> {
+        self.validate_context(ctx)?;
+        Ok(fae_agent::Runtime::select_on(&*self.rt, ctx, &meta, &mut cond).await?)
+    }
     fn context(&self) -> Ctx {
         self.ctx()
     }
@@ -287,7 +383,7 @@ impl fae_agent::Engine for Engine {
             .plan_builder(&ty)
             .ok_or_else(|| anyhow::anyhow!("plan builder is not registered for `{ty}`"))?;
         let child = ctx.fork(builder.prepare_child_spec(ctx, &mut env).await?)?;
-        let plan = self.build_plan(builder, child.clone(), env).await?;
+        let plan = self.build_with_builder(builder, child.clone(), env).await?;
         Ok((child, plan))
     }
     fn rt(&self) -> RT {
@@ -304,7 +400,7 @@ impl fae_agent::Engine for Engine {
             anyhow::anyhow!("plan builder is not registered for environment type `{ty}`")
         })?;
 
-        self.build_plan(builder, ctx, env).await
+        self.build_with_builder(builder, ctx, env).await
     }
 }
 

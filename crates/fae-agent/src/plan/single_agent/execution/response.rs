@@ -189,9 +189,7 @@ impl SingleAgentPlan {
 
             self.finish_on_drop = true;
             self.ctx
-                .set_state(crate::ContextState::succeeded(Value::String(
-                    self.final_output.clone(),
-                )))?;
+                .submit_result(Value::String(self.final_output.clone()))?;
             self.emit(
                 self.template.agent.name.clone(),
                 SessionEventData::Completed {
@@ -504,10 +502,7 @@ impl SingleAgentPlan {
             self.terminal_tool_completion = None;
             self.final_output = content.clone();
             self.finish_on_drop = true;
-            self.ctx
-                .set_state(crate::ContextState::succeeded(Value::String(
-                    content.clone(),
-                )))?;
+            self.ctx.submit_result(Value::String(content.clone()))?;
             self.emit(
                 self.template.agent.name.clone(),
                 SessionEventData::Completed { content },

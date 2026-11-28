@@ -6,8 +6,86 @@ use std::{
 };
 use tokio::sync::watch;
 
+/// Core call metadata. Transport adapters own JSON decoding and authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanCallMeta {
+    pub plan_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCallMeta {
+    pub runtime_id: String,
+    pub ty: crate::TaskType,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanDescriptor {
+    pub id: String,
+    pub env_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeDescriptor {
+    pub id: String,
+    pub task_types: Vec<crate::TaskType>,
+}
+
 #[async_trait::async_trait]
 pub trait Engine: Debug + Send + Sync + 'static {
+    fn generation(&self) -> &str {
+        "unregistered"
+    }
+    fn plans(&self) -> Vec<PlanDescriptor> {
+        Vec::new()
+    }
+    fn runtimes(&self) -> Vec<RuntimeDescriptor> {
+        self.rt().descriptors()
+    }
+    fn create_context(&self, scope: ContextScope) -> anyhow::Result<Ctx> {
+        let ctx = self.context();
+        ctx.bind_scope(scope)?;
+        Ok(ctx)
+    }
+    async fn build_plan(
+        &self,
+        _ctx: Ctx,
+        _meta: PlanCallMeta,
+        _env: AnyType,
+    ) -> anyhow::Result<Box<dyn Plan>> {
+        anyhow::bail!("engine does not support Plan ID routes")
+    }
+    async fn fork_plan(
+        &self,
+        _ctx: &Ctx,
+        _meta: PlanCallMeta,
+        _env: AnyType,
+    ) -> anyhow::Result<(Ctx, Box<dyn Plan>)> {
+        anyhow::bail!("engine does not support Plan ID routes")
+    }
+    async fn execute_plan(
+        &self,
+        _ctx: Ctx,
+        _meta: PlanCallMeta,
+        _env: AnyType,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("engine does not support Plan execution by ID")
+    }
+    async fn execute_runtime(
+        &self,
+        _ctx: Ctx,
+        _meta: RuntimeCallMeta,
+        _req: AnyType,
+    ) -> anyhow::Result<crate::TaskResponse> {
+        anyhow::bail!("engine does not support Runtime execution by ID")
+    }
+    async fn select_on(
+        &self,
+        _ctx: &Ctx,
+        _meta: RuntimeCallMeta,
+        _cond: AnyType,
+    ) -> anyhow::Result<AnyType> {
+        anyhow::bail!("engine does not support Runtime queries by ID")
+    }
     fn rt(&self) -> RT;
     fn context(&self) -> Ctx {
         Ctx::null()
@@ -189,6 +267,16 @@ impl ContextChildSpec {
     }
 }
 
+pub type ContextCleanupFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+
+pub struct ContextCleanup(pub ContextCleanupFuture);
+impl Debug for ContextCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ContextCleanup")
+    }
+}
+
 #[derive(Clone)]
 pub struct ContextOutput {
     value: Arc<Mutex<Option<AnyType>>>,
@@ -350,6 +438,24 @@ pub struct ContextStackQuery {
 }
 
 pub trait Context: Debug + Send + Sync + 'static {
+    /// Stage a result until execution cleanup has completed.
+    fn submit_output(&self, output: ContextOutput) -> anyhow::Result<()> {
+        self.set_state(ContextState::Succeeded { output })?;
+        Ok(())
+    }
+    fn discard_output(&self) {}
+    fn publish_output(&self) -> anyhow::Result<()> {
+        if !self.state().current().is_terminal() {
+            self.set_state(ContextState::succeeded(()))?;
+        }
+        Ok(())
+    }
+    fn register_cleanup(&self, _cleanup: ContextCleanup) -> anyhow::Result<()> {
+        anyhow::bail!("context does not support execution cleanup")
+    }
+    fn cleanup(&self) -> ContextCleanupFuture {
+        Box::pin(async { Ok(()) })
+    }
     /// Cancellation is a signal; it does not commit a terminal result.
     fn cancellation_signal(&self) -> Option<watch::Receiver<Option<Arc<str>>>> {
         None
@@ -382,6 +488,10 @@ pub trait Context: Debug + Send + Sync + 'static {
 
     /// 获取已绑定的作用域，读取用户、会话、执行归属及工作目录等信息；未绑定时返回错误。
     fn scope(&self) -> anyhow::Result<Arc<ContextScope>>;
+    /// Whether a scope belongs to this Context's subtree, including itself.
+    fn owns_scope(&self, scope_id: &str) -> bool {
+        self.scope().is_ok_and(|scope| scope.scope_id == scope_id)
+    }
 
     /// 为尚处于 Created 状态的上下文一次性绑定根作用域。
     /// 作用域必须通过身份校验且不能指定父作用域；重复绑定或状态不符时返回错误。
@@ -452,6 +562,9 @@ impl WeakCtx {
     }
 }
 impl Ctx {
+    pub fn submit_result<T: Send + 'static>(&self, value: T) -> anyhow::Result<()> {
+        self.submit_output(ContextOutput::new(Box::new(value)))
+    }
     /// Fix loaded definition data once per Execution, shared by child Invocations.
     pub async fn definition<T, F>(
         &self,
@@ -543,10 +656,10 @@ impl Ctx {
                 },
                 plan_id: crate::PlanInstanceId::new(if let Some(plan_id) = plan_id {
                     plan_id.to_owned()
-                } else if meta.plan_id.is_empty() {
+                } else if meta.plan_run_id.is_empty() {
                     meta.id.clone()
                 } else {
-                    meta.plan_id.clone()
+                    meta.plan_run_id.clone()
                 })?,
                 task_id: Some(crate::TaskId::new(meta.id.clone())?),
                 runtime_id: Some(meta.executor.clone()),
@@ -569,8 +682,8 @@ impl Ctx {
         invocation.status = crate::InvocationStatus::Running;
         if let Some(plan_id) = plan_id {
             invocation.plan_id = crate::PlanInstanceId::new(plan_id)?;
-        } else if !meta.plan_id.is_empty() {
-            invocation.plan_id = crate::PlanInstanceId::new(meta.plan_id.clone())?;
+        } else if !meta.plan_run_id.is_empty() {
+            invocation.plan_id = crate::PlanInstanceId::new(meta.plan_run_id.clone())?;
         }
         invocation.task_id = Some(crate::TaskId::new(meta.id.clone())?);
         invocation.runtime_id = (!meta.executor.is_empty()).then(|| meta.executor.clone());

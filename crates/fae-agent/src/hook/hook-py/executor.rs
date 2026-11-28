@@ -1,5 +1,5 @@
 //! Framed multiplexed Python bridge. The read loop never waits for business work.
-use crate::protocol::{Message, RequestPath, RequestPayload, ResponseCode, ResponseMessage};
+use crate::protocol::{Message, RequestEvent, RequestPayload, ResponseCode, ResponseMessage};
 use crate::{
     plugin::{manager::PluginRecord, *},
     *,
@@ -26,7 +26,22 @@ use tokio::{
 
 const MAX_FRAME: usize = 4 * 1024 * 1024;
 type Reply = oneshot::Sender<anyhow::Result<Value>>;
-type PendingReply = (Message, Reply);
+enum PendingRequest {
+    Hook(Message),
+    Provider(protocol::WorkerRequestMessage),
+}
+impl PendingRequest {
+    fn validate(
+        &self,
+        response: &ResponseMessage,
+    ) -> std::result::Result<(), protocol::ProtocolError> {
+        match self {
+            Self::Hook(request) => response.validate_for(request),
+            Self::Provider(request) => request.validate_response(response),
+        }
+    }
+}
+type PendingReply = (PendingRequest, Reply);
 struct Manifest(PathBuf);
 impl Drop for Manifest {
     fn drop(&mut self) {
@@ -53,13 +68,14 @@ async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> anyhow::Result<Val
 }
 fn request(
     id: &str,
-    path: RequestPath,
+    event: RequestEvent,
     session_id: Option<SessionId>,
     payload: Value,
 ) -> anyhow::Result<Message> {
     Ok(serde_json::from_value(json!({
-        "version": protocol::VERSION, "request_id": id, "session_id": session_id,
-        "path": path, "payload": payload
+        "api_version": protocol::API_VERSION, "request_id": id,
+        "session": session_id.map(|session_id| protocol::SessionRef { session_id }),
+        "plan": null, "event": event, "payload": payload
     }))?)
 }
 async fn write_frame(
@@ -95,7 +111,7 @@ pub async fn inspect(id: &str, source: &Path) -> anyhow::Result<PluginDeclaratio
     let mut stdout = child.stdout.take().unwrap();
     let message = request(
         &wd_tools::uuid::v4(),
-        RequestPath::PluginInspect,
+        RequestEvent::PluginInspect,
         None,
         json!({"id":id,"source":source.to_string_lossy()}),
     )?;
@@ -105,14 +121,13 @@ pub async fn inspect(id: &str, source: &Path) -> anyhow::Result<PluginDeclaratio
     let status = timeout(Duration::from_secs(5), child.wait()).await??;
     anyhow::ensure!(
         status.success()
-            && response.request_id == message.request_id.clone().unwrap()
-            && response.path == message.as_request()?.path().response()
-            && response.payload.code == ResponseCode::Success,
+            && response.validate_for(&message).is_ok()
+            && response.code == ResponseCode::Success,
         "plugin_config_invalid: {}",
-        response.payload.msg
+        response.msg
     );
     Ok(
-        serde_json::from_value::<PluginDeclaration>(serde_json::to_value(response.payload.data)?)?
+        serde_json::from_value::<PluginDeclaration>(response.payload)?
             .normalize(id, Some(PluginEngine::Py))?,
     )
 }
@@ -126,8 +141,10 @@ struct Worker {
     _child: tokio::sync::Mutex<Child>,
     write: mpsc::Sender<Value>,
     control: mpsc::Sender<Value>,
+    plan_release: mpsc::Sender<Value>,
     pending: Mutex<HashMap<String, PendingReply>>,
     calls: Mutex<HashMap<String, Weak<PluginCall>>>,
+    providers: Mutex<HashMap<String, Weak<ProviderCall>>>,
     host_slots: Arc<tokio::sync::Semaphore>,
     healthy: AtomicBool,
     failed: tokio::sync::watch::Sender<bool>,
@@ -214,7 +231,7 @@ impl PluginCall {
 impl Worker {
     async fn rpc(
         &self,
-        method: RequestPath,
+        method: RequestEvent,
         params: Value,
         deadline: Instant,
     ) -> anyhow::Result<Value> {
@@ -224,7 +241,7 @@ impl Worker {
     async fn rpc_id(
         &self,
         id: String,
-        method: RequestPath,
+        method: RequestEvent,
         params: Value,
         deadline: Instant,
     ) -> anyhow::Result<Value> {
@@ -251,7 +268,7 @@ impl Worker {
         {
             let mut pending = self.pending.lock().unwrap();
             anyhow::ensure!(pending.len() < 256, "plugin_busy: requests");
-            pending.insert(id.clone(), (message.clone(), send));
+            pending.insert(id.clone(), (PendingRequest::Hook(message.clone()), send));
         }
         let _pending = Pending {
             worker: self,
@@ -302,7 +319,20 @@ impl PythonExecutor {
             .flat_map(|r| (0..r.declaration.mounts.len()).map(move |i| format!("{}:{i}", r.id)))
             .collect::<Vec<_>>();
         anyhow::ensure!(
-            hello.api_version == API_VERSION
+            hello.plugin_api_version
+                == if members
+                    .iter()
+                    .any(
+                        |member| member.declaration.mounts.iter().any(|mount| matches!(
+                            mount,
+                            PluginMount::Plan { .. } | PluginMount::Runtime { .. }
+                        ))
+                    )
+                {
+                    PLAN_RUNTIME_API_VERSION
+                } else {
+                    API_VERSION
+                }
                 && hello.instances == expected
                 && ready.session_id.is_none(),
             "plugin_startup_failed: incompatible worker"
@@ -321,12 +351,16 @@ impl PythonExecutor {
         .await?;
         let (write, mut queue) = mpsc::channel::<Value>(128);
         let (control, mut controls) = mpsc::channel::<Value>(64);
+        // The SDK admits at most 1024 live Plan groups per Worker.
+        let (plan_release, mut plan_releases) = mpsc::channel::<Value>(1024);
         let worker = Arc::new(Worker {
             _child: tokio::sync::Mutex::new(child),
             write,
             control,
+            plan_release,
             pending: Mutex::new(HashMap::new()),
             calls: Mutex::new(HashMap::new()),
+            providers: Mutex::new(HashMap::new()),
             host_slots: Arc::new(tokio::sync::Semaphore::new(256)),
             healthy: AtomicBool::new(true),
             failed: tokio::sync::watch::channel(false).0,
@@ -337,10 +371,11 @@ impl PythonExecutor {
             loop {
                 let frame = tokio::select! {
                     biased;
-                    frame=controls.recv()=>frame,
-                    frame=queue.recv()=>frame,
+                    Some(frame)=controls.recv()=>frame,
+                    Some(frame)=plan_releases.recv()=>frame,
+                    Some(frame)=queue.recv()=>frame,
+                    else => break,
                 };
-                let Some(frame) = frame else { break };
                 let bytes = match serde_json::to_vec(&frame) {
                     Ok(b) if b.len() <= MAX_FRAME => b,
                     _ => break,
@@ -370,10 +405,17 @@ impl PythonExecutor {
                 let Some(worker) = weak.upgrade() else {
                     break;
                 };
-                if frame["path"]
+                if frame["event"]
                     .as_str()
                     .is_some_and(|p| p.starts_with("/request/"))
                 {
+                    if frame.get("binding").is_some() {
+                        if let Err(error) = worker.dispatch_provider(frame) {
+                            worker.fail(&error.to_string());
+                            break;
+                        }
+                        continue;
+                    }
                     let message: Message = match serde_json::from_value(frame) {
                         Ok(message) => message,
                         Err(error) => {
@@ -388,10 +430,10 @@ impl PythonExecutor {
                         .as_ref()
                         .filter(|_| {
                             matches!(
-                                message.as_request().map(|p| p.path()).ok(),
+                                message.as_request().map(|p| p.event()).ok(),
                                 Some(
-                                    RequestPath::PluginContextCancel
-                                        | RequestPath::SessionExecutionStop
+                                    RequestEvent::PluginContextCancel
+                                        | RequestEvent::SessionExecutionStop
                                 )
                             )
                         })
@@ -413,10 +455,10 @@ impl PythonExecutor {
                             _ => Err(anyhow::anyhow!("plugin_busy: host_requests")),
                         };
                         let reply = match result {
-                            Ok(result) => json!({"version":protocol::VERSION,
-                                "request_id":message.request_id,"session_id":message.session_id,
-                                "path":message.as_request().unwrap().path().response(),
-                                "payload":{"code":0,"msg":"ok","data":result}}),
+                            Ok(result) => json!({"api_version":protocol::API_VERSION,
+                                "response_id":message.request_id,
+                                "session":message.session_id.clone().map(|session_id| protocol::SessionRef { session_id }),
+                                "plan":message.plan, "code":0,"msg":"ok","payload":result}),
                             Err(error) => {
                                 let text = error.to_string();
                                 serde_json::to_value(
@@ -427,7 +469,18 @@ impl PythonExecutor {
                             }
                         };
                         let reply = match serde_json::from_value::<ResponseMessage>(reply) {
-                            Ok(response) => serde_json::to_value(response).unwrap(),
+                            Ok(response) if response.validate_for(&message).is_ok() => {
+                                serde_json::to_value(response).unwrap()
+                            }
+                            Ok(_) => serde_json::to_value(
+                                ResponseMessage::error(
+                                    &message,
+                                    ResponseCode::InternalError,
+                                    "plugin response binding mismatch",
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap(),
                             Err(error) => serde_json::to_value(
                                 ResponseMessage::error(
                                     &message,
@@ -453,18 +506,18 @@ impl PythonExecutor {
                         .pending
                         .lock()
                         .unwrap()
-                        .remove(response.request_id.as_str());
+                        .remove(response.response_id.as_str());
                     if let Some((request, reply)) = pending {
-                        let result = if let Err(error) = response.validate_for(&request) {
+                        let result = if let Err(error) = request.validate(&response) {
                             Err(anyhow::anyhow!("plugin response binding mismatch: {error}"))
-                        } else if response.payload.code != ResponseCode::Success {
+                        } else if response.code != ResponseCode::Success {
                             Err(anyhow::anyhow!(
                                 "Python plugin ({}): {}",
-                                response.payload.code as u16,
-                                response.payload.msg
+                                response.code as u16,
+                                response.msg
                             ))
                         } else {
-                            serde_json::to_value(response.payload.data).map_err(Into::into)
+                            Ok(response.payload)
                         };
                         let _ = reply.send(result);
                     }
@@ -500,6 +553,78 @@ fn error_code(error: &anyhow::Error) -> ResponseCode {
 }
 #[async_trait::async_trait]
 impl PluginExecutor for PythonExecutor {
+    fn reserve_plan_release(
+        &self,
+        request: protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<Box<dyn FnOnce() + Send + Sync>> {
+        anyhow::ensure!(
+            request.event == "/request/plugin/plan/release",
+            "invalid deferred Plan release"
+        );
+        request.validate()?;
+        let frame = serde_json::to_value(request)?;
+        let permit = self
+            .worker
+            .plan_release
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| anyhow::anyhow!("cannot reserve Plan release: {error}"))?;
+        // The release lane can overtake create in the normal lane. The Worker
+        // remembers release even when create has not yet reached it.
+        Ok(Box::new(move || {
+            permit.send(frame);
+        }))
+    }
+
+    async fn provider_control(
+        &self,
+        request: protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            request.event == "/request/plugin/runtime/exit",
+            "invalid provider lifecycle control"
+        );
+        request.validate()?;
+        let id = request.request_id.to_string();
+        let (send, receive) = oneshot::channel();
+        {
+            let mut pending = self.worker.pending.lock().unwrap();
+            anyhow::ensure!(pending.len() < 256, "plugin_busy: requests");
+            pending.insert(
+                id.clone(),
+                (PendingRequest::Provider(request.clone()), send),
+            );
+        }
+        let _pending = Pending {
+            worker: &self.worker,
+            id,
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            self.worker
+                .control
+                .send(serde_json::to_value(request)?)
+                .await?;
+            receive.await?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("plugin lifecycle timeout"))?
+    }
+    async fn provider_with_contexts(
+        &self,
+        ctx: &Ctx,
+        request: protocol::WorkerRequestMessage,
+        read_contexts: Vec<Ctx>,
+    ) -> anyhow::Result<Value> {
+        self.invoke_provider_with_contexts(ctx, request, read_contexts)
+            .await
+    }
+    async fn provider(
+        &self,
+        ctx: &Ctx,
+        request: protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<Value> {
+        self.invoke_provider(ctx, request).await
+    }
     fn status(&self) -> Value {
         let calls = self.worker.calls.lock().unwrap();
         json!({"healthy":self.worker.healthy.load(Ordering::SeqCst),
@@ -626,7 +751,7 @@ impl PluginExecutor for PythonExecutor {
             if let Some(worker) = watched.worker.upgrade() {
                 // Release is a correlated control request; its reply proves Python
                 // closed generators and stopped the owned business task.
-                if worker.rpc(RequestPath::PluginCallRelease,json!({"call_id":watched.id}),
+                if worker.rpc(RequestEvent::PluginCallRelease,json!({"call_id":watched.id}),
                     Instant::now() + Duration::from_secs(5)).await.is_err() {
                     worker.fail("plugin cleanup failed");
                     let mut child = worker._child.lock().await;
@@ -666,7 +791,7 @@ impl PluginExecutor for PythonExecutor {
                     .unwrap_or_else(|| "static".into())
             });
         let result = tokio::select! {
-            result=self.worker.rpc_id(id.clone(),RequestPath::PluginInvoke,json!({"point":point,"method":method,"location":location,
+            result=self.worker.rpc_id(id.clone(),RequestEvent::PluginInvoke,json!({"point":point,"method":method,"location":location,
                 "contexts":payload,"argument":argument,"group":group,"timeout_ms":budget,
                 "model_members":call.metadata.get("model_members")}),call.deadline)=>result?,
             _=root.terminal()=>anyhow::bail!("ContextFinished"),
@@ -756,7 +881,7 @@ impl PluginExecutor for PythonExecutor {
                                 Instant::now() + Duration::from_secs(if first { 30 } else { 60 }),
                             );
                             let response = tokio::select! {
-                                r=worker.rpc(RequestPath::PluginStreamNext,json!({"stream_id":id,"call_id":call.id,"access":null}),deadline)=>r,
+                                r=worker.rpc(RequestEvent::PluginStreamNext,json!({"stream_id":id,"call_id":call.id,"access":null}),deadline)=>r,
                                 _=call.root.terminal()=>Err(anyhow::anyhow!("ContextFinished")),
                                 _=call.ctx.terminal()=>Err(anyhow::anyhow!("ContextFinished")),
                             };
@@ -811,3 +936,5 @@ impl PluginExecutor for PythonExecutor {
 }
 
 mod capabilities;
+mod providers;
+use providers::ProviderCall;

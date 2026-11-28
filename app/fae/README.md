@@ -4,6 +4,13 @@ Codex-style terminal client for Free Agent Engine. The interface keeps a
 scrollable transcript, a multiline composer, live tool and workflow status,
 and streamed model output in one stable TUI.
 
+The public envelope uses `api_version: "0.1.0"` and `event`, with raw business
+`payload`. Responses contain `response_id`, top-level `code`/`msg`, and the
+business value directly in `payload`. Worker bindings are accepted only on the
+authenticated internal worker transport. Plan/Runtime plugins use API `0.3.0`;
+existing Hook plugins use `0.2.0`. See the
+[provider guide](../../docs/faeplan/fae-plan-runtime-plugin-implementation.md).
+
 ## Background service
 
 The terminal UI and direct CLI commands are WebSocket clients. A separate

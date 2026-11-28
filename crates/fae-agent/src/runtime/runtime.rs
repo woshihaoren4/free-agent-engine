@@ -10,6 +10,25 @@ use wd_tools::channel::Receiver;
 
 #[async_trait::async_trait]
 pub trait Runtime: Debug + Send + Sync + 'static {
+    fn descriptors(&self) -> Vec<crate::RuntimeDescriptor> {
+        Vec::new()
+    }
+    async fn select_on(
+        &self,
+        _ctx: &crate::Ctx,
+        _meta: &crate::RuntimeCallMeta,
+        _cond: &mut AnyType,
+    ) -> crate::Result<AnyType> {
+        Err(crate::Error::RuntimeNoSupport)
+    }
+    async fn kill_on(
+        &self,
+        _ctx: &crate::Ctx,
+        meta: &crate::RuntimeCallMeta,
+        task_id: &str,
+    ) -> crate::Result<()> {
+        self.kill(meta.ty.clone(), &meta.runtime_id, task_id).await
+    }
     async fn select_with_context(
         &self,
         _ctx: &crate::Ctx,
@@ -145,6 +164,9 @@ where
     Cond: Debug + Send + 'static,
     Info: Debug + Send + 'static,
 {
+    async fn kill_with_context(&self, _ctx: &crate::Ctx, task_id: &str) -> crate::Result<()> {
+        self.kill(task_id).await
+    }
     async fn select_with_context(
         &self,
         _ctx: &crate::Ctx,
@@ -155,6 +177,10 @@ where
     }
     fn id(&self) -> &str;
     fn tys(&self) -> Vec<TaskType>;
+    /// Inspect a typed request without accepting it or starting any work.
+    fn supports_task(&self, _ctx: &crate::Ctx, _meta: &crate::TaskMeta, _req: &Req) -> bool {
+        true
+    }
     async fn watch(&self) -> crate::Result<wd_tools::channel::Receiver<Event>> {
         Err(crate::Error::RuntimeNoSupport)
     }
@@ -203,6 +229,32 @@ where
     fn contain_ty(&self, ty: &TaskType) -> bool {
         self.tys.contains(ty)
     }
+
+    fn take_task(&self, task: &mut TaskRequest) -> crate::Result<TaskReq<Req>> {
+        if task.meta.executor != self.inner.id() || !self.contain_ty(&task.meta.ty) {
+            return Err(crate::Error::RuntimeNoSupport);
+        }
+        let req = task
+            .payload()
+            .downcast_ref::<Req>()
+            .ok_or(crate::Error::RuntimeNoSupport)?;
+        if !self.inner.supports_task(&task.ctx, &task.meta, req) {
+            return Err(crate::Error::RuntimeNoSupport);
+        }
+        if task.ctx.cancel_requested() {
+            return Err(crate::Error::ContextAborted);
+        }
+        Ok(TaskReq::try_from_request(task).expect("request type checked before acceptance"))
+    }
+
+    fn accepted_error(&self, error: crate::Error) -> crate::Error {
+        match error {
+            crate::Error::RuntimeNoSupport => crate::Error::AcceptedTaskFailed {
+                runtime_id: self.inner.id().into(),
+            },
+            error => error,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -213,6 +265,34 @@ where
     Cond: Debug + Send + 'static,
     Info: Debug + Send + 'static,
 {
+    async fn kill_on(
+        &self,
+        ctx: &crate::Ctx,
+        meta: &crate::RuntimeCallMeta,
+        task_id: &str,
+    ) -> crate::Result<()> {
+        if meta.runtime_id != self.id() || !self.contain_ty(&meta.ty) {
+            return Err(crate::Error::RuntimeNoSupport);
+        }
+        self.inner.kill_with_context(ctx, task_id).await
+    }
+    fn descriptors(&self) -> Vec<crate::RuntimeDescriptor> {
+        vec![crate::RuntimeDescriptor {
+            id: self.id().into(),
+            task_types: self.tys.clone(),
+        }]
+    }
+    async fn select_on(
+        &self,
+        ctx: &crate::Ctx,
+        meta: &crate::RuntimeCallMeta,
+        cond: &mut AnyType,
+    ) -> crate::Result<AnyType> {
+        if meta.runtime_id != self.id() || !self.contain_ty(&meta.ty) {
+            return Err(crate::Error::RuntimeNoSupport);
+        }
+        self.select_with_context(ctx, meta.ty.clone(), cond).await
+    }
     async fn select_with_context(
         &self,
         ctx: &crate::Ctx,
@@ -248,17 +328,7 @@ where
     }
 
     async fn spawn(&self, task: &mut TaskRequest) -> crate::Result<()> {
-        if task.meta.executor != self.id() {
-            return Err(crate::Error::RuntimeNoSupport);
-        }
-        let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
-            req
-        } else {
-            return Err(crate::Error::RuntimeNoSupport);
-        };
-        if req.ctx.cancel_requested() {
-            return Err(crate::Error::ContextAborted);
-        }
+        let req = self.take_task(task)?;
         let ctx = req.ctx.clone();
         let meta = req.meta.clone();
         if meta.ty != TaskType::Plan {
@@ -271,7 +341,11 @@ where
             meta.clone(),
             ContextStackPhase::Dispatched,
         ));
-        let result = self.inner.spawn(req).await;
+        let result = self
+            .inner
+            .spawn(req)
+            .await
+            .map_err(|error| self.accepted_error(error));
         if let Err(error) = &result {
             let _ = ctx.set_state(ContextState::failed(error.to_string()));
             let _ = ctx.append_stack(ContextStackDraft::new(meta, ContextStackPhase::Failed));
@@ -310,17 +384,7 @@ where
     }
 
     async fn exec(&self, task: &mut TaskRequest) -> crate::Result<TaskResponse> {
-        if task.meta.executor != self.id() {
-            return Err(crate::Error::RuntimeNoSupport);
-        }
-        let req = if let Some(req) = TaskReq::<Req>::try_from_request(task) {
-            req
-        } else {
-            return Err(crate::Error::RuntimeNoSupport);
-        };
-        if req.ctx.cancel_requested() {
-            return Err(crate::Error::ContextAborted);
-        }
+        let req = self.take_task(task)?;
         let ctx = req.ctx.clone();
         let meta = req.meta.clone();
         if meta.ty != TaskType::Plan {
@@ -335,18 +399,20 @@ where
                 ContextStackPhase::Started,
             ));
         }
-        let result = self.inner.exec(req).await;
+        let result = self
+            .inner
+            .exec(req)
+            .await
+            .map_err(|error| self.accepted_error(error));
         match result {
-            Ok(mut resp) => {
-                let value = &mut resp.resp as &mut dyn std::any::Any;
-                if let Some(tool) = value.downcast_mut::<crate::ToolResponse>() {
-                    tool.track(ctx.clone(), meta.clone());
-                }
-                if let Some(model) = value.downcast_mut::<crate::ModelResponse>() {
-                    model.track(ctx.clone(), meta.clone());
-                }
+            Ok(resp) => {
+                let mut resp = resp.into_response();
+                resp.track_completion();
                 // Streams finish in their consumer, after their final item.
-                if meta.ty != TaskType::Model && meta.ty != TaskType::Tool {
+                if meta.ty != TaskType::Model
+                    && meta.ty != TaskType::Tool
+                    && !crate::plugin::leases::has_resources(&ctx)
+                {
                     if ctx.set_state(ContextState::succeeded(())).is_ok() {
                         let _ = ctx.append_stack(ContextStackDraft::new(
                             meta,
@@ -355,7 +421,7 @@ where
                     }
                     let _ = ctx.invocation_finished();
                 }
-                Ok(resp.into_response())
+                Ok(resp)
             }
             Err(error) => {
                 let _ = ctx.set_state(ContextState::failed(error.to_string()));

@@ -1,6 +1,5 @@
 use super::{
     connection::Outbound,
-    engine::build_engine,
     registry::{Key, Registry},
     replay::Replay,
 };
@@ -14,7 +13,7 @@ use fae_agent::{
     SessionId, SessionLifecycle, SessionOperation, SessionReservation, SingleAgentEnv,
     SingleAgentPlanBuilder, UserId, UserInfo, WorkflowEnv, WorkspaceBinding, protocol::*,
 };
-use fae_engine::{Engine, SessionCoordinator, SessionRuntime, TodoTool};
+use fae_engine::{EngineAdapters, SessionCoordinator, SessionRuntime, TodoTool};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 
@@ -50,7 +49,9 @@ pub struct Actor {
     handle: Option<SessionHandle>,
     builder: SingleAgentPlanBuilder,
     lark_hook: Option<crate::lark::hook::LarkHook>,
-    engine: Option<Engine>,
+    engine: Option<EngineAdapters>,
+    coordinator: Option<Arc<SessionCoordinator>>,
+    snapshot: Option<Arc<fae_agent::plugin::PluginSnapshot>>,
     subscribers: HashMap<String, Outbound>,
     external_request_id: Option<String>,
     stop: bool,
@@ -86,6 +87,10 @@ impl Actor {
                 DefinitionTarget::Workflow { workflow_id, .. } => PlanTarget::Workflow {
                     workflow_id: workflow_id.clone(),
                 },
+                DefinitionTarget::PluginPlan { plan_id, config } => PlanTarget::PluginPlan {
+                    plan_id: plan_id.clone(),
+                    config: config.clone(),
+                },
             },
             workspace: WorkspaceBinding {
                 root: info.workspace.to_string_lossy().into(),
@@ -105,6 +110,8 @@ impl Actor {
             builder,
             lark_hook: None,
             engine: None,
+            coordinator: None,
+            snapshot: None,
             subscribers: HashMap::new(),
             external_request_id: None,
             stop: false,
@@ -148,6 +155,7 @@ impl Actor {
         let (kind, target) = match config.target {
             PlanTarget::Agent { agent_id } => ("agent", agent_id),
             PlanTarget::Workflow { workflow_id } => ("workflow", workflow_id),
+            PlanTarget::PluginPlan { plan_id, .. } => ("plugin_plan", plan_id),
         };
         Key {
             kind: kind.into(),
@@ -209,7 +217,45 @@ impl Actor {
                 workflow_input(&content)?;
                 None
             }
+            PlanTarget::PluginPlan { .. } => {
+                if settings.options.mode.is_some() {
+                    return Err(ProtocolError::new(
+                        "invalid_message",
+                        "Plugin Plan does not accept Agent mode",
+                    ));
+                }
+                None
+            }
         };
+        let snapshot = self.registry.plugins.snapshot();
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &snapshot))
+        {
+            let mut builder = self.builder.clone();
+            builder.set_workspace(self.info.workspace.clone());
+            builder.add_hook(super::workspace::WorkspaceHookBuilder::new(
+                self.info.workspace.clone(),
+            ));
+            let adapters = super::engine::build_engine_with_snapshot(
+                fae_agent::FAEWorkflowMetadataLoader::with_home_dir(&self.registry.home),
+                builder,
+                self.registry.timer.clone(),
+                self.registry.plugins.clone(),
+                snapshot.clone(),
+            )
+            .await
+            .map_err(|e| ProtocolError::new("internal_error", e))?;
+            self.coordinator
+                .as_ref()
+                .unwrap()
+                .replace_engine(adapters.engine.clone())
+                .map_err(control_error)?;
+            self.engine = Some(adapters);
+            self.snapshot = Some(snapshot);
+        }
+        self.validate_target(&settings.target).await?;
         if self.round_reserved {
             self.round_reserved = false;
         } else {
@@ -217,6 +263,7 @@ impl Actor {
             binding.target = match &settings.target {
                 PlanTarget::Agent { agent_id } => agent_id.clone(),
                 PlanTarget::Workflow { workflow_id } => workflow_id.clone(),
+                PlanTarget::PluginPlan { plan_id, .. } => plan_id.clone(),
             };
             self.registry.reserve_round(&binding)?;
         }
@@ -260,7 +307,7 @@ impl Actor {
                 .map_err(control_error)?;
         }
         let id = execution.execution_id.to_string();
-        let engine = self.engine.as_ref().unwrap().clone();
+        let engine = self.engine.as_ref().unwrap().engine.clone();
         let user = self.key.user.clone();
         let session_id = self.key.session.clone();
         let original_target = self.target.clone();
@@ -278,7 +325,7 @@ impl Actor {
                         .with_images(input.images.unwrap_or_default())
                         .with_session_id(session_id);
                     env.mode = settings.options.mode.map(|_| "todo".into());
-                    if let Err(error) = engine.execute_session(execution, env).await {
+                    if let Err(error) = fae_engine::execute_session(&engine, execution, env).await {
                         eprintln!("session execution: {error:#}");
                     }
                 }
@@ -288,8 +335,15 @@ impl Actor {
                         workflow_input(&content).unwrap(),
                         user,
                     );
-                    if let Err(error) = engine.execute_session(execution, env).await {
+                    if let Err(error) = fae_engine::execute_session(&engine, execution, env).await {
                         eprintln!("workflow execution: {error:#}");
+                    }
+                }
+                PlanTarget::PluginPlan { plan_id, config } => {
+                    if let Err(error) =
+                        fae_engine::execute_session_plan(&engine, execution, plan_id, config).await
+                    {
+                        eprintln!("plugin Plan execution: {error:#}");
                     }
                 }
             }
@@ -700,6 +754,15 @@ impl Actor {
                     .await
                     .map_err(|e| ProtocolError::new("config_not_found", e))?;
             }
+            PlanTarget::PluginPlan { plan_id, .. } => {
+                if self
+                    .engine
+                    .as_ref()
+                    .is_none_or(|a| a.bridges.plan(plan_id).is_none())
+                {
+                    return Err(ProtocolError::new("plan_not_found", plan_id));
+                }
+            }
         }
         Ok(())
     }
@@ -836,15 +899,46 @@ impl Actor {
         builder.add_hook(super::workspace::WorkspaceHookBuilder::new(
             self.info.workspace.clone(),
         ));
-        let engine = build_engine(
+        let snapshot = self.registry.plugins.snapshot();
+        let engine = super::engine::build_engine_with_snapshot(
             fae_agent::FAEWorkflowMetadataLoader::with_home_dir(&self.registry.home),
             builder,
             self.registry.timer.clone(),
             self.registry.plugins.clone(),
+            snapshot.clone(),
         )
         .await;
+        let engine = match engine {
+            Ok(engine) => engine,
+            Err(error) => {
+                if let Some(command) = rx.recv().await {
+                    match command {
+                        Command::Create { request, reply, .. } => {
+                            let _ = reply.send(
+                                ResponseMessage::error(
+                                    &request,
+                                    ResponseCode::InternalError,
+                                    format!("Engine registration: {error:#}"),
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        Command::InternalStart { reply, .. } => {
+                            let _ = reply.send(Err(ProtocolError::new(
+                                "internal_error",
+                                format!("{error:#}"),
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                self.done.send_replace(Some(format!("{error:#}")));
+                self.registry.remove(&self.key, &self.stream);
+                return;
+            }
+        };
         let coordinator = SessionCoordinator::new(
-            engine.clone(),
+            engine.engine.clone(),
             ContextData {
                 user_info: UserInfo {
                     user_id: UserId::new(self.key.user.clone()).unwrap(),
@@ -863,6 +957,8 @@ impl Actor {
         let mut events = handle.subscribe();
         self.registry.bind_handle(&self.key, handle.clone());
         self.handle = Some(handle);
+        self.coordinator = Some(coordinator);
+        self.snapshot = Some(snapshot);
         self.engine = Some(engine);
         loop {
             // Drain coordinator facts before accepting operations that depend on idle state.
@@ -923,8 +1019,8 @@ impl Actor {
                     };
                     requests.push(rid, content, response.clone());
                     // Subscribe queues its own response before replay.
-                    if request.path != MessagePath::Request(RequestPath::SessionSubscribe)
-                        || response.payload.code != ResponseCode::Success
+                    if request.event != MessageEvent::Request(RequestEvent::SessionSubscribe)
+                        || response.code != ResponseCode::Success
                     {
                         out.send(ServerFrame::Response(response));
                     }
@@ -971,7 +1067,7 @@ impl Actor {
             }
         }
         let result = if let Some(engine) = self.engine {
-            engine.exit().await.map_err(anyhow::Error::from)
+            engine.engine.exit().await.map_err(anyhow::Error::from)
         } else {
             Ok(())
         };
@@ -1003,7 +1099,7 @@ pub fn response_code(error: &ProtocolError) -> ResponseCode {
         "storage_failed" => ResponseCode::StorageError,
         "unsupported_operation" => ResponseCode::BadRequest,
         "forbidden" => ResponseCode::Forbidden,
-        "session_not_found" | "config_not_found" => ResponseCode::NotFound,
+        "session_not_found" | "config_not_found" | "plan_not_found" => ResponseCode::NotFound,
         "invalid_message" | "invalid_workspace" | "invalid_session_id" => ResponseCode::BadRequest,
         _ => ResponseCode::InternalError,
     }

@@ -347,7 +347,7 @@ impl SingleAgentPlan {
         TaskReq {
             ctx: self.ctx.clone(),
             meta: TaskMeta {
-                id: format!("single-agent-{}-{}", self.turn_id, self.task_sequence),
+                id: format!("{}-{}-{}", self.id, self.turn_id, self.task_sequence),
                 ty,
                 ..Default::default()
             },

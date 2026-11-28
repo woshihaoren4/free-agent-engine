@@ -1,6 +1,6 @@
 mod card;
-mod content;
 pub mod config;
+mod content;
 pub mod hook;
 pub mod identity;
 mod inbound;

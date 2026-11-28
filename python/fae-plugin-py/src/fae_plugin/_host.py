@@ -1,7 +1,7 @@
 import asyncio
 import itertools
 from typing import Any
-from ._protocol import request
+from ._protocol import request, validate_worker, PROTOCOL_API_VERSION
 from .errors import HandleExpired, HostCallTimeout, from_wire
 
 
@@ -33,18 +33,39 @@ class Host:
             self.pending.pop(request_id, None)
 
     def response(self, frame: dict[str, Any]) -> None:
-        pending = self.pending.get(frame["request_id"])
+        pending = self.pending.get(frame["response_id"])
         if pending is None:
             return
         message, future = pending
         if future.done():
             return
-        if frame["path"] != message["path"].replace("/request/", "/response/", 1) or frame.get("session_id") != message.get("session_id"):
+        if frame["session"] != message["session"] or frame["plan"] != message["plan"]:
             future.set_exception(ValueError("Response binding mismatch"))
-        elif frame["payload"]["code"] != 0:
-            future.set_exception(from_wire(frame["payload"]))
+        elif frame["code"] != 0:
+            future.set_exception(from_wire(frame))
         else:
-            future.set_result(frame["payload"]["data"])
+            future.set_result(frame["payload"])
+
+    async def provider_call(self, owner: Any, event: str, payload: Any, binding: dict[str, Any],
+                            *, plan: str | None = None, runtime: str | None = None) -> Any:
+        owner.check()
+        if len(self.pending) >= 256:
+            raise from_wire({"code": 409, "msg": "Host request capacity exceeded"})
+        identifier = f"provider-host-{next(self.ids)}"
+        message = {"api_version": PROTOCOL_API_VERSION, "request_id": identifier,
+                   "event": f"/request/plugin/{event}", "payload": payload,
+                   "session": owner.session, "plan": {"plan_id": plan} if plan else None,
+                   "binding": {"access": owner.access, **binding}}
+        if runtime:
+            message["call"] = {"runtime_id": runtime}
+        validate_worker(message)
+        future = asyncio.get_running_loop().create_future()
+        self.pending[identifier] = (message, future)
+        try:
+            await self.writer.send(message, control=True)
+            return await asyncio.wait_for(future, owner.remaining())
+        finally:
+            self.pending.pop(identifier, None)
 
     def close(self) -> None:
         for _, future in self.pending.values():

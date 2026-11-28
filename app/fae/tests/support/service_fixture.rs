@@ -2,7 +2,7 @@ use fae::{
     app::client::{self, Client},
     protocol::*,
 };
-use fae_agent::protocol::VERSION;
+use fae_agent::protocol::API_VERSION;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -87,7 +87,7 @@ impl Service {
                 pid: child.id(),
                 address: "127.0.0.1".parse().unwrap(),
                 port,
-                protocol_version: VERSION,
+                protocol_version: API_VERSION,
                 app_version: "".into(),
                 started_at: "".into(),
                 executable: "fae".into(),
@@ -204,26 +204,35 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                                 }
                             }
                         };
-                        let text = body["messages"].as_array().unwrap().iter().rev()
+                        let messages: Vec<Value> = body["input"].as_array().unwrap().iter().map(|item| {
+                            if item["type"] == "function_call_output" {
+                                json!({"role": "tool", "content": item["output"]})
+                            } else {
+                                let content = if item["content"].is_array() {
+                                    item["content"].as_array().unwrap().iter()
+                                        .filter_map(|part| part["text"].as_str())
+                                        .collect::<Vec<_>>().join("\n")
+                                } else { item["content"].as_str().unwrap_or_default().into() };
+                                json!({"role": item["role"], "content": content})
+                            }
+                        }).collect();
+                        let text = messages.iter().rev()
                             .find(|m| m["role"] == "user").unwrap()["content"].as_str().unwrap().to_string();
                         tx.send(text.clone()).await.unwrap();
                         if matches!(text.as_str(), "stream then wait" | "stream before save") {
-                            let chunk = json!({"id":"mock","object":"chat.completion.chunk","created":1,"model":"mock",
-                                "choices":[{"index":0,"delta":{"role":"assistant","content":"mock answer"},"finish_reason":null}]});
-                            let data = format!("data: {chunk}\n\n");
+                            let (data, end) = responses_events(&json!({"content":"mock answer"}));
                             let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{data}\r\n", data.len());
                             let _ = socket.write_all(response.as_bytes()).await;
                             if text == "stream then wait" {
                                 tokio::time::sleep(Duration::from_secs(30)).await;
                             } else {
                                 tokio::time::sleep(Duration::from_millis(400)).await;
-                                let end = "data: [DONE]\n\n";
                                 let _ = socket.write_all(format!("{:x}\r\n{end}\r\n0\r\n\r\n", end.len()).as_bytes()).await;
                             }
                             return;
                         }
                         if text.contains("slow") { tokio::time::sleep(Duration::from_secs(30)).await; }
-                        let tool_result = body["messages"].as_array().unwrap().last().is_some_and(|m| m["role"] == "tool");
+                        let tool_result = messages.last().is_some_and(|m| m["role"] == "tool");
                         let (delta, reason) = if text.starts_with("timer:create:") && !tool_result {
                             use chrono::{Datelike, Timelike};
                             let at = chrono::Utc::now() + chrono::Duration::seconds(4);
@@ -237,14 +246,14 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                         } else if text == "workspace:probe" && !tool_result {
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"workspace-1","type":"function","function":{"name":"execute_command","arguments":"{\"command\":\"pwd\"}"}}]}), "tool_calls")
                         } else if text == "workspace:probe" {
-                            let prompt = body["messages"].as_array().unwrap().iter()
+                            let prompt = messages.iter()
                                 .filter(|m| m["role"] == "system")
                                 .map(|m| m["content"].as_str().unwrap_or_default())
                                 .collect::<Vec<_>>().join("\n");
-                            let tool = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+                            let tool = messages.last().unwrap()["content"].clone();
                             (json!({"role":"assistant","content":json!({"prompt":prompt,"tool":tool}).to_string()}), "stop")
                         } else if text == "lark:probe" {
-                            let prompt = body["messages"].as_array().unwrap().iter()
+                            let prompt = messages.iter()
                                 .filter(|m| m["role"] == "system")
                                 .map(|m| m["content"].as_str().unwrap_or_default())
                                 .collect::<Vec<_>>().join("\n");
@@ -252,9 +261,9 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
                         } else if text == "delegate" {
                             (json!({"role":"assistant","tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"agent","arguments":"{\"agent_id\":\"worker\",\"input\":\"slow child\"}"}}]}), "tool_calls")
                         } else { (json!({"role":"assistant","content":"mock answer"}), "stop") };
-                        let chunk = |delta: Value, finish: Value| json!({"id":"mock","object":"chat.completion.chunk","created":1,"model":"mock",
-                            "choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string();
-                        let data = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunk(delta, Value::Null), chunk(json!({}), json!(reason)));
+                        let _ = reason;
+                        let (start, end) = responses_events(&delta);
+                        let data = format!("{start}{end}");
                         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len());
                         let _ = socket.write_all(response.as_bytes()).await;
                     });
@@ -263,4 +272,24 @@ async fn model() -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>
         }
     });
     (base, rx, task)
+}
+
+fn responses_events(delta: &Value) -> (String, String) {
+    let (event, output) = if let Some(call) = delta["tool_calls"].as_array().and_then(|calls| calls.first()) {
+        let item = json!({"type":"function_call", "id":call["id"], "call_id":call["id"],
+            "name":call["function"]["name"], "arguments":call["function"]["arguments"], "status":"completed"});
+        (json!({"type":"response.output_item.added", "sequence_number":1,
+            "output_index":0, "item":item}), json!([item]))
+    } else {
+        let text = delta["content"].as_str().unwrap_or_default();
+        (json!({"type":"response.output_text.delta", "sequence_number":1,
+            "item_id":"msg", "output_index":0, "content_index":0, "delta":text}),
+         json!([{"type":"message", "id":"msg", "role":"assistant", "status":"completed",
+            "content":[{"type":"output_text", "text":text, "annotations":[]}]}]))
+    };
+    let complete = json!({"type":"response.completed", "sequence_number":2,
+        "response":{"id":"mock", "object":"response", "created_at":1, "model":"mock",
+            "status":"completed", "output":output}});
+    (format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()),
+     format!("event: response.completed\ndata: {complete}\n\n"))
 }

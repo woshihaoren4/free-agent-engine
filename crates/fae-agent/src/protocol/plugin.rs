@@ -192,7 +192,7 @@ pub struct PluginToolReference {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginHello {
-    pub api_version: String,
+    pub plugin_api_version: String,
     pub instances: Vec<String>,
 }
 

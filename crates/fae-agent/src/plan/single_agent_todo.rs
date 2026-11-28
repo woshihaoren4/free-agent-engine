@@ -298,7 +298,7 @@ impl SingleAgentTodoPlan {
         TaskReq {
             ctx: self.todo_ctx.as_ref().unwrap_or(&self.ctx).clone(),
             meta: TaskMeta {
-                id: format!("single-agent-todo-{}-{}", self.turn_id, self.task_sequence),
+                id: format!("{}-{}-{}", self.id, self.turn_id, self.task_sequence),
                 ty,
                 ..Default::default()
             },
@@ -434,7 +434,7 @@ impl SingleAgentTodoPlan {
         };
         child_ctx.invocation_started(&TaskMeta {
             id: child.id().to_string(),
-            plan_id: child.id().to_string(),
+            plan_run_id: child.id().to_string(),
             ty: TaskType::Plan,
             ..Default::default()
         })?;
@@ -454,6 +454,14 @@ impl SingleAgentTodoPlan {
             .child_ctx
             .take()
             .expect("running todo agent requires a child context");
+        if !ctx.state().current().is_terminal() {
+            if let Err(error) = ctx.cleanup().await {
+                ctx.discard_output();
+                ctx.set_state(crate::ContextState::failed(error.to_string()))?;
+            } else {
+                ctx.publish_output()?;
+            }
+        }
         let output = match &*ctx.state().current() {
             crate::ContextState::Succeeded { output } => output.json_snapshot(),
             crate::ContextState::Failed { error } => Err(anyhow::anyhow!("{}", error.message)),
@@ -515,9 +523,7 @@ impl SingleAgentTodoPlan {
             .ok_or_else(|| anyhow::anyhow!("todo mode completed without final output"))?;
         self.finish_on_drop = true;
         self.ctx
-            .set_state(crate::ContextState::succeeded(serde_json::Value::String(
-                content.clone(),
-            )))?;
+            .submit_result(serde_json::Value::String(content.clone()))?;
         self.session.emit_agent(
             self.turn_id,
             self.template.agent.name.clone(),

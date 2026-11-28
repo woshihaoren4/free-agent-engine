@@ -31,7 +31,7 @@ struct State {
 
 /// Short synchronous commits only. No state lock is held across I/O or Plan work.
 pub struct SessionCoordinator {
-    engine: Engine,
+    engine: Mutex<Engine>,
     state: Mutex<State>,
     events: SessionEvents,
     weak: std::sync::Weak<Self>,
@@ -83,7 +83,7 @@ impl SessionCoordinator {
             ));
         }
         Ok(Arc::new_cyclic(|weak| Self {
-            engine,
+            engine: Mutex::new(engine),
             state: Mutex::new(State {
                 data,
                 active: None,
@@ -105,6 +105,14 @@ impl SessionCoordinator {
 
     pub fn set_data_source(&self, source: Arc<dyn SessionDataSource>) {
         *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// Changes only the Engine used by the next preparation; active Ctx pins its Engine.
+    pub fn replace_engine(&self, engine: Engine) -> ControlResult<()> {
+        let state = self.state.lock().unwrap();
+        Self::idle(&state)?;
+        *self.engine.lock().unwrap() = engine;
+        Ok(())
     }
 
     fn conflict(message: &str) -> SessionControlError {
@@ -137,6 +145,7 @@ impl SessionCoordinator {
         let target = match &state.data.session_config.target {
             PlanTarget::Agent { agent_id } => agent_id,
             PlanTarget::Workflow { workflow_id } => workflow_id,
+            PlanTarget::PluginPlan { plan_id, .. } => plan_id,
         };
         partition.target_id == *target
             && partition.user_id == state.data.user_info.user_id.as_str()
@@ -444,11 +453,14 @@ impl SessionControl for SessionCoordinator {
         let (agent_id, workflow_id) = match &settings.target {
             PlanTarget::Agent { agent_id } => (Some(agent_id.clone()), None),
             PlanTarget::Workflow { workflow_id } => (None, Some(workflow_id.clone())),
+            PlanTarget::PluginPlan { .. } => (None, None),
         };
         scope.agent_id = agent_id.clone();
         scope.workflow_id = workflow_id.clone();
         let ctx = self
             .engine
+            .lock()
+            .unwrap()
             .ctx_with_scope(scope)
             .map_err(|e| SessionControlError::Invalid(e.to_string()))?;
         state.data.latest_execution_view = Some(ExecutionView {

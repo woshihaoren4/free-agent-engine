@@ -462,10 +462,11 @@ mod tests {
                     .ctx_with_scope(fae_agent::ContextScope::root("alice"))?,
                 meta: TaskMeta {
                     id: "memory-task".to_string(),
-                    plan_id: "single-agent-plan".to_string(),
+                    plan_run_id: "single-agent-plan".to_string(),
                     ty: TaskType::Memory,
                     publisher: "plan_default".to_string(),
                     executor: UserMemoryRuntime::ID.to_string(),
+                    ..Default::default()
                 },
                 req: UserMemoryRequest::Query {
                     user_id: "alice".to_string(),

@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, get_args, get_origin, get_type_hints, Union
 from types import UnionType
+from .tasks import TaskMetadata
 
 
 def _decode(ty: Any, value: Any) -> Any:
     origin, args = get_origin(ty), get_args(ty)
     if ty is Any:
         return value
+    if ty is TaskMetadata:
+        return TaskMetadata.from_dict(value)
     if origin in (Union, UnionType):
         for alternative in args:
             try:
@@ -116,7 +119,14 @@ class WorkflowTarget(DTO):
     type: Literal["workflow"] = "workflow"
 
 
-PlanTarget = AgentTarget | WorkflowTarget
+@dataclass(frozen=True)
+class PluginPlanTarget(DTO):
+    plan_id: str
+    config: Any
+    type: Literal["plugin_plan"] = "plugin_plan"
+
+
+PlanTarget = AgentTarget | WorkflowTarget | PluginPlanTarget
 
 
 @dataclass(frozen=True)
@@ -301,13 +311,7 @@ class AnyTaskType(DTO):
     Any: str
 
 
-@dataclass(frozen=True)
-class TaskMeta(DTO):
-    id: str
-    plan_id: str
-    ty: Literal["Tool", "Skill", "Mcp", "Plan", "Workflow", "Model", "Session", "Memory"] | AnyTaskType
-    publisher: str
-    executor: str
+TaskMeta = TaskMetadata
 
 
 @dataclass(frozen=True)

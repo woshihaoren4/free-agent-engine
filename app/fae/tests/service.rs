@@ -111,7 +111,7 @@ async fn exchange(
             match socket.next().await.unwrap().unwrap() {
                 Message::Text(text) => {
                     if let ServerFrame::Response(response) = serde_json::from_str(&text).unwrap() {
-                        if Some(&response.request_id) == request.request_id.as_ref() {
+                        if Some(&response.response_id) == request.request_id.as_ref() {
                             return response;
                         }
                     }
@@ -266,7 +266,7 @@ async fn request_ids_are_correlated_and_conflicts_do_not_execute_another_operati
     let mut service = Service::start(None).await;
     service.write_workflow("dedup", "result = 42");
     let client = workflow(&service, "dedup").await;
-    let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+    let mut socket = client::connect(&service.home, &service.config, "/api/0.1.0/session")
         .await
         .unwrap();
     let request = ProtocolMessage::request(
@@ -288,12 +288,9 @@ async fn request_ids_are_correlated_and_conflicts_do_not_execute_another_operati
     )
     .unwrap();
     let response = exchange(&mut socket, &conflict).await;
-    assert_eq!(response.payload.code, ResponseCode::Conflict);
-    assert!(response.payload.data.is_none());
-    assert_eq!(
-        response.path,
-        conflict.as_request().unwrap().path().response()
-    );
+    assert_eq!(response.code, ResponseCode::Conflict);
+    assert!(response.payload.is_null());
+    response.validate_for(&conflict).unwrap();
     service.stop().await;
 }
 
@@ -313,7 +310,7 @@ async fn old_routes_versions_and_external_events_are_rejected() {
         json!({"version":4,"request_id":"r","path":"/request/session/not_registered","payload":{}}),
         json!({"version":4,"session_id":"s","stream_id":"stream","seq":1,"path":"/event/session/execution/state_changed","payload":{"execution_id":"e","status":"running","reason":null}}),
     ] {
-        let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+        let mut socket = client::connect(&service.home, &service.config, "/api/0.1.0/session")
             .await
             .unwrap();
         socket
@@ -843,10 +840,10 @@ async fn request_cache_is_shared_across_sessions_and_connections() {
     service.write_workflow("dedup", "result = 42");
     let first = workflow(&service, "dedup").await;
     let second = workflow(&service, "dedup").await;
-    let mut a = client::connect(&service.home, &service.config, "/v4/session")
+    let mut a = client::connect(&service.home, &service.config, "/api/0.1.0/session")
         .await
         .unwrap();
-    let mut b = client::connect(&service.home, &service.config, "/v4/session")
+    let mut b = client::connect(&service.home, &service.config, "/api/0.1.0/session")
         .await
         .unwrap();
     let request = ProtocolMessage::request(
@@ -867,7 +864,7 @@ async fn request_cache_is_shared_across_sessions_and_connections() {
     )
     .unwrap();
     assert_eq!(
-        exchange(&mut b, &conflict).await.payload.code,
+        exchange(&mut b, &conflict).await.code,
         ResponseCode::Conflict
     );
     service.stop().await;
@@ -886,7 +883,7 @@ async fn workspace_save_failure_releases_reservation_without_committing_defaults
     std::fs::create_dir(&path).unwrap();
     let proposed = service.home.join("proposed");
     std::fs::create_dir(&proposed).unwrap();
-    let mut socket = client::connect(&service.home, &service.config, "/v4/session")
+    let mut socket = client::connect(&service.home, &service.config, "/api/0.1.0/session")
         .await
         .unwrap();
     let request = ProtocolMessage::request(
@@ -900,8 +897,8 @@ async fn workspace_save_failure_releases_reservation_without_committing_defaults
     )
     .unwrap();
     let response = exchange(&mut socket, &request).await;
-    assert_eq!(response.payload.code, ResponseCode::StorageError);
-    assert!(response.payload.data.is_none());
+    assert_eq!(response.code, ResponseCode::StorageError);
+    assert!(response.payload.is_null());
     let ResponsePayload::SessionGet(summary) = client
         .request(RequestPayload::SessionGet(Empty {}))
         .await

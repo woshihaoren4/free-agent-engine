@@ -1,16 +1,27 @@
 use super::runtime::python::PythonActionRuntime;
 use fae_agent::{FAEWorkflowMetadataLoader, SingleAgentPlanBuilder};
 use fae_engine::{
-    CompressionRuntime, DefaultTools, Engine, EngineBuilder, McpRuntime, ModelRuntime, PlanRuntime,
-    SessionRuntime, SkillRuntime, ToolsRuntime, UserMemoryRuntime, WorkflowRuntime,
+    CompressionRuntime, DefaultTools, EngineAdapters, EngineBuilder, McpRuntime, ModelRuntime,
+    PlanRuntime, SessionRuntime, SkillRuntime, ToolsRuntime, UserMemoryRuntime, WorkflowRuntime,
 };
 
 pub async fn build_engine(
     loader: FAEWorkflowMetadataLoader,
+    agent_builder: SingleAgentPlanBuilder,
+    timer: Option<fae_engine::TimerHandle>,
+    plugins: std::sync::Arc<fae_agent::plugin::PluginManager>,
+) -> anyhow::Result<EngineAdapters> {
+    let snapshot = plugins.snapshot();
+    build_engine_with_snapshot(loader, agent_builder, timer, plugins, snapshot).await
+}
+
+pub async fn build_engine_with_snapshot(
+    loader: FAEWorkflowMetadataLoader,
     mut agent_builder: SingleAgentPlanBuilder,
     timer: Option<fae_engine::TimerHandle>,
     plugins: std::sync::Arc<fae_agent::plugin::PluginManager>,
-) -> Engine {
+    snapshot: std::sync::Arc<fae_agent::plugin::PluginSnapshot>,
+) -> anyhow::Result<EngineAdapters> {
     let home = loader.home_dir().to_path_buf();
     let mut builder = EngineBuilder::new();
     builder.add_runtime(PlanRuntime::new());
@@ -34,5 +45,9 @@ pub async fn build_engine(
     ));
     builder.add_plan_builder(agent_builder);
     builder.add_plan_builder(fae_agent::WorkflowPlanBuilder::new(loader));
-    builder.build().await.with_plugins(plugins)
+    fae_engine::register_native_bridges(&mut builder)?;
+    builder.register_plugins(&snapshot)?;
+    let mut adapters = builder.build_with_adapters().await;
+    adapters.engine = adapters.engine.with_plugins(plugins);
+    Ok(adapters)
 }

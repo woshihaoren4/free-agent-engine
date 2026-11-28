@@ -274,10 +274,11 @@ mod tests {
             writers.push(tokio::spawn(async move {
                 let meta = TaskMeta {
                     id: format!("task-{n}"),
-                    plan_id: "parent-plan".into(),
+                    plan_run_id: "parent-plan".into(),
                     ty: TaskType::Tool,
                     publisher: "publisher".into(),
                     executor: "tools".into(),
+                    ..Default::default()
                 };
                 let start = child
                     .append_stack(ContextStackDraft::new(
@@ -376,6 +377,10 @@ struct Local {
     state: watch::Sender<Arc<ContextState>>,
     children: Vec<Weak<EngineContext>>,
     cancellation: watch::Sender<Option<Arc<str>>>,
+    pending_output: Option<ContextOutput>,
+    cleanups: Vec<ContextCleanup>,
+    cleanup_started: bool,
+    cleanup_finished: Arc<std::sync::atomic::AtomicBool>,
 }
 #[derive(Debug)]
 pub struct EngineContext {
@@ -407,6 +412,10 @@ impl EngineContext {
                 state,
                 children: Vec::new(),
                 cancellation: watch::channel(None).0,
+                pending_output: None,
+                cleanups: Vec::new(),
+                cleanup_started: false,
+                cleanup_finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
         }
     }
@@ -445,6 +454,94 @@ impl EngineContext {
     }
 }
 impl Context for EngineContext {
+    fn submit_output(&self, output: ContextOutput) -> anyhow::Result<()> {
+        let mut local = self.local.lock().unwrap();
+        anyhow::ensure!(
+            matches!(&**local.state.borrow(), ContextState::Running)
+                && local.cancellation.borrow().is_none()
+                && !local.cleanup_started,
+            "ContextFinished"
+        );
+        anyhow::ensure!(
+            local.pending_output.is_none(),
+            "Conflict: result already submitted"
+        );
+        local.pending_output = Some(output);
+        Ok(())
+    }
+    fn discard_output(&self) {
+        self.local.lock().unwrap().pending_output = None;
+    }
+    fn publish_output(&self) -> anyhow::Result<()> {
+        let mut local = self.local.lock().unwrap();
+        anyhow::ensure!(
+            matches!(&**local.state.borrow(), ContextState::Running),
+            "ContextFinished"
+        );
+        anyhow::ensure!(local.cancellation.borrow().is_none(), "ContextAborted");
+        anyhow::ensure!(
+            local
+                .cleanup_finished
+                .load(std::sync::atomic::Ordering::Acquire),
+            "cleanup not finished"
+        );
+        let output = local
+            .pending_output
+            .take()
+            .unwrap_or_else(|| ContextOutput::new(Box::new(())));
+        local
+            .state
+            .send_replace(Arc::new(ContextState::Succeeded { output }));
+        Ok(())
+    }
+    fn register_cleanup(&self, cleanup: ContextCleanup) -> anyhow::Result<()> {
+        let mut local = self.local.lock().unwrap();
+        anyhow::ensure!(
+            !local.state.borrow().is_terminal()
+                && local.cancellation.borrow().is_none()
+                && !local.cleanup_started,
+            "ContextFinished"
+        );
+        anyhow::ensure!(
+            local.cleanups.len() < 64,
+            "execution cleanup capacity exceeded"
+        );
+        local.cleanups.push(cleanup);
+        Ok(())
+    }
+    fn cleanup(&self) -> ContextCleanupFuture {
+        let (cleanups, finished) = {
+            let mut local = self.local.lock().unwrap();
+            if local.cleanup_started {
+                return Box::pin(async { anyhow::bail!("execution cleanup already started") });
+            }
+            local.cleanup_started = true;
+            (
+                std::mem::take(&mut local.cleanups),
+                local.cleanup_finished.clone(),
+            )
+        };
+        Box::pin(async move {
+            let mut first_error = None;
+            // A single deadline bounds the whole execution's cleanup.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            for ContextCleanup(cleanup) in cleanups {
+                let result = tokio::time::timeout_at(deadline, cleanup)
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("execution cleanup timed out")));
+                if let Err(error) = result {
+                    first_error.get_or_insert(error);
+                }
+            }
+            match first_error {
+                Some(error) => Err(error),
+                None => {
+                    finished.store(true, std::sync::atomic::Ordering::Release);
+                    Ok(())
+                }
+            }
+        })
+    }
     fn cancellation_signal(&self) -> Option<watch::Receiver<Option<Arc<str>>>> {
         let local = self.local.lock().unwrap();
         local
@@ -614,6 +711,20 @@ impl Context for EngineContext {
         local.children.push(Arc::downgrade(&child));
         Ok(Ctx::new(child))
     }
+    fn owns_scope(&self, scope_id: &str) -> bool {
+        let Ok(scope) = self.scope() else {
+            return false;
+        };
+        let store = self.stacks.lock().unwrap();
+        let mut current = Some(scope_id);
+        while let Some(id) = current {
+            if id == scope.scope_id {
+                return true;
+            }
+            current = store.parents.get(id).and_then(|parent| parent.as_deref());
+        }
+        false
+    }
     fn state(&self) -> ContextStateView {
         ContextStateView::new(self.local.lock().unwrap().state.subscribe())
     }
@@ -742,7 +853,7 @@ impl Context for EngineContext {
                     && query
                         .plan_id
                         .as_ref()
-                        .is_none_or(|v| *v == entry.task_meta.plan_id)
+                        .is_none_or(|v| *v == entry.task_meta.plan_run_id)
                     && query
                         .executor
                         .as_ref()

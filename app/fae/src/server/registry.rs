@@ -73,6 +73,7 @@ impl Entry {
                 .is_some_and(|execution| match execution.target {
                     PlanTarget::Agent { agent_id } => agent_id == target,
                     PlanTarget::Workflow { workflow_id } => workflow_id == target,
+                    PlanTarget::PluginPlan { plan_id, .. } => plan_id == target,
                 })
     }
 }
@@ -83,6 +84,13 @@ pub struct State {
     pub stopping: bool,
 }
 pub struct Registry {
+    pub boundary_results: Arc<Mutex<HashMap<String, (std::time::Instant, fae_agent::Ctx)>>>,
+    engine: tokio::sync::Mutex<
+        Vec<(
+            Arc<fae_agent::plugin::PluginSnapshot>,
+            fae_engine::EngineAdapters,
+        )>,
+    >,
     requests: Mutex<HashMap<String, Arc<tokio::sync::Mutex<super::replay::Requests>>>>,
     pub home: PathBuf,
     pub instance: String,
@@ -106,6 +114,8 @@ impl Registry {
     }
     pub fn new(home: PathBuf, instance: String) -> Arc<Self> {
         Arc::new(Self {
+            boundary_results: Arc::new(Mutex::new(HashMap::new())),
+            engine: tokio::sync::Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
             plugins: Arc::new(fae_agent::plugin::PluginManager::new(home.clone())),
             home,
@@ -120,6 +130,8 @@ impl Registry {
         timer: fae_engine::TimerHandle,
     ) -> Arc<Self> {
         Arc::new(Self {
+            boundary_results: Arc::new(Mutex::new(HashMap::new())),
+            engine: tokio::sync::Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
             plugins: Arc::new(fae_agent::plugin::PluginManager::new(home.clone())),
             home,
@@ -127,6 +139,52 @@ impl Registry {
             state: Mutex::new(State::default()),
             timer: Some(timer),
         })
+    }
+    pub async fn current_engine(&self) -> anyhow::Result<fae_engine::EngineAdapters> {
+        let snapshot = self.plugins.snapshot();
+        let mut current = self.engine.lock().await;
+        if let Some((_, adapters)) = current.iter().find(|(s, _)| Arc::ptr_eq(s, &snapshot)) {
+            return Ok(adapters.clone());
+        }
+        let adapters = self.build_generation(snapshot.clone()).await?;
+        current.push((snapshot, adapters.clone()));
+        if current.len() > 2 {
+            current.remove(0);
+        }
+        Ok(adapters)
+    }
+    async fn build_generation(
+        &self,
+        snapshot: Arc<fae_agent::plugin::PluginSnapshot>,
+    ) -> anyhow::Result<fae_engine::EngineAdapters> {
+        super::engine::build_engine_with_snapshot(
+            fae_agent::FAEWorkflowMetadataLoader::with_home_dir(&self.home),
+            SingleAgentPlanBuilder::with_home_dir(&self.home),
+            self.timer.clone(),
+            self.plugins.clone(),
+            snapshot,
+        )
+        .await
+    }
+    pub async fn initialize_engine(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.current_engine().await?;
+        let weak = Arc::downgrade(self);
+        self.plugins.set_snapshot_publisher(move |snapshot| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let registry = weak
+                    .upgrade()
+                    .ok_or_else(|| anyhow::anyhow!("Host is stopped"))?;
+                let adapters = registry.build_generation(snapshot.clone()).await?;
+                let mut current = registry.engine.lock().await;
+                current.push((snapshot, adapters));
+                if current.len() > 2 {
+                    current.remove(0);
+                }
+                Ok(())
+            })
+        });
+        Ok(())
     }
     fn persist_lark_binding(
         &self,
@@ -334,15 +392,40 @@ impl Registry {
                     input: serde_json::Value::Null,
                 },
             ),
+            PlanTarget::PluginPlan { plan_id, config } => {
+                let snapshot = self.plugins.snapshot();
+                if !snapshot.nodes.values().any(|node| node.members.iter().any(|member| member.declaration.mounts.iter().any(|mount| matches!(mount, fae_agent::plugin::PluginMount::Plan { id, .. } if id == plan_id)))) {
+                    return Err(ProtocolError::new("plan_not_found", plan_id));
+                }
+                if principal.is_some() {
+                    return Err(ProtocolError::new(
+                        "forbidden",
+                        "Lark sessions require an Agent target",
+                    ));
+                }
+                (
+                    plan_id.clone(),
+                    fae_agent::DEFAULT_USER_ID.into(),
+                    "plugin".into(),
+                    DefinitionTarget::PluginPlan {
+                        plan_id: plan_id.clone(),
+                        config: config.clone(),
+                    },
+                )
+            }
         };
         let cache = self.requests_for(&user);
         let mut requests = cache.lock().await;
         let content = serde_json::to_string(&request).unwrap();
         let rid = request.request_id.as_ref().unwrap().to_string();
         if let Some(response) = requests.get(&rid, &content)? {
-            let sid = response.session_id.as_ref().ok_or_else(|| {
-                ProtocolError::new("session_not_found", "Cached session is unavailable")
-            })?;
+            let sid = response
+                .session
+                .as_ref()
+                .map(|s| &s.session_id)
+                .ok_or_else(|| {
+                    ProtocolError::new("session_not_found", "Cached session is unavailable")
+                })?;
             let entry = self.lookup(sid.as_str(), principal.as_ref())?;
             out.send(fae_agent::protocol::ServerFrame::Response(response));
             return Ok(entry);
@@ -352,10 +435,10 @@ impl Registry {
             .map(crate::lark::identity::session_id)
             .unwrap_or_else(wd_tools::uuid::v4);
         let key = Key {
-            kind: if matches!(create.target, PlanTarget::Agent { .. }) {
-                "agent"
-            } else {
-                "workflow"
+            kind: match create.target {
+                PlanTarget::Agent { .. } => "agent",
+                PlanTarget::Workflow { .. } => "workflow",
+                PlanTarget::PluginPlan { .. } => "plugin_plan",
             }
             .into(),
             target: target.clone(),
@@ -644,6 +727,16 @@ impl Registry {
         }
     }
     pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let contexts: Vec<_> = self
+            .boundary_results
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, (_, ctx))| ctx)
+            .collect();
+        for ctx in contexts {
+            fae_agent::plugin::leases::close_owned(&ctx, true).await;
+        }
         let entries = {
             let mut state = self.state.lock().unwrap();
             state.stopping = true;

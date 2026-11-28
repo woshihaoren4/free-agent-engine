@@ -135,7 +135,7 @@ impl PluginCall {
                 .upgrade()
                 .ok_or_else(|| anyhow::anyhow!("HandleExpired"))?
                 .rpc(
-                    RequestPath::PluginNext,
+                    RequestEvent::PluginNext,
                     serde_json::to_value(p)?,
                     self.deadline,
                 )

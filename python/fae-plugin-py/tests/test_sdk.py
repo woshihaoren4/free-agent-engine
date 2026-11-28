@@ -241,8 +241,8 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
             stderr=asyncio.subprocess.PIPE, env=os.environ.copy())
         self.processes.append(process)
         ready = await self.receive(process)
-        self.assertEqual(ready["path"], "/request/plugin/worker/hello", ready)
-        self.assertEqual(ready["payload"]["api_version"], "0.2.0")
+        self.assertEqual(ready["event"], "/request/plugin/worker/hello", ready)
+        self.assertEqual(ready["payload"]["plugin_api_version"], "0.2.0")
         await self.send(process, response(ready, {}, msg="ready"))
         return process
 
@@ -256,15 +256,15 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
             while True:
                 size = struct.unpack(">I", await process.stdout.readexactly(4))[0]
                 frame = validate(json.loads(await process.stdout.readexactly(size)))
-                if frame["path"] == "/request/plugin/next":
+                if frame.get("event") == "/request/plugin/next":
                     identifier = f"next-dispatch-{len(self.next_requests)}-{frame['request_id']}"
                     self.next_requests[identifier] = frame
-                    await self.send(process, request(identifier, frame["path"], frame["payload"],
-                                                     frame.get("session_id")))
-                elif frame["request_id"] in self.next_requests:
-                    original = self.next_requests.pop(frame["request_id"])
-                    await self.send(process, response(original, frame["payload"]["data"],
-                                                     code=frame["payload"]["code"], msg=frame["payload"]["msg"]))
+                    await self.send(process, request(identifier, frame["event"], frame["payload"],
+                                                     (frame["session"] or {}).get("session_id")))
+                elif frame.get("response_id") in self.next_requests:
+                    original = self.next_requests.pop(frame["response_id"])
+                    await self.send(process, response(original, frame["payload"],
+                                                     code=frame["code"], msg=frame["msg"]))
                 else:
                     return frame
         return await asyncio.wait_for(read(), 5)
@@ -280,14 +280,14 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
 
     async def data(self, process):
         frame = await self.receive(process)
-        self.assertEqual(frame["payload"]["code"], 0, frame)
-        return frame["payload"]["data"]
+        self.assertEqual(frame["code"], 0, frame)
+        return frame["payload"]
 
     async def error(self, process):
         frame = await self.receive(process)
-        self.assertNotEqual(frame["payload"]["code"], 0, frame)
-        self.assertIsNone(frame["payload"]["data"])
-        return frame["payload"]
+        self.assertNotEqual(frame["code"], 0, frame)
+        self.assertIsNone(frame["payload"])
+        return frame
 
     async def next_stream(self, process, id, stream_id, call_id="model"):
         await self.send(process, request(id, "/request/plugin/stream/next",
@@ -391,7 +391,7 @@ class Demo(SingleAgentHook):
         await self.call(process, "one", "S1")
         await self.call(process, "two", "S2")
         results = [await self.receive(process), await self.receive(process)]
-        self.assertEqual({r["request_id"]: r["payload"]["data"] for r in results}, {"one": "S1!", "two": "S2!"})
+        self.assertEqual({r["response_id"]: r["payload"] for r in results}, {"one": "S1!", "two": "S2!"})
 
     async def test_sync_threads_overlap(self):
         process = await self.start([("demo", """
@@ -407,7 +407,7 @@ class Demo(SingleAgentHook):
         await self.call(process, "one", "S1")
         await self.call(process, "two", "S2")
         results = [await self.receive(process), await self.receive(process)]
-        self.assertEqual({r["request_id"]: r["payload"]["data"] for r in results}, {"one": "S1!", "two": "S2!"})
+        self.assertEqual({r["response_id"]: r["payload"] for r in results}, {"one": "S1!", "two": "S2!"})
 
     async def test_chain_order_short_circuit_and_direct_composition(self):
         process = await self.start([
@@ -483,9 +483,9 @@ class Demo(ModelHook):
             await self.next_stream(process, f"next-{index}", stream_id)
             frame = await self.receive(process)
             if index == 0:
-                self.assertEqual(frame["payload"]["data"]["chunk"]["choices"][0]["delta"]["content"], "visible")
+                self.assertEqual(frame["payload"]["chunk"]["choices"][0]["delta"]["content"], "visible")
             else:
-                self.assertIn("before choices finished", frame["payload"]["msg"])
+                self.assertIn("before choices finished", frame["msg"])
 
     async def test_chain_stream_preserves_inner_outer_identity_and_error_creator(self):
         process = await self.start([

@@ -5,7 +5,7 @@ import struct
 from typing import Any, BinaryIO
 
 MAX_FRAME = 4 * 1024 * 1024
-PROTOCOL_VERSION = 4
+PROTOCOL_API_VERSION = "0.1.0"
 
 PLUGIN_PATHS = {
     "worker/hello", "inspect", "invoke", "next", "context/get", "context/export",
@@ -94,7 +94,7 @@ def hook_value(point: str, method: str, value: Any, *, output: bool = False) -> 
 
 def _payload(suffix: str, payload: dict[str, Any]) -> None:
     schemas = {
-        "plugin/worker/hello": ({"api_version", "instances"}, set()),
+        "plugin/worker/hello": ({"plugin_api_version", "instances"}, set()),
         "plugin/inspect": ({"id", "source"}, set()),
         "plugin/invoke": ({"point", "method", "contexts", "argument", "group", "timeout_ms"}, {"location", "model_members"}),
         "plugin/next": ({"access", "point", "method", "argument"}, set()),
@@ -146,25 +146,43 @@ def _payload(suffix: str, payload: dict[str, Any]) -> None:
 
 
 def validate(frame: dict[str, Any]) -> dict[str, Any]:
-    if frame.get("version") != PROTOCOL_VERSION:
-        raise ValueError("Only protocol v4 is supported")
-    path = frame.get("path", "")
-    if not isinstance(path, str) or not path.startswith(("/request/", "/response/")):
-        raise ValueError("Invalid plugin protocol path")
+    if frame.get("api_version") != PROTOCOL_API_VERSION:
+        raise ValueError("Only protocol api_version 0.1.0 is supported")
+    is_response = "response_id" in frame
+    if is_response:
+        _object(frame, {"api_version", "response_id", "code", "msg", "payload", "session", "plan"})
+        if type(frame["code"]) is not int or frame["code"] not in {0, 400, 403, 404, 409, 500, 503, 507}:
+            raise ValueError("Invalid response code")
+        if not isinstance(frame["msg"], str) or (frame["code"] != 0 and frame["payload"] is not None):
+            raise ValueError("Invalid error response")
+    else:
+        _object(frame, {"api_version", "request_id", "event", "payload", "session", "plan"}, {"call"})
+    identifier = frame.get("response_id" if is_response else "request_id")
+    if not isinstance(identifier, str) or not identifier or len(identifier.encode()) > 256 or identifier.strip() != identifier or any(ord(c) < 32 or ord(c) == 127 for c in identifier):
+        raise ValueError("Invalid correlation ID")
+    session = frame["session"]
+    if session is not None:
+        _object(session, {"session_id"})
+        sid = session["session_id"]
+        if not isinstance(sid, str) or not sid or len(sid.encode()) > 256 or sid.strip() != sid:
+            raise ValueError("Invalid session_id")
+    else:
+        sid = None
+    if frame["plan"] is not None:
+        _object(frame["plan"], {"plan_id"})
+    if frame.get("call") is not None:
+        _object(frame["call"], {"runtime_id"})
+    if is_response:
+        return frame
+    path = frame["event"]
+    if not isinstance(path, str) or not path.startswith("/request/"):
+        raise ValueError("Invalid plugin protocol event")
     suffix = path.split("/", 2)[2]
     if suffix not in {f"plugin/{p}" for p in PLUGIN_PATHS} | {f"session/{p}" for p in SESSION_PATHS}:
         raise ValueError("Unregistered plugin protocol path")
-    if set(frame) - {"version", "request_id", "session_id", "path", "payload"}:
-        raise ValueError("Unknown envelope fields")
-    identifier = frame.get("request_id")
-    if not isinstance(identifier, str) or not identifier or len(identifier.encode()) > 256 or identifier.strip() != identifier or any(ord(c) < 32 or ord(c) == 127 for c in identifier):
-        raise ValueError("Invalid request_id")
-    sid = frame.get("session_id")
-    if sid is not None and (not isinstance(sid, str) or not sid or len(sid.encode()) > 256 or sid.strip() != sid):
-        raise ValueError("Invalid session_id")
     if suffix.startswith("session/") and sid is None:
         raise ValueError("Session operation requires session_id")
-    if not isinstance(frame.get("payload"), dict) and not path.startswith("/response/"):
+    if not isinstance(frame.get("payload"), dict):
         raise ValueError("Request payload must be an object")
     if path.startswith("/request/"):
         _payload(suffix, frame["payload"])
@@ -174,33 +192,102 @@ def validate(frame: dict[str, Any]) -> dict[str, Any]:
             for reference in frame["payload"]["contexts"].values():
                 if reference.get("session_id") != sid or (reference["binding"].get("execution_id") is None) != (sid is None):
                     raise ValueError("Invocation session binding mismatch")
-    if path.startswith("/response/"):
-        body = frame["payload"]
-        if not isinstance(body, dict) or set(body) != {"code", "msg", "data"}:
-            raise ValueError("Invalid response payload")
-        if type(body["code"]) is not int or body["code"] not in {0, 400, 403, 404, 409, 500, 503, 507}:
-            raise ValueError("Invalid response code")
-        if not isinstance(body["msg"], str) or (body["code"] != 0 and body["data"] is not None):
-            raise ValueError("Invalid error response")
     return frame
 
 
 def request(request_id: str, path: str, payload: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
-    frame = {"version": PROTOCOL_VERSION, "request_id": request_id, "path": path, "payload": payload}
-    if session_id is not None:
-        frame["session_id"] = session_id
+    frame = {"api_version": PROTOCOL_API_VERSION, "request_id": request_id, "event": path,
+             "payload": payload, "session": {"session_id": session_id} if session_id else None, "plan": None}
     return validate(frame)
 
 
 def response(message: dict[str, Any], data: Any = None, *, code: int = 0, msg: str = "ok") -> dict[str, Any]:
-    if code == 0 and message["path"] in {"/request/plugin/invoke", "/request/plugin/next"}:
+    if code == 0 and message["event"] in {"/request/plugin/invoke", "/request/plugin/next"}:
         hook_value(message["payload"]["point"], message["payload"]["method"], data, output=True)
-    frame = {"version": PROTOCOL_VERSION, "request_id": message["request_id"],
-             "path": message["path"].replace("/request/", "/response/", 1),
-             "payload": {"code": code, "msg": msg, "data": data if code == 0 else None}}
-    if message.get("session_id") is not None:
-        frame["session_id"] = message["session_id"]
+    frame = {"api_version": PROTOCOL_API_VERSION, "response_id": message["request_id"],
+             "code": code, "msg": msg, "payload": data if code == 0 else None,
+             "session": message["session"], "plan": message["plan"]}
     return validate(frame)
+
+
+PROVIDER_BINDINGS = {
+    "plan/create": {"generation", "context", "instance_id", "access"},
+    "plan/init": {"instance_id", "access"},
+    "plan/next": {"instance_id", "access"},
+    "plan/abort": {"instance_id", "access", "code", "error"},
+    "plan/release": {"instance_id", "access"},
+    "runtime/select": {"generation", "ty", "context", "access"},
+    "runtime/exec": {"generation", "meta", "context", "access"},
+    "runtime/kill": {"generation", "context", "task_id", "access"},
+    "runtime/exit": {"generation", "access"},
+    "context/complete": {"access"},
+    "context/get": {"access", "context"},
+    "host/runtime/select": {"ty", "context", "access"},
+    "host/runtime/exec": {"meta", "context", "access"},
+    "host/plan/call": {"access"},
+    "host/stream/next": {"context", "access"},
+    "host/stream/close": {"context", "access"},
+    "host/stream/register": {"context", "access"},
+    "resource/next": {"generation", "context", "access"},
+    "resource/close": {"generation", "context", "access"},
+}
+
+
+def validate_worker(frame: dict[str, Any]) -> dict[str, Any]:
+    """The worker transport chooses this codec; public validate never accepts binding."""
+    if "response_id" in frame or "binding" not in frame:
+        return validate(frame)
+    _object(frame, {"api_version", "request_id", "event", "payload", "session", "plan", "binding"}, {"call"})
+    if frame["api_version"] != PROTOCOL_API_VERSION:
+        raise ValueError("Only protocol api_version 0.1.0 is supported")
+    identifier = frame["request_id"]
+    if (not isinstance(identifier, str) or not identifier or identifier.strip() != identifier
+            or len(identifier.encode()) > 256 or any(ord(c) < 32 for c in identifier)):
+        raise ValueError("Invalid worker request ID")
+    suffix = frame["event"].removeprefix("/request/plugin/")
+    required = PROVIDER_BINDINGS.get(suffix)
+    if required is None:
+        raise ValueError("Unregistered worker event")
+    binding = frame["binding"]
+    optional = {"query"} if suffix == "context/get" else ({"resources"} if suffix == "context/complete" else set())
+    _object(binding, required, optional)
+    if "resources" in binding:
+        if (not isinstance(binding["resources"], list) or len(binding["resources"]) > 16
+                or not all(isinstance(id, str) and id for id in binding["resources"])):
+            raise ValueError("Invalid output resources")
+    _access(binding["access"])
+    if "context" in binding:
+        _object(binding["context"], {"context_id"})
+        if not isinstance(binding["context"]["context_id"], str) or not binding["context"]["context_id"]:
+            raise ValueError("Invalid context reference")
+    for field in ("generation", "instance_id", "task_id"):
+        if field in binding and (not isinstance(binding[field], str) or not binding[field]):
+            raise ValueError(f"Invalid {field}")
+    if "meta" in binding:
+        from .tasks import TaskMetadata
+        TaskMetadata.from_dict(binding["meta"])
+    if "ty" in binding:
+        from .tasks import task_type
+        task_type(binding["ty"])
+    if frame["session"] is not None:
+        _object(frame["session"], {"session_id"})
+    plan = suffix.startswith("plan/") or suffix == "host/plan/call"
+    runtime = suffix.startswith("runtime/") or suffix.startswith("host/runtime/")
+    if plan:
+        _object(frame["plan"], {"plan_id"})
+    elif frame["plan"] is not None:
+        raise ValueError("Unexpected Plan route")
+    if runtime:
+        _object(frame.get("call"), {"runtime_id"})
+        if "meta" in binding and binding["meta"]["executor"] != frame["call"]["runtime_id"]:
+            raise ValueError("Task executor does not match Runtime route")
+    elif frame.get("call") is not None:
+        raise ValueError("Unexpected Runtime route")
+    if suffix in {"plan/init", "plan/abort", "plan/release", "runtime/kill", "runtime/exit", "context/get"} and frame["payload"] is not None:
+        raise ValueError("Control operation requires payload=null")
+    if suffix == "plan/abort" and (type(binding["code"]) is not int or not isinstance(binding["error"], str)):
+        raise ValueError("Invalid abort reason")
+    return frame
 
 
 async def reader() -> asyncio.StreamReader:
@@ -218,7 +305,7 @@ async def read_frame(stream: asyncio.StreamReader) -> dict[str, Any]:
     data = json.loads(await stream.readexactly(size), parse_constant=reject_constant)
     if not isinstance(data, dict):
         raise ValueError("Protocol frame must be an object")
-    return validate(data)
+    return validate_worker(data)
 
 
 def reject_constant(value: str) -> Any:
@@ -233,7 +320,7 @@ class Writer:
         self.ready = asyncio.Event()
 
     async def send(self, frame: dict[str, Any], *, control: bool = False) -> None:
-        validate(frame)
+        validate_worker(frame)
         data = json.dumps(frame, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if not data or len(data) > MAX_FRAME:
             raise ValueError("Plugin protocol message exceeds 4 MiB")

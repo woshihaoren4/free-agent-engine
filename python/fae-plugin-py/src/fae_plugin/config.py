@@ -23,7 +23,7 @@ def normalize(raw: Any, plugin_id: str, source: Path) -> dict[str, Any]:
     raw.setdefault("registration_mode", "direct")
     raw.setdefault("fae_plugin_api_version", API_VERSION)
     RegistrationMode(raw["registration_mode"])
-    if raw["fae_plugin_api_version"] != API_VERSION:
+    if raw["fae_plugin_api_version"] not in (API_VERSION, "0.3.0"):
         raise ValueError("Incompatible FAE plugin API")
     version = raw.get("plugin_version")
     if not isinstance(version, str) or not re.fullmatch(
@@ -50,9 +50,34 @@ def normalize(raw: Any, plugin_id: str, source: Path) -> dict[str, Any]:
         point = mount.get("point")
         if not isinstance(point, str):
             raise ValueError("Invalid mount point")
-        locations = {"SingleAgentHook": "agent_id", "ToolsHook": "channel", "ModelHook": None}
+        locations = {"SingleAgentHook": "agent_id", "ToolsHook": "channel", "ModelHook": None,
+                     "Plan": None, "Runtime": None}
         location = locations.get(point)
         allowed_mount = {"point", "implementation"} | ({location} if location else set())
+        if point in ("Plan", "Runtime"):
+            if raw["fae_plugin_api_version"] != "0.3.0" or "id" not in raw:
+                raise ValueError("Plan/Runtime plugins require API 0.3.0 and an explicit plugin ID")
+            identifier = mount.get("id")
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", identifier):
+                raise ValueError("Invalid provider ID")
+            allowed_mount |= {"id"}
+            if point == "Plan":
+                allowed_mount |= {"next_plan_id"}
+                if raw["registration_mode"] != "chain":
+                    raise ValueError("Plan providers require chain registration")
+                next_id = mount.get("next_plan_id")
+                if next_id is not None and (not isinstance(next_id, str) or
+                        not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", next_id) or next_id == identifier):
+                    raise ValueError("Invalid next_plan_id")
+            else:
+                from .tasks import task_types
+                allowed_mount |= {"task_types", "public_calls"}
+                task_types(mount.get("task_types"))
+                calls = mount.get("public_calls")
+                if calls is not None and (
+                        not isinstance(calls, dict) or set(calls) - {"exec", "select"}
+                        or any(value is not None and value not in mount["task_types"] for value in calls.values())):
+                    raise ValueError("Invalid Runtime public_calls")
         if point not in locations or set(mount) - allowed_mount:
             raise ValueError("Invalid mount point or location fields")
         if point == "ToolsHook":
@@ -75,8 +100,17 @@ def normalize(raw: Any, plugin_id: str, source: Path) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", class_name):
             raise ValueError("implementation must name an exported class")
     for i, left in enumerate(mounts):
-        location = {"SingleAgentHook": "agent_id", "ToolsHook": "channel", "ModelHook": None}[left["point"]]
+        location = {"SingleAgentHook": "agent_id", "ToolsHook": "channel", "ModelHook": None,
+                    "Plan": None, "Runtime": None}[left["point"]]
         for right in mounts[i + 1:]:
+            if left["point"] in ("Plan", "Runtime") and (left["point"], left["id"]) == (right["point"], right.get("id")):
+                if left["point"] == "Plan" or raw["registration_mode"] != "chain":
+                    raise ValueError("Duplicate provider ID")
+                if set(left["task_types"]) != set(right["task_types"]):
+                    raise ValueError("Runtime chain task_types differ")
+                if (left.get("public_calls") is not None and right.get("public_calls") is not None
+                        and left["public_calls"] != right["public_calls"]):
+                    raise ValueError("Runtime chain public_calls differ")
             if (left["point"], left["implementation"]) != (right["point"], right["implementation"]):
                 continue
             if location is None or left.get(location) == right.get(location) or (

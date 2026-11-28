@@ -1,3 +1,4 @@
+mod adapters;
 mod context;
 mod engine;
 mod engine_rt;
@@ -7,6 +8,7 @@ mod session;
 mod timer;
 mod tools;
 
+pub use adapters::*;
 pub use context::*;
 pub use engine::*;
 pub use engine_rt::*;
@@ -117,7 +119,7 @@ mod tests {
             output["content"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("pub use tools::*;")
+                .contains("mod engine;")
         );
 
         Ok(())

@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from ._host import BoundHost, Host
+from ._providers import ProviderRegistry
+from ._provider_host import ProviderOwner, ProviderContext, ProviderRuntime
+from .tasks import TaskMetadata, TaskRequest, TaskResponse
 from ._protocol import Writer, read_frame, reader, request, response, hook_value
 from .chain import HookNext
 from .context import Context, _QueryCompleted
@@ -160,6 +163,12 @@ class Worker:
     def __init__(self, writer: Writer, members: list[dict[str, Any]]):
         self.writer, self.host = writer, Host(writer)
         self.records = register(members)
+        self.providers = ProviderRegistry(self.records)
+        self.host.provider_worker = self
+        self.provider_streams: dict[str, Any] = {}
+        self.plan_bindings: dict[str, tuple[str, dict[str, str], Any]] = {}
+        self.runtime_tasks: dict[tuple[str, str, str], asyncio.Task[Any]] = {}
+        self.plan_tasks: dict[str, asyncio.Task[Any]] = {}
         self.calls: dict[str, PluginCall] = {}
         self.streams: dict[str, Stream] = {}
         self.host_streams: dict[str, PluginCall] = {}
@@ -211,6 +220,168 @@ class Worker:
             self.round_robin.append(group)
         self.queue[group].append(invocation)
         self.wake.set()
+
+    async def provider_request(self, frame: dict[str, Any]) -> None:
+        binding = frame["binding"]
+        operation = frame["event"].removeprefix("/request/plugin/")
+        provider = (frame.get("plan") or frame.get("call") or {})
+        owner = ProviderOwner(self.host, binding["access"], frame["session"],
+                              asyncio.get_running_loop().time() + 120)
+        task_key = None
+        try:
+            if operation.startswith("resource/"):
+                stream_id = frame["payload"]
+                record = self.provider_streams.get(stream_id)
+                if record is None and operation == "resource/close":
+                    await self.result(frame["request_id"], result=None)
+                    return
+                if record is None or (binding["generation"], binding["context"],
+                    binding["access"]["member"]) != (record["generation"], record["context"], record["member"]):
+                    raise ValueError("Provider stream binding mismatch")
+                if operation == "resource/close":
+                    await self.close_provider_stream(stream_id)
+                    result = None
+                else:
+                    if record["lock"].locked():
+                        raise ValueError("Provider stream already being consumed")
+                    async with record["lock"]:
+                        record["task"] = asyncio.current_task()
+                        try:
+                            item = await asyncio.wait_for(record["iterator"].__anext__(), 60)
+                            result = {"done": False, "value": json_value(item)}
+                        except StopAsyncIteration:
+                            result = {"done": True}
+                            await self.close_provider_stream(stream_id)
+                        except BaseException:
+                            await self.close_provider_stream(stream_id)
+                            raise
+                        finally:
+                            record["task"] = None
+                await self.result(frame["request_id"], result=result)
+                return
+            identifier = provider.get("plan_id") or provider.get("runtime_id")
+            records = [r for r in self.records if r.mount.get("id") == identifier]
+            if not records or binding["access"]["member"] not in {r.key for r in records}:
+                raise ValueError("Provider capability owner mismatch")
+            if operation.startswith("plan/"):
+                instance = binding["instance_id"]
+                if operation == "plan/create":
+                    result = self.providers.create(identifier, instance, frame["payload"])
+                    self.plan_bindings[instance] = (binding["generation"], binding["context"], frame["session"])
+                    await self.result(frame["request_id"], result=result)
+                    return
+                plan_binding = self.plan_bindings.get(instance)
+                method = operation.split("/")[1]
+                if method == "release":
+                    if plan_binding is not None and plan_binding[2] != frame["session"]:
+                        raise ValueError("Plan Session changed")
+                    # Check group ownership before cancelling any in-flight call.
+                    if instance in self.providers.groups:
+                        self.providers.group(identifier, instance)
+                        running = self.plan_tasks.get(instance)
+                        if running is not None:
+                            running.cancel()
+                    await self.providers.release(identifier, instance)
+                    self.plan_bindings.pop(instance, None)
+                    await self.result(frame["request_id"], result=None, control=True)
+                    return
+                if plan_binding is None:
+                    raise ValueError("Unknown Plan instance")
+                generation, reference, session = plan_binding
+                owner.generation = generation
+                if session != frame["session"]:
+                    raise ValueError("Plan Session changed")
+                ctx = ProviderContext(owner, reference)
+                rt = ProviderRuntime(owner, ctx)
+                if method == "abort":
+                    running = self.plan_tasks.get(instance)
+                    if running is not None and running is not asyncio.current_task():
+                        running.cancel()
+                elif method in ("init", "next"):
+                    if instance in self.plan_tasks:
+                        raise ValueError("Plan method already in flight")
+                    self.plan_tasks[instance] = asyncio.current_task()
+                args: tuple[Any, ...] = ()
+                if method == "next":
+                    wire = frame["payload"]
+                    child = ProviderContext(owner, wire["context"])
+                    args = (TaskResponse.from_dict(wire, ctx=child),)
+                elif method == "abort":
+                    args = (binding["code"], binding["error"])
+                result = await self.providers.plan(identifier, instance, method, args, ctx=ctx, rt=rt)
+            else:
+                owner.generation = binding["generation"]
+                reference = binding.get("context")
+                ctx = ProviderContext(owner, reference) if reference else None
+                method = operation.split("/")[1]
+                if method == "exec":
+                    meta = TaskMetadata.from_dict(binding["meta"])
+                    args = (TaskRequest(meta, frame["payload"], ctx),)
+                    task_key = (binding["generation"], identifier, reference["context_id"], meta.id)
+                    if task_key in self.runtime_tasks:
+                        raise ValueError("Task already executing in this Context")
+                    self.runtime_tasks[task_key] = asyncio.current_task()
+                elif method == "select":
+                    args = (binding["ty"], frame["payload"])
+                elif method == "kill":
+                    task_key = (binding["generation"], identifier, reference["context_id"], binding["task_id"])
+                    running = self.runtime_tasks.get(task_key)
+                    if running is not None:
+                        running.cancel()
+                    task_key = None
+                    args = (binding["task_id"],)
+                elif method == "exit":
+                    for stream_id, record in list(self.provider_streams.items()):
+                        if record["generation"] == binding["generation"] and record["member"] in {r.key for r in records}:
+                            await self.close_provider_stream(stream_id)
+                    args = ()
+                else:
+                    raise ValueError("Unsupported provider operation")
+                result = await self.providers.runtime(identifier, method, args, ctx=ctx,
+                                                      generation=binding["generation"])
+            await self.result(frame["request_id"], result=result)
+        except BaseException as error:
+            await self.result(frame["request_id"], error=error, control=True)
+        finally:
+            owner.active = False
+            if operation.startswith("plan/"):
+                instance = binding["instance_id"]
+                if self.plan_tasks.get(instance) is asyncio.current_task():
+                    self.plan_tasks.pop(instance, None)
+            if task_key is not None:
+                self.runtime_tasks.pop(task_key, None)
+
+    def register_provider_stream(self, owner: ProviderOwner, reference: Any, iterator: Any) -> str:
+        if len(self.provider_streams) >= 16:
+            raise RuntimeError("Provider stream capacity exceeded")
+        iterator = iterator.__aiter__()
+        stream_id = f"provider-stream-{next(self.stream_ids)}"
+        self.provider_streams[stream_id] = {
+            "generation": owner.generation, "context": dict(reference),
+            "member": owner.access["member"], "iterator": iterator, "lock": asyncio.Lock(),
+        }
+        async def expire() -> None:
+            await asyncio.sleep(120)
+            await self.close_provider_stream(stream_id)
+        self.provider_streams[stream_id]["expiry"] = asyncio.create_task(expire())
+        return stream_id
+
+    async def close_provider_stream(self, stream_id: str) -> None:
+        record = self.provider_streams.pop(stream_id, None)
+        if record:
+            expiry = record.get("expiry")
+            if expiry and expiry is not asyncio.current_task():
+                expiry.cancel()
+            task = record.get("task")
+            if task and task is not asyncio.current_task():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if record and hasattr(record["iterator"], "aclose"):
+            try:
+                await record["iterator"].aclose()
+            except RuntimeError:
+                # A cancelled next owns the iterator until its finally block.
+                pass
 
     async def schedule(self) -> None:
         while True:
@@ -592,7 +763,7 @@ class Worker:
             if (frame["payload"]["point"], frame["payload"]["method"]) != (invocation.params["point"], invocation.params["method"]):
                 raise ValueError("next hook mismatch")
             reference = invocation.params["contexts"][access["member"]]
-            if access["binding"] != reference["binding"] or frame.get("session_id") != reference.get("session_id"):
+            if access["binding"] != reference["binding"] or (frame["session"] or {}).get("session_id") != reference.get("session_id"):
                 raise ValueError("next binding mismatch")
             slot = invocation.next_slots[access["member"]]
             if slot["started"] or frame["payload"]["argument"] != self.next_wire(slot["input"], access["member"]):
@@ -611,8 +782,9 @@ class Worker:
 
     async def run(self) -> None:
         self.spawn(self.schedule())
+        api_version = "0.3.0" if self.providers.plans or self.providers.runtimes else API_VERSION
         hello = request("worker-hello", "/request/plugin/worker/hello",
-            {"api_version": API_VERSION, "instances": [r.key for r in self.records]})
+            {"plugin_api_version": api_version, "instances": [r.key for r in self.records]})
         await self.writer.send(hello, control=True)
         stream = await reader()
         accepted = await read_frame(stream)
@@ -626,12 +798,23 @@ class Worker:
                     if error.partial:
                         raise
                     break
-                path = frame["path"]
-                if path.startswith("/response/"):
+                if "response_id" in frame:
                     self.host.response(frame)
                     continue
+                path = frame["event"]
+                if frame["request_id"] in self.requests:
+                    raise ValueError("Duplicate in-flight request ID")
                 self.requests[frame["request_id"]] = frame
-                if path == "/request/plugin/invoke":
+                if "binding" in frame:
+                    # Allow the host's reserved release lane (1024) and its
+                    # acknowledged releases (up to 256 pending RPCs) even
+                    # when all ordinary provider slots are busy.
+                    limit = 96 + 1024 + 256 if path == "/request/plugin/plan/release" else 96
+                    if len(self.controls) >= limit:
+                        await self.result(frame["request_id"], error=PluginHostError("Provider capacity exceeded"))
+                    else:
+                        self.spawn(self.provider_request(frame))
+                elif path == "/request/plugin/invoke":
                     await self.enqueue(frame)
                 elif path == "/request/plugin/stream/next":
                     if len(self.controls) >= 64:

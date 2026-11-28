@@ -253,7 +253,8 @@ async fn coordinated_agent_steer_records_application_and_rejection() -> anyhow::
         let (env, _) = SingleAgentEnv::from_agent_id_with_user_id("worker", "first", "alice");
         let env = env.with_session_id("chat");
         let runner = engine.clone();
-        let job = tokio::spawn(async move { runner.execute_session(execution, env).await });
+        let job =
+            tokio::spawn(async move { crate::execute_session(&runner, execution, env).await });
         tokio::time::timeout(Duration::from_secs(3), gate.entered.notified()).await?;
         let request_id = RequestId::new("steer")?;
         session.steer(
@@ -286,9 +287,7 @@ async fn coordinated_agent_steer_records_application_and_rejection() -> anyhow::
             settings.definitions.clear();
             let next = session.prepare(settings)?;
             let (env, _) = SingleAgentEnv::from_agent_id_with_user_id("worker", "next", "alice");
-            engine
-                .execute_session(next, env.with_session_id("chat"))
-                .await?;
+            crate::execute_session(&engine, next, env.with_session_id("chat")).await?;
             assert!(
                 calls.lock().unwrap()[2]
                     .messages
@@ -1188,7 +1187,7 @@ async fn assert_async_trace<R: Send + 'static>(
             ctx: ctx.clone(),
             meta: TaskMeta {
                 id: id.clone(),
-                plan_id: "trace-plan".into(),
+                plan_run_id: "trace-plan".into(),
                 publisher: "trace-publisher".into(),
                 ty: ty.clone(),
                 ..Default::default()
@@ -1237,7 +1236,7 @@ async fn assert_async_trace<R: Send + 'static>(
     for entry in entries {
         assert_eq!(entry.task_meta.id, id);
         assert_eq!(entry.task_meta.ty, ty);
-        assert_eq!(entry.task_meta.plan_id, "trace-plan");
+        assert_eq!(entry.task_meta.plan_run_id, "trace-plan");
         assert_eq!(entry.task_meta.publisher, "trace-publisher");
         assert!(!entry.task_meta.executor.is_empty());
     }

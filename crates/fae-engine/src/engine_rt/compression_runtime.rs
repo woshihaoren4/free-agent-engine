@@ -101,7 +101,7 @@ impl CompressionRuntime {
             meta: TaskMeta {
                 id: format!("{}-model", task.meta.id),
                 ty: TaskType::Model,
-                plan_id: task.meta.plan_id.clone(),
+                plan_run_id: task.meta.plan_run_id.clone(),
                 ..Default::default()
             },
             req: request,

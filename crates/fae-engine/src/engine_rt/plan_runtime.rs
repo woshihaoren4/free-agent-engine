@@ -20,11 +20,13 @@ enum PlanCompletion {
 
 #[derive(Debug)]
 struct PlanExecution {
+    definition_id: String,
     plan: Option<Box<dyn Plan>>,
     ctx: Ctx,
     completion: Option<PlanCompletion>,
     pending_order: Vec<String>,
     responses: HashMap<String, TaskResponse>,
+    used_task_ids: HashSet<String>,
     meta: TaskMeta,
     done: Arc<tokio::sync::Notify>,
 }
@@ -85,11 +87,16 @@ impl PlanRuntime {
             req: mut plan,
         } = task;
         if ctx.cancel_requested() {
-            plan.abort(
-                PLAN_ABORT_CODE,
-                fae_agent::Error::ContextAborted.to_string(),
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                plan.abort(
+                    PLAN_ABORT_CODE,
+                    fae_agent::Error::ContextAborted.to_string(),
+                ),
             )
             .await;
+            ctx.discard_output();
+            let _ = ctx.cleanup().await;
             return Err(fae_agent::Error::ContextAborted);
         }
 
@@ -111,11 +118,13 @@ impl PlanRuntime {
         let done = Arc::new(tokio::sync::Notify::new());
         let watch_ctx = ctx.clone();
         let execution = Arc::new(Mutex::new(PlanExecution {
+            definition_id: plan.id().to_owned(),
             plan: Some(plan),
             ctx,
             completion: Some(completion),
             pending_order: Vec::new(),
             responses: HashMap::new(),
+            used_task_ids: HashSet::new(),
             meta: plan_meta,
             done: done.clone(),
         }));
@@ -146,12 +155,17 @@ impl PlanRuntime {
                             execution.meta.clone(),
                             ContextStackPhase::Cancelled,
                         ));
-                        execution
-                            .plan
-                            .as_mut()
-                            .unwrap()
-                            .abort(PLAN_ABORT_CODE, message.clone())
-                            .await;
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            execution
+                                .plan
+                                .as_mut()
+                                .unwrap()
+                                .abort(PLAN_ABORT_CODE, message.clone()),
+                        )
+                        .await;
+                        execution.ctx.discard_output();
+                        let _ = execution.ctx.cleanup().await;
                         let _ = execution.ctx.append_stack(ContextStackDraft::new(
                             execution.meta.clone(),
                             ContextStackPhase::CleanupFinished,
@@ -240,12 +254,25 @@ impl PlanRuntime {
                 let Some(execution) = self.plans.lock().await.get(plan_id).cloned() else {
                     return;
                 };
-                let ctx = {
+                let (ctx, definition_id) = {
                     let mut execution = execution.lock().await;
+                    let reused = tasks
+                        .iter()
+                        .find(|task| execution.used_task_ids.contains(&task.meta.id))
+                        .map(|task| task.meta.id.clone());
+                    if let Some(id) = reused {
+                        let message = format!("plan `{plan_id}` reused task id `{id}`");
+                        drop(execution);
+                        self.fail_plan(plan_id, anyhow::anyhow!(message)).await;
+                        return;
+                    }
+                    execution
+                        .used_task_ids
+                        .extend(tasks.iter().map(|task| task.meta.id.clone()));
                     execution.pending_order =
                         tasks.iter().map(|task| task.meta.id.clone()).collect();
                     execution.responses.clear();
-                    execution.ctx.clone()
+                    (execution.ctx.clone(), execution.definition_id.clone())
                 };
 
                 for task in &mut tasks {
@@ -254,7 +281,13 @@ impl PlanRuntime {
                     // A prebuilt child plan already owns its execution context.
                     let scope_id = ctx.scope().unwrap().scope_id.clone();
                     let task_scope = task.ctx.scope().ok();
-                    if task.meta.ty != TaskType::Plan
+                    if task.meta.ty == TaskType::Plan && task.payload().is::<serde_json::Value>() {
+                        // EngineRuntime resolves the target builder and forks once
+                        // with its child spec. Pass the parent Context through here.
+                        if task_scope.is_none() {
+                            task.ctx = ctx.clone();
+                        }
+                    } else if task.meta.ty != TaskType::Plan
                         || task_scope.as_ref().is_none_or(|s| s.scope_id == scope_id)
                     {
                         let parent = if task_scope.is_some() {
@@ -270,7 +303,8 @@ impl PlanRuntime {
                             }
                         }
                     }
-                    task.meta.plan_id = plan_id.to_string();
+                    task.meta.plan_run_id = plan_id.to_string();
+                    task.meta.origin_plan_id = Some(definition_id.clone());
                     task.meta.publisher = Self::ID.to_string();
                 }
 
@@ -299,8 +333,22 @@ impl PlanRuntime {
         };
         let mut execution = execution.lock().await;
         execution.done.notify_one();
+        if let Err(error) = execution.ctx.cleanup().await {
+            execution.ctx.discard_output();
+            let _ = execution
+                .ctx
+                .set_state(ContextState::failed(error.to_string()));
+        }
         if !execution.ctx.state().current().is_terminal() {
-            let _ = execution.ctx.set_state(ContextState::succeeded(()));
+            if let Err(error) = execution.ctx.publish_output() {
+                execution.ctx.discard_output();
+                let state = if execution.ctx.cancel_requested() {
+                    ContextState::cancelled(error.to_string())
+                } else {
+                    ContextState::failed(error.to_string())
+                };
+                let _ = execution.ctx.set_state(state);
+            }
         }
         // Cancellation can win after the earlier check or while removing the plan.
         // Publish the retained terminal decision rather than an unconditional success.
@@ -317,12 +365,15 @@ impl PlanRuntime {
             let _ = execution
                 .ctx
                 .append_stack(ContextStackDraft::new(execution.meta.clone(), phase));
-            execution
-                .plan
-                .as_mut()
-                .unwrap()
-                .abort(PLAN_ABORT_CODE, message.clone())
-                .await;
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                execution
+                    .plan
+                    .as_mut()
+                    .unwrap()
+                    .abort(PLAN_ABORT_CODE, message.clone()),
+            )
+            .await;
             let _ = execution.ctx.append_stack(ContextStackDraft::new(
                 execution.meta.clone(),
                 ContextStackPhase::CleanupFinished,
@@ -414,12 +465,17 @@ impl PlanRuntime {
         let _ = execution
             .ctx
             .append_stack(ContextStackDraft::new(execution.meta.clone(), phase));
-        execution
-            .plan
-            .as_mut()
-            .unwrap()
-            .abort(PLAN_ABORT_CODE, message.clone())
-            .await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            execution
+                .plan
+                .as_mut()
+                .unwrap()
+                .abort(PLAN_ABORT_CODE, message.clone()),
+        )
+        .await;
+        execution.ctx.discard_output();
+        let _ = execution.ctx.cleanup().await;
         let _ = execution.ctx.append_stack(ContextStackDraft::new(
             execution.meta.clone(),
             ContextStackPhase::CleanupFinished,
@@ -429,7 +485,7 @@ impl PlanRuntime {
         let _ = execution.ctx.invocation_finished();
 
         match execution.completion.take() {
-            Some(PlanCompletion::Spawn(meta)) if !meta.plan_id.is_empty() => {
+            Some(PlanCompletion::Spawn(meta)) if !meta.plan_run_id.is_empty() => {
                 let event = Event {
                     from_rt_id: Self::ID.to_string(),
                     event_type: EventType::TaskError(TaskError {
@@ -499,7 +555,9 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     async fn spawn(&self, task: TaskReq<Box<dyn Plan>>) -> fae_agent::Result<()> {
         let meta = TaskMeta {
             id: task.meta.id.clone(),
-            plan_id: task.meta.plan_id.clone(),
+            plan_run_id: task.meta.plan_run_id.clone(),
+            origin_plan_id: task.meta.origin_plan_id.clone(),
+            target_plan_id: task.meta.target_plan_id.clone(),
             ty: task.meta.ty.clone(),
             publisher: task.meta.publisher.clone(),
             executor: task.meta.executor.clone(),
@@ -509,7 +567,7 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     }
 
     async fn task_result_callback(&self, response: TaskResponse) -> fae_agent::Result<()> {
-        let plan_id = response.meta.plan_id.clone();
+        let plan_id = response.meta.plan_run_id.clone();
         let task_id = response.meta.id.clone();
         if self.abort_if_requested(&plan_id).await {
             return Ok(());
@@ -610,7 +668,12 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
     }
 
     async fn task_error_callback(&self, error: TaskError) -> fae_agent::Result<()> {
-        let execution = self.plans.lock().await.get(&error.meta.plan_id).cloned();
+        let execution = self
+            .plans
+            .lock()
+            .await
+            .get(&error.meta.plan_run_id)
+            .cloned();
         let Some(execution) = execution else {
             return Ok(());
         };
@@ -622,10 +685,10 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
         {
             return Ok(());
         }
-        if self.abort_if_requested(&error.meta.plan_id).await {
-            self.abort_plan(&error.meta.plan_id).await;
+        if self.abort_if_requested(&error.meta.plan_run_id).await {
+            self.abort_plan(&error.meta.plan_run_id).await;
         } else {
-            self.fail_plan(&error.meta.plan_id, anyhow::anyhow!(error.error))
+            self.fail_plan(&error.meta.plan_run_id, anyhow::anyhow!(error.error))
                 .await;
         }
         Ok(())
@@ -635,7 +698,9 @@ impl RuntimeSelectExec<Box<dyn Plan>, (), (), ()> for PlanRuntime {
         let ctx = task.ctx.clone();
         let mut meta = TaskMeta {
             id: task.meta.id.clone(),
-            plan_id: task.meta.plan_id.clone(),
+            plan_run_id: task.meta.plan_run_id.clone(),
+            origin_plan_id: task.meta.origin_plan_id.clone(),
+            target_plan_id: task.meta.target_plan_id.clone(),
             ty: task.meta.ty.clone(),
             publisher: task.meta.publisher.clone(),
             executor: task.meta.executor.clone(),
@@ -973,7 +1038,7 @@ mod tests {
             ctx: ctx.clone(),
             meta: TaskMeta {
                 id: "accepted-task-id".into(),
-                plan_id: "caller-plan".into(),
+                plan_run_id: "caller-plan".into(),
                 ty: TaskType::Plan,
                 publisher: "caller".into(),
                 ..Default::default()
@@ -1010,7 +1075,7 @@ mod tests {
             stacks
                 .iter()
                 .all(|entry| entry.task_meta.id == "accepted-task-id"
-                    && entry.task_meta.plan_id == "caller-plan"
+                    && entry.task_meta.plan_run_id == "caller-plan"
                     && entry.task_meta.publisher == "caller")
         );
     }

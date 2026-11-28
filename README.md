@@ -33,7 +33,7 @@ CLI 会自动连接当前 FAE home 的后台服务，默认监听 `127.0.0.1:666
 `fae server stop` 停止并等待清理；自定义端口可用 `fae server start --port 2666`。
 端口冲突会直接报错。更多服务、会话和重连说明见 [CLI 文档](app/fae/README.md)。
 
-支持 Python Agent、工具和流式模型插件。先安装 SDK，使用
+支持 Python Plan、Runtime，以及 Agent、工具和流式模型钩子。先安装 SDK，使用
 `fae plugin install <文件或目录>` 安装，`fae plugin show <id>` 查看详情，
 `fae plugin show`（等同于 `fae plugin show '*'`）简洁列出插件，
 `fae plugin uninstall <id>` 卸载。
@@ -44,12 +44,19 @@ CLI 会自动连接当前 FAE home 的后台服务，默认监听 `127.0.0.1:666
 配置、完整 API 和可运行样例见
 [Python 插件 SDK](python/fae-plugin-py/README.md)。
 
-会话使用公共 v4 协议，Python 插件 API 为 `0.2.0`，升级时需同步更新服务、
+公共协议固定为 `api_version: "0.1.0"`；Plan/Runtime 插件 API 为 `0.3.0`，
+既有 Hook 插件 API 仍为 `0.2.0`。升级协议时需同步更新服务、
 客户端和 SDK。逻辑 Session 以可信用户和 session ID 标识，每次 start 创建独立
 Execution；同一会话最多一个活跃执行，steer 可查询 Applied/NotApplied，
 stop 检查 execution ID 并等待子调用和插件资源清理。多个客户端可以订阅同一
 会话，断线保留执行。Agent/Workflow 定义与 workspace 在每次 Execution 固定，
 下一次执行重新加载定义；历史和用户记忆沿用已有分区、文件路径及格式。
+
+Engine 保留原生泛型执行接口，通过独立的 EngineAdapters/BridgeRegistry 接入 JSON。
+Plan 使用全局唯一 ID；Runtime 声明 ID 和 TaskType，由 EngineRuntime 统一调度。
+一次执行固定一个 Engine 代际，插件重载先构建并校验完整代际，再原子发布。
+见 [Plan/Runtime 使用说明](docs/faeplan/fae-plan-runtime-plugin-implementation.md)
+与 [可运行示例](examples/plugin/plan_runtime/)。
 
 ## 快速开始
 
@@ -96,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let execution_id = execution.execution_id.clone();
     let (agent, _) = SingleAgentEnv::from_agent_id("fae", "用一句话介绍 FAE");
-    engine.execute_session(execution, agent.with_session_id("demo")).await?;
+    fae_engine::execute_session(&engine, execution, agent.with_session_id("demo")).await?;
     let outcome = session.execution(Some(&execution_id))?.outcome
         .ok_or_else(|| anyhow::anyhow!("Execution is still cleaning up"))?;
     match outcome {

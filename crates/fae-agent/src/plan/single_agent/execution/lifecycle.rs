@@ -169,9 +169,7 @@ impl Plan for SingleAgentPlan {
                 } else {
                     self.finish_on_drop = true;
                     self.ctx
-                        .set_state(crate::ContextState::succeeded(Value::String(
-                            self.final_output.clone(),
-                        )))?;
+                        .submit_result(Value::String(self.final_output.clone()))?;
                     self.emit(
                         self.template.agent.name.clone(),
                         SessionEventData::Completed {

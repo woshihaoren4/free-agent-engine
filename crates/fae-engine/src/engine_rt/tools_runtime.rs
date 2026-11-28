@@ -123,11 +123,14 @@ impl ToolsRuntime {
         None
     }
 
-    async fn build_tool(&self, ctx: &Ctx, tool_name: &str) -> Option<Arc<dyn Tools>> {
-        let mut tool = self
-            .lookup_tool(tool_name)
+    fn resolve_tool(&self, ctx: &Ctx, tool_name: &str) -> Option<Arc<dyn Tools>> {
+        self.lookup_tool(tool_name)
             .cloned()
-            .or_else(|| self.plugins.as_ref().and_then(|p| p.tool(ctx, tool_name)))?;
+            .or_else(|| self.plugins.as_ref().and_then(|p| p.tool(ctx, tool_name)))
+    }
+
+    async fn build_tool(&self, ctx: &Ctx, tool_name: &str) -> Option<Arc<dyn Tools>> {
+        let mut tool = self.resolve_tool(ctx, tool_name)?;
         for hook in &self.tools_hooks {
             tool = hook.build(tool).await;
         }
@@ -157,6 +160,10 @@ impl RuntimeSelectExec<ToolRequest, ToolResponse, String, Value> for ToolsRuntim
 
     fn tys(&self) -> Vec<TaskType> {
         vec![TaskType::Tool]
+    }
+
+    fn supports_task(&self, ctx: &Ctx, _: &fae_agent::TaskMeta, req: &ToolRequest) -> bool {
+        self.resolve_tool(ctx, req.get_tool_name()).is_some()
     }
 
     async fn watch(&self) -> fae_agent::Result<Receiver<Event>> {

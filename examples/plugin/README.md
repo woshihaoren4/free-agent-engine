@@ -4,7 +4,9 @@
 `table_line_chart`、`table_image` 使用 `chain`，共用工具通道。`plugin.config` 声明挂载位置，
 `plugin.py` 实现类。宿主已包含 Python 插件支持。
 
-全部示例显式声明 `fae_plugin_api_version: "0.2.0"`，要求公共 v4 宿主与对应 SDK。
+上述 Hook 示例声明 `fae_plugin_api_version: "0.2.0"`，
+要求协议 `api_version: "0.1.0"` 的宿主与对应 SDK。
+另见 [Plan/Runtime 示例](plan_runtime/README.md)，声明插件 API `0.3.0`。
 `plugin_version: "1.0.0"` 是示例自身版本，与宿主 API 版本分别管理。
 
 不传 `--session-id` 时由宿主创建新 Session；该选项仅用于连接已存在的会话。
