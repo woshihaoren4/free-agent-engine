@@ -4,9 +4,12 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 pub mod adapter;
+pub mod bridge;
 pub mod codec;
 pub mod config;
+pub mod leases;
 pub mod manager;
+pub mod provider;
 pub use manager::{PluginExecutionBinding, PluginManager, PluginSnapshot};
 
 pub enum PluginValue {
@@ -17,6 +20,36 @@ pub enum PluginValue {
 
 #[async_trait::async_trait]
 pub trait PluginExecutor: std::fmt::Debug + Send + Sync {
+    /// Reserve bounded queue space before creating a remote instance.
+    /// Invoking the returned action enqueues release without waiting for a reply.
+    fn reserve_plan_release(
+        &self,
+        _request: crate::protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<Box<dyn FnOnce() + Send + Sync>> {
+        anyhow::bail!("plugin executor does not support deferred Plan release")
+    }
+
+    async fn provider_control(
+        &self,
+        _request: crate::protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("plugin executor does not support provider lifecycle control")
+    }
+    async fn provider_with_contexts(
+        &self,
+        ctx: &crate::Ctx,
+        request: crate::protocol::WorkerRequestMessage,
+        _read_contexts: Vec<crate::Ctx>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.provider(ctx, request).await
+    }
+    async fn provider(
+        &self,
+        _ctx: &crate::Ctx,
+        _request: crate::protocol::WorkerRequestMessage,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("plugin executor does not support providers")
+    }
     fn status(&self) -> serde_json::Value {
         serde_json::json!({})
     }
@@ -33,6 +66,14 @@ pub trait PluginExecutor: std::fmt::Debug + Send + Sync {
 }
 
 pub const API_VERSION: &str = "0.2.0";
+pub const PLAN_RUNTIME_API_VERSION: &str = "0.3.0";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePublicCalls {
+    pub exec: Option<String>,
+    pub select: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +93,19 @@ pub enum PluginEngine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "point", deny_unknown_fields)]
 pub enum PluginMount {
+    Plan {
+        id: String,
+        implementation: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_plan_id: Option<String>,
+    },
+    Runtime {
+        id: String,
+        implementation: String,
+        task_types: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_calls: Option<RuntimePublicCalls>,
+    },
     SingleAgentHook {
         implementation: String,
         #[serde(default)]
@@ -74,12 +128,16 @@ impl PluginMount {
         match self {
             Self::SingleAgentHook { implementation, .. }
             | Self::ToolsHook { implementation, .. }
+            | Self::Plan { implementation, .. }
+            | Self::Runtime { implementation, .. }
             | Self::ModelHook { implementation, .. } => implementation,
         }
     }
 
     pub fn point(&self) -> &'static str {
         match self {
+            Self::Plan { .. } => "Plan",
+            Self::Runtime { .. } => "Runtime",
             Self::SingleAgentHook { .. } => "SingleAgentHook",
             Self::ToolsHook { .. } => "ToolsHook",
             Self::ModelHook { .. } => "ModelHook",
@@ -88,6 +146,7 @@ impl PluginMount {
 
     pub fn location(&self) -> Option<&str> {
         match self {
+            Self::Plan { id, .. } | Self::Runtime { id, .. } => Some(id),
             Self::SingleAgentHook { agent_id, .. } => agent_id.as_deref(),
             Self::ToolsHook { channel, .. } => channel.as_deref(),
             Self::ModelHook { .. } => None,
@@ -144,7 +203,8 @@ impl PluginDeclaration {
         }
         semver::Version::parse(&self.plugin_version)?;
         anyhow::ensure!(
-            self.fae_plugin_api_version == API_VERSION,
+            self.fae_plugin_api_version == API_VERSION
+                || self.fae_plugin_api_version == PLAN_RUNTIME_API_VERSION,
             "incompatible plugin API version: {}",
             self.fae_plugin_api_version
         );
@@ -169,6 +229,48 @@ impl PluginDeclaration {
         );
         for mount in &mut self.mounts {
             match mount {
+                PluginMount::Plan {
+                    id, next_plan_id, ..
+                } => {
+                    anyhow::ensure!(
+                        self.fae_plugin_api_version == PLAN_RUNTIME_API_VERSION,
+                        "Plan mount requires plugin API 0.3.0"
+                    );
+                    anyhow::ensure!(
+                        self.registration_mode == RegistrationMode::Chain,
+                        "Plan plugins require chain registration"
+                    );
+                    validate_definition_id(id)?;
+                    if let Some(next) = next_plan_id {
+                        validate_definition_id(next)?;
+                        anyhow::ensure!(next != id, "Plan chain cannot refer to itself");
+                    }
+                }
+                PluginMount::Runtime {
+                    id,
+                    task_types,
+                    public_calls,
+                    ..
+                } => {
+                    anyhow::ensure!(
+                        self.fae_plugin_api_version == PLAN_RUNTIME_API_VERSION,
+                        "Runtime mount requires plugin API 0.3.0"
+                    );
+                    anyhow::ensure!(
+                        engine == PluginEngine::Py,
+                        "Runtime plugins require the Python engine"
+                    );
+                    validate_definition_id(id)?;
+                    let types = parse_task_types(task_types)?;
+                    if let Some(calls) = public_calls {
+                        for name in [&calls.exec, &calls.select].into_iter().flatten() {
+                            anyhow::ensure!(
+                                types.contains(&crate::TaskType::from_name(name)?),
+                                "public operation TaskType is not supported"
+                            );
+                        }
+                    }
+                }
                 PluginMount::ToolsHook { channel, .. } => {
                     channel.get_or_insert_with(|| format!("fae_{id}"));
                 }
@@ -215,6 +317,12 @@ impl PluginDeclaration {
         }
         for (i, left) in self.mounts.iter().enumerate() {
             for right in &self.mounts[i + 1..] {
+                if matches!(left, PluginMount::Plan { .. } | PluginMount::Runtime { .. })
+                    && left.point() == right.point()
+                    && left.location() == right.location()
+                {
+                    anyhow::bail!("duplicate {} ID in plugin", left.point());
+                }
                 if left.point() != right.point() || left.implementation() != right.implementation()
                 {
                     continue;
@@ -227,6 +335,25 @@ impl PluginDeclaration {
         }
         Ok(self)
     }
+}
+
+pub fn validate_definition_id(id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !id.is_empty() && id.trim() == id && !id.chars().any(char::is_control),
+        "invalid definition ID"
+    );
+    Ok(())
+}
+
+pub fn parse_task_types(names: &[String]) -> anyhow::Result<Vec<crate::TaskType>> {
+    anyhow::ensure!(!names.is_empty(), "Runtime task_types must not be empty");
+    let mut types = Vec::with_capacity(names.len());
+    for name in names {
+        let ty = crate::TaskType::from_name(name)?;
+        anyhow::ensure!(!types.contains(&ty), "duplicate Runtime TaskType: {name}");
+        types.push(ty);
+    }
+    Ok(types)
 }
 
 #[cfg(test)]

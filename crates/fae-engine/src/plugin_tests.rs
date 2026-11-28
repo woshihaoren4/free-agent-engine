@@ -19,10 +19,7 @@ fn write(root: &Path, id: &str, mode: &str, point: &str, body: &str) {
 }
 async fn setup(root: &Path) -> (Arc<PluginManager>, Engine, PluginAdapter) {
     let manager = Arc::new(PluginManager::new(root));
-    let engine = EngineBuilder::new()
-        .build()
-        .await
-        .with_plugins(manager.clone());
+    let engine = EngineBuilder::new().build().await;
     let adapter = PluginAdapter::new(manager.clone());
     (manager, engine, adapter)
 }
@@ -54,7 +51,7 @@ impl SessionProbe {
         outputs
     }
 }
-fn root(engine: &Engine, user: &str) -> (Ctx, SessionProbe) {
+fn root(engine: &Engine, manager: &PluginManager, user: &str) -> (Ctx, SessionProbe) {
     let target = PlanTarget::Agent {
         agent_id: "fae".into(),
     };
@@ -99,6 +96,11 @@ fn root(engine: &Engine, user: &str) -> (Ctx, SessionProbe) {
         .unwrap();
     coordinator.running(&execution.execution_id).unwrap();
     let ctx = execution.ctx;
+    ctx.bind_plugin_execution(Arc::new(plugin::PluginExecutionBinding {
+        snapshot: manager.snapshot(),
+        root: ctx.downgrade(),
+        execution_id: execution.execution_id,
+    }));
     ctx.set_state(ContextState::Running).unwrap();
     (
         ctx,
@@ -162,7 +164,7 @@ async fn saved_plugin_capability_cannot_send_into_the_next_execution() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("saved").await.unwrap();
-    let (ctx, probe) = root(&engine, "alice");
+    let (ctx, probe) = root(&engine, &manager, "alice");
     let binding = ctx.scope().unwrap().execution.clone().unwrap();
     let session = binding.session.clone();
     let settings = session.execution(None).unwrap().effective;
@@ -190,6 +192,12 @@ async fn saved_plugin_capability_cannot_send_into_the_next_execution() {
         .unwrap();
     }
     let next = session.prepare(settings).unwrap();
+    next.ctx
+        .bind_plugin_execution(Arc::new(plugin::PluginExecutionBinding {
+            snapshot: manager.snapshot(),
+            root: next.ctx.downgrade(),
+            execution_id: next.execution_id.clone(),
+        }));
     session.running(&next.execution_id).unwrap();
     next.ctx.set_state(ContextState::Running).unwrap();
     assert_eq!(
@@ -236,7 +244,7 @@ async fn plugin_steer_acceptance_and_repeatable_processed_records_are_separate()
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("inputs").await.unwrap();
-    let (ctx, probe) = root(&engine, "alice");
+    let (ctx, probe) = root(&engine, &manager, "alice");
     let binding = ctx.scope().unwrap().execution.clone().unwrap();
     let caller = ctx.clone();
     let call = tokio::spawn(async move { prompt(&adapter, &caller, "done").await });
@@ -315,7 +323,7 @@ async fn plugin_release_waits_for_cancelled_synchronous_thread_before_finished()
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("thread").await.unwrap();
-    let (ctx, _) = root(&engine, "alice");
+    let (ctx, _) = root(&engine, &manager, "alice");
     let binding = ctx.scope().unwrap().execution.clone().unwrap();
     let mut events = binding.session.subscribe();
     let running = tokio::spawn(async move { prompt(&adapter, &ctx, "blocked").await });
@@ -479,7 +487,7 @@ async fn startup_executes_direct_hooks_in_installation_order() {
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load_all().await.unwrap();
     assert_eq!(
-        prompt(&adapter, &root(&engine, "alice").0, "")
+        prompt(&adapter, &root(&engine, &manager, "alice").0, "")
             .await
             .unwrap(),
         "ZA"
@@ -637,7 +645,7 @@ async fn startup_reads_current_sources_and_preserves_installation_order() {
         serde_json::json!(["z", "b", "a"])
     );
     assert_eq!(
-        prompt(&adapter, &root(&engine, "alice").0, "")
+        prompt(&adapter, &root(&engine, &restored, "alice").0, "")
             .await
             .unwrap(),
         "newBA"
@@ -659,7 +667,7 @@ async fn live_reinstall_keeps_running_workers_but_restart_rejects_invalid_source
         .install(&dir.path().join("plugins/demo.py"))
         .await
         .unwrap();
-    let (old, _) = root(&engine, "alice");
+    let (old, _) = root(&engine, &manager, "alice");
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "old");
     write(
         dir.path(),
@@ -672,7 +680,7 @@ async fn live_reinstall_keeps_running_workers_but_restart_rejects_invalid_source
         .install(&dir.path().join("plugins/demo.py"))
         .await
         .unwrap();
-    let (new, _) = root(&engine, "bob");
+    let (new, _) = root(&engine, &manager, "bob");
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "old");
     assert_eq!(prompt(&adapter, &new, "").await.unwrap(), "new");
     std::fs::write(
@@ -687,7 +695,7 @@ async fn live_reinstall_keeps_running_workers_but_restart_rejects_invalid_source
             .is_err()
     );
     assert_eq!(
-        prompt(&adapter, &root(&engine, "charlie").0, "")
+        prompt(&adapter, &root(&engine, &manager, "charlie").0, "")
             .await
             .unwrap(),
         "new"
@@ -720,7 +728,7 @@ async fn chain_order_persists_and_short_circuit_preserves_onion() {
     assert_eq!(manager.snapshot().nodes.len(), 1);
     assert!(manager.snapshot().nodes.contains_key("z"));
     assert_eq!(
-        prompt(&adapter, &root(&engine, "alice").0, "")
+        prompt(&adapter, &root(&engine, &manager, "alice").0, "")
             .await
             .unwrap(),
         "ZAz"
@@ -732,9 +740,13 @@ async fn chain_order_persists_and_short_circuit_preserves_onion() {
         .await
         .with_plugins(restored.clone());
     assert_eq!(
-        prompt(&PluginAdapter::new(restored), &root(&engine, "alice").0, "")
-            .await
-            .unwrap(),
+        prompt(
+            &PluginAdapter::new(restored.clone()),
+            &root(&engine, &restored, "alice").0,
+            ""
+        )
+        .await
+        .unwrap(),
         "ZAz"
     );
 }
@@ -765,13 +777,13 @@ async fn live_install_and_uninstall_publish_snapshots_and_keep_sources() {
             .await
             .unwrap();
     }
-    let (old, _) = root(&engine, "old");
+    let (old, _) = root(&engine, &manager, "old");
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "DZBA");
     let direct = manager.snapshot().nodes["direct"].clone();
     manager.uninstall("b").await.unwrap();
     assert_eq!(manager.snapshot().order, ["direct", "z"]);
     assert_eq!(
-        prompt(&adapter, &root(&engine, "middle_removed").0, "")
+        prompt(&adapter, &root(&engine, &manager, "middle_removed").0, "")
             .await
             .unwrap(),
         "DZA"
@@ -780,14 +792,16 @@ async fn live_install_and_uninstall_publish_snapshots_and_keep_sources() {
     assert!(Arc::ptr_eq(&direct, &manager.snapshot().nodes["direct"]));
     assert_eq!(manager.snapshot().order, ["direct", "a"]);
     assert_eq!(
-        prompt(&adapter, &root(&engine, "new").0, "").await.unwrap(),
+        prompt(&adapter, &root(&engine, &manager, "new").0, "")
+            .await
+            .unwrap(),
         "DA"
     );
     assert_eq!(prompt(&adapter, &old, "").await.unwrap(), "DZBA");
     manager.uninstall("a").await.unwrap();
     assert_eq!(manager.snapshot().order, ["direct"]);
     assert_eq!(
-        prompt(&adapter, &root(&engine, "direct_only").0, "")
+        prompt(&adapter, &root(&engine, &manager, "direct_only").0, "")
             .await
             .unwrap(),
         "D"
@@ -795,7 +809,7 @@ async fn live_install_and_uninstall_publish_snapshots_and_keep_sources() {
     manager.uninstall("direct").await.unwrap();
     assert!(manager.snapshot().nodes.is_empty());
     assert_eq!(
-        prompt(&adapter, &root(&engine, "empty").0, "")
+        prompt(&adapter, &root(&engine, &manager, "empty").0, "")
             .await
             .unwrap(),
         ""
@@ -815,7 +829,7 @@ async fn live_install_and_uninstall_publish_snapshots_and_keep_sources() {
         .await
         .unwrap();
     assert_eq!(
-        prompt(&adapter, &root(&engine, "reinstalled").0, "")
+        prompt(&adapter, &root(&engine, &manager, "reinstalled").0, "")
             .await
             .unwrap(),
         "A"
@@ -848,7 +862,7 @@ async fn failed_chain_uninstall_keeps_configuration_and_runtime() {
     assert!(Arc::ptr_eq(&previous, &manager.snapshot()));
     assert_eq!(std::fs::read(config_path).unwrap(), config_before);
     assert_eq!(
-        prompt(&adapter, &root(&engine, "alice").0, "")
+        prompt(&adapter, &root(&engine, &manager, "alice").0, "")
             .await
             .unwrap(),
         "okok"
@@ -892,8 +906,8 @@ async fn cancellation_acknowledges_before_release_and_does_not_cancel_other_sess
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("cancel").await.unwrap();
-    let (a, _) = root(&engine, "alice");
-    let (b, session) = root(&engine, "bob");
+    let (a, _) = root(&engine, &manager, "alice");
+    let (b, session) = root(&engine, &manager, "bob");
     let (cancel, other) = tokio::join!(prompt(&adapter, &a, "cancel"), prompt(&adapter, &b, "ok"));
     assert!(cancel.is_err());
     assert_eq!(other.unwrap(), "ok");
@@ -919,7 +933,7 @@ async fn tools_route_from_same_instance_and_reject_native_or_direct_conflicts() 
     write(dir.path(), "echo", "direct", "ToolsHook", body);
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("echo").await.unwrap();
-    let (ctx, _) = root(&engine, "alice");
+    let (ctx, _) = root(&engine, &manager, "alice");
     let tool = adapter.tool(&ctx, "fae_echo__echo").unwrap();
     let desc = tool.desc(&ctx, "fae_echo__echo").await.unwrap();
     assert_eq!(desc["description"], "fae_echo");
@@ -991,7 +1005,7 @@ async fn context_bridge_public_facts_output_and_local_child_cancel() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("bridge").await.unwrap();
-    let (ctx, session) = root(&engine, "alice");
+    let (ctx, session) = root(&engine, &manager, "alice");
     assert_eq!(prompt(&adapter, &ctx, "").await.unwrap(), "ok");
     let outputs = session.outputs().await;
     assert_eq!(outputs.len(), 2);
@@ -1040,8 +1054,8 @@ async fn concurrent_sessions_use_one_worker_without_serializing() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("parallel").await.unwrap();
-    let (a, _) = root(&engine, "alice");
-    let (b, _) = root(&engine, "bob");
+    let (a, _) = root(&engine, &manager, "alice");
+    let (b, _) = root(&engine, &manager, "bob");
     let (a, b) = tokio::join!(prompt(&adapter, &a, ""), prompt(&adapter, &b, ""));
     assert_eq!(a.unwrap(), "alice");
     assert_eq!(b.unwrap(), "bob");
@@ -1079,7 +1093,7 @@ async fn model_predicates_route_aliases_once_and_detect_conflicts_before_exec() 
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("alpha").await.unwrap();
     manager.load("beta").await.unwrap();
-    let (old, _) = root(&engine, "alice");
+    let (old, _) = root(&engine, &manager, "alice");
     let request = |model: &str| {
         serde_json::from_value::<CreateChatCompletionRequest>(
             serde_json::json!({"model":model,"messages":[{"role":"user","content":"hi"}]}),
@@ -1108,7 +1122,7 @@ async fn model_predicates_route_aliases_once_and_detect_conflicts_before_exec() 
     );
     write(dir.path(), "beta", "direct", "ModelHook", &body);
     manager.load("beta").await.unwrap();
-    let (new, _) = root(&engine, "bob");
+    let (new, _) = root(&engine, &manager, "bob");
     assert!(
         adapter
             .model(&new, request("family-one"))
@@ -1177,7 +1191,7 @@ async fn model_stream_and_python_wrapper_pull_host_chunks() {
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("model").await.unwrap();
     manager.load("wrapper").await.unwrap();
-    let (ctx, session) = root(&engine, "alice");
+    let (ctx, session) = root(&engine, &manager, "alice");
     let request: CreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
         "model":"plugin:model/default","messages":[{"role":"user","content":"hi"}],"stream":true}))
     .unwrap();
@@ -1251,8 +1265,8 @@ async fn cancelling_an_idle_stream_closes_generator_without_another_poll() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("idle").await.unwrap();
-    let (alice, probe) = root(&engine, "alice");
-    let (bob, _) = root(&engine, "bob");
+    let (alice, probe) = root(&engine, &manager, "alice");
+    let (bob, _) = root(&engine, &manager, "bob");
     let request: CreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
         "model":"plugin:idle/default","messages":[{"role":"user","content":"hi"}],"stream":true
     }))
@@ -1365,7 +1379,7 @@ async fn query_completion_sends_final_output_and_skips_later_plugins() {
         );
         let (manager, engine, adapter) = setup(dir.path()).await;
         manager.load_all().await.unwrap();
-        let (ctx, probe) = root(&engine, "alice");
+        let (ctx, probe) = root(&engine, &manager, "alice");
         let agent = SingleAgentInfo {
             name: "fae".into(),
             desc: "".into(),
@@ -1405,7 +1419,7 @@ async fn query_completion_sends_final_output_and_skips_later_plugins() {
         );
         assert!(matches!(&outputs[0].source,
             fae_agent::protocol::OutputSource::PluginResult { plugin_id } if plugin_id == "command"));
-        let (normal, normal_probe) = root(&engine, "bob");
+        let (normal, normal_probe) = root(&engine, &manager, "bob");
         assert_eq!(
             adapter
                 .on_query(
@@ -1458,7 +1472,7 @@ async fn query_completion_is_rejected_outside_query_and_on_child_contexts() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load_all().await.unwrap();
-    let (ctx, probe) = root(&engine, "alice");
+    let (ctx, probe) = root(&engine, &manager, "alice");
     assert_eq!(prompt(&adapter, &ctx, "prompt").await.unwrap(), "prompt");
     let agent = SingleAgentInfo {
         name: "fae".into(),
@@ -1520,10 +1534,10 @@ async fn plugin_completion_uses_hook_return_and_exposes_no_terminal_write_api() 
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("success").await.unwrap();
     manager.load("typed").await.unwrap();
-    let (agent, _) = root(&engine, "alice");
+    let (agent, _) = root(&engine, &manager, "alice");
     assert_eq!(prompt(&adapter, &agent, "").await.unwrap(), "plugin result");
     assert!(!agent.state().current().is_terminal());
-    let (model, _) = root(&engine, "bob");
+    let (model, _) = root(&engine, &manager, "bob");
     let request = serde_json::from_value(serde_json::json!({
         "model":"plugin:typed/default","messages":[{"role":"user","content":"hi"}]
     }))
@@ -1546,7 +1560,7 @@ async fn passthrough_native_stream_retains_lease_until_eof() {
     );
     let (manager, engine, adapter) = setup(dir.path()).await;
     manager.load("passthrough").await.unwrap();
-    let (ctx, _) = root(&engine, "alice");
+    let (ctx, _) = root(&engine, &manager, "alice");
     let agent = SingleAgentInfo {
         name: "fae".into(),
         desc: "".into(),

@@ -1,8 +1,9 @@
 {
-  "version": 4,
+  "api_version": "0.1.0",
   "request_id": "req-start-1",
-  "session_id": "session-1",
-  "path": "/request/session/execution/start",
+  "session": {"session_id": "session-1"},
+  "plan": null,
+  "event": "/request/session/execution/start",
   "payload": {
     "input": [{"type": "text", "text": "继续实现登录"}]
   }

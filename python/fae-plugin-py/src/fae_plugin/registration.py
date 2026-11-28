@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from .chain import ChainModelHook, ChainSingleAgentHook, ChainToolsHook
 from .hooks import ModelHook, SingleAgentHook, ToolsHook
+from .providers import Plan, ChainPlan, Runtime, ChainRuntime
+from .tasks import task_types
 
 AGENT_METHODS = ("on_query", "on_prompt", "on_memory", "on_history", "on_compression",
                  "on_model_req", "on_model_resp", "on_tools_req", "on_tools_resp", "on_save")
@@ -112,6 +114,8 @@ class Instance:
             return False
         if point == "ModelHook":
             return True
+        if point in ("Plan", "Runtime"):
+            return self.mount["id"] == location
         field = {"SingleAgentHook": "agent_id", "ToolsHook": "channel"}[point]
         return self.mount.get(field) == location or (field == "agent_id" and field not in self.mount)
 
@@ -123,9 +127,9 @@ def register(members: list[dict[str, Any]]) -> list[Instance]:
         loader = ModuleLoader(member["id"], source.parent if source.is_file() else source)
         config = member["declaration"]
         mode = config["registration_mode"]
-        bases = {"direct": {"SingleAgentHook": SingleAgentHook, "ToolsHook": ToolsHook, "ModelHook": ModelHook},
+        bases = {"direct": {"SingleAgentHook": SingleAgentHook, "ToolsHook": ToolsHook, "ModelHook": ModelHook, "Runtime": Runtime},
                  "chain": {"SingleAgentHook": ChainSingleAgentHook, "ToolsHook": ChainToolsHook,
-                           "ModelHook": ChainModelHook}}[mode]
+                           "ModelHook": ChainModelHook, "Plan": ChainPlan, "Runtime": ChainRuntime}}[mode]
         for index, mount in enumerate(config["mounts"]):
             if source.is_file():
                 module, class_name = loader.load(source), mount["implementation"]
@@ -136,6 +140,19 @@ def register(members: list[dict[str, Any]]) -> list[Instance]:
             base = bases[mount["point"]]
             if not inspect.isclass(cls) or not issubclass(cls, base) or cls is base:
                 raise ValueError(f"{member['id']}:{class_name} must inherit {base.__name__}")
+            if mount["point"] in ("Plan", "Runtime"):
+                _validate_provider(cls, base, mount, mode)
+                obj = cls()
+                if obj.id() != mount["id"]:
+                    raise ValueError("Provider id() does not match mount.id")
+                if mount["point"] == "Runtime":
+                    if set(task_types(obj.tys())) != set(task_types(mount["task_types"])):
+                        raise ValueError("Runtime tys() does not match task_types")
+                else:
+                    # Stateful Plans are created afresh for each execution.
+                    obj = cls
+                records.append(Instance(f"{member['id']}:{index}", member["id"], mount, obj, base, mode))
+                continue
             methods = AGENT_METHODS if mount["point"] == "SingleAgentHook" else (
                 ("desc", "exec") if mount["point"] == "ToolsHook" else ("match_model", "exec"))
             for method in methods:
@@ -164,6 +181,8 @@ def register(members: list[dict[str, Any]]) -> list[Instance]:
                 setattr(obj, "_channel", mount["channel"])
             records.append(Instance(f"{member['id']}:{index}", member["id"], mount, obj, base, mode))
     for record in records:
+        if record.mount["point"] in ("Plan", "Runtime"):
+            continue
         if record.mode != "chain" or record.mount["point"] == "SingleAgentHook":
             continue
         point = record.mount["point"]
@@ -172,4 +191,71 @@ def register(members: list[dict[str, Any]]) -> list[Instance]:
             if not any(r.matches(point, location) and getattr(type(r.object), method) is not getattr(r.base, method)
                        for r in records):
                 raise ValueError(f"Chain {point} {location} has no {method} implementation")
+    _validate_topology(records)
     return records
+
+
+def _validate_provider(cls: type, base: type, mount: dict[str, Any], mode: str) -> None:
+    if mount["point"] == "Plan" and mode != "chain":
+        raise ValueError("Plan providers require chain registration")
+    if not isinstance(mount.get("id"), str) or not mount["id"]:
+        raise ValueError("Provider ID is required")
+    methods = {"id": 1, "init": 1, "next": 2, "abort": 3} if mount["point"] == "Plan" else {
+        "id": 1, "tys": 1, "select": 3, "exec": 2, "kill": 2, "exit": 1}
+    for method, count in methods.items():
+        function = getattr(cls, method)
+        params = list(inspect.signature(function).parameters.values())
+        if len(params) != count or any(p.kind not in (
+                inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                or p.default != inspect.Parameter.empty for p in params):
+            raise ValueError(f"Invalid {cls.__name__}.{method} signature")
+        if method in ("id", "tys"):
+            if inspect.iscoroutinefunction(function) or function is getattr(base, method):
+                raise ValueError(f"{method} must be implemented synchronously")
+        elif mode == "chain" and not inspect.iscoroutinefunction(function):
+            raise ValueError("Chain provider methods must be async")
+    if mount["point"] == "Runtime":
+        task_types(mount["task_types"])
+        if mode == "direct" and getattr(cls, "exec") is Runtime.exec:
+            raise ValueError("Runtime exec must be implemented")
+
+
+def _validate_topology(records: list[Instance]) -> None:
+    plans: dict[str, Instance] = {}
+    runtimes: dict[str, list[Instance]] = {}
+    for record in records:
+        point = record.mount["point"]
+        if point == "Plan":
+            id = record.mount["id"]
+            if id in plans:
+                raise ValueError(f"Duplicate Plan ID: {id}")
+            plans[id] = record
+        elif point == "Runtime":
+            id = record.mount["id"]
+            layers = runtimes.setdefault(id, [])
+            if layers and (record.mode != "chain" or any(
+                    layer.mode != "chain" or layer.plugin_id != record.plugin_id
+                    or layer.mount["implementation"] == record.mount["implementation"]
+                    or set(layer.mount["task_types"]) != set(record.mount["task_types"])
+                    for layer in layers)):
+                raise ValueError(f"Duplicate or inconsistent Runtime ID: {id}")
+            layers.append(record)
+    for id in plans:
+        visited: set[str] = set()
+        current: str | None = id
+        chain = []
+        while current is not None:
+            if current in visited or current not in plans:
+                raise ValueError(f"Cyclic or missing Plan chain target: {current}")
+            visited.add(current)
+            record = plans[current]
+            chain.append(record)
+            current = record.mount.get("next_plan_id")
+        for method in ("init", "next"):
+            if not any(getattr(record.object, method) is not getattr(ChainPlan, method)
+                       for record in chain):
+                raise ValueError(f"Plan {id} has no {method} implementation")
+    for id, layers in runtimes.items():
+        if not any(getattr(type(layer.object), "exec") is not getattr(layer.base, "exec")
+                   for layer in layers):
+            raise ValueError(f"Runtime {id} has no exec implementation")

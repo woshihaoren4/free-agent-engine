@@ -27,6 +27,20 @@ pub struct Outbound {
     close: watch::Sender<bool>,
 }
 impl Outbound {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::Receiver<Queued>) {
+        let (tx, rx) = mpsc::channel(512);
+        let (close, _) = watch::channel(false);
+        (
+            Self {
+                id: "test".into(),
+                tx,
+                bytes: Arc::new(Semaphore::new(16 * 1024 * 1024)),
+                close,
+            },
+            rx,
+        )
+    }
     pub fn send(&self, envelope: fae_agent::protocol::ServerFrame) -> bool {
         self.enqueue(envelope, None)
     }
@@ -100,7 +114,7 @@ pub async fn upgrade(
             stream,
             move |request: &Request, response: Response| -> Result<Response, ErrorResponse> {
                 let authorization = format!("Bearer {token}");
-                let lark = request.uri().path() == "/v4/lark/session";
+                let lark = request.uri().path() == "/api/0.1.0/lark/session";
                 let authorization = if lark {
                     format!("Bearer {lark_token}")
                 } else {
@@ -113,7 +127,7 @@ pub async fn upgrade(
                     && !request.headers().contains_key("origin")
                     && matches!(
                         request.uri().path(),
-                        "/v4/control" | "/v4/session" | "/v4/lark/session"
+                        "/api/0.1.0/control" | "/api/0.1.0/session" | "/api/0.1.0/lark/session"
                     );
                 if !accepted {
                     return Err(Response::builder()

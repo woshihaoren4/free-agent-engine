@@ -178,6 +178,23 @@ class DemoTests(unittest.TestCase):
 
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "input" in payload:
+                    messages = []
+                    for item in payload["input"]:
+                        if item.get("type") == "function_call_output":
+                            messages.append({"role": "tool", "content": item["output"]})
+                        elif item.get("type") == "function_call":
+                            messages.append({"role": "assistant", "tool_calls": [
+                                {"function": {"name": item["name"], "arguments": item["arguments"]}}
+                            ]})
+                        elif "role" in item:
+                            content = item["content"]
+                            if isinstance(content, list):
+                                content = "".join(block.get("text", "") for block in content)
+                            messages.append({"role": item["role"], "content": content})
+                    payload["messages"] = messages
+                    payload["tools"] = [{"function": {key: value for key, value in tool.items()
+                                                       if key != "type"}} for tool in payload.get("tools", [])]
                 requests.append(payload)
                 results = [message["content"] for message in payload["messages"]
                            if message["role"] == "tool"]
@@ -197,12 +214,24 @@ class DemoTests(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                for value, finish in [(delta, None), ({}, reason)]:
-                    chunk = {"id": "table-demo-test", "object": "chat.completion.chunk",
-                             "created": 0, "model": "gpt-4o-mini",
-                             "choices": [{"index": 0, "delta": value, "finish_reason": finish}]}
-                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-                self.wfile.write(b"data: [DONE]\n\n")
+                if reason == "tool_calls":
+                    call = delta["tool_calls"][0]
+                    item = {"type": "function_call", "id": call["id"], "call_id": call["id"],
+                            "name": call["function"]["name"], "arguments": call["function"]["arguments"],
+                            "status": "completed"}
+                    event = {"type": "response.output_item.added", "sequence_number": 1,
+                             "output_index": 0, "item": item}
+                else:
+                    text = delta["content"]
+                    item = {"type": "message", "id": "msg", "role": "assistant", "status": "completed",
+                            "content": [{"type": "output_text", "text": text, "annotations": []}]}
+                    event = {"type": "response.output_text.delta", "sequence_number": 1,
+                             "item_id": "msg", "output_index": 0, "content_index": 0, "delta": text}
+                complete = {"type": "response.completed", "sequence_number": 2,
+                            "response": {"id": "table-demo-test", "object": "response", "created_at": 1,
+                                         "model": "gpt-4o-mini", "status": "completed", "output": [item]}}
+                for value in (event, complete):
+                    self.wfile.write(f"event: {value['type']}\ndata: {json.dumps(value)}\n\n".encode())
                 self.wfile.flush()
 
         with tempfile.TemporaryDirectory(prefix="fae-table-demo-") as directory:

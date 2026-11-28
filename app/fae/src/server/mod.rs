@@ -46,7 +46,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
         pid: std::process::id(),
         address,
         port,
-        protocol_version: fae_agent::protocol::VERSION,
+        protocol_version: fae_agent::protocol::API_VERSION,
         app_version: env!("CARGO_PKG_VERSION").into(),
         started_at: chrono::Utc::now().to_rfc3339(),
         executable: std::env::current_exe()?,
@@ -57,6 +57,7 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
     let registry =
         registry::Registry::with_timer(home.clone(), config.instance_id.clone(), timer.handle());
     registry.plugins.load_all().await?;
+    registry.initialize_engine().await?;
     let services = timer::ServerServices::start(timer, registry.clone()).await?;
     let (shutdown, mut stopping) = watch::channel(false);
     let signal = lifecycle::stop_signal()?;
@@ -88,23 +89,23 @@ pub async fn run(home: PathBuf, address: IpAddr, port: u16) -> anyhow::Result<()
                 let shutdown = shutdown.clone();
                 connections.spawn(async move {
                     let Ok((ws, route, principal)) = connection::upgrade(stream, token, lark_token).await else { return };
-                    if route == "/v4/lark/session" && !peer.ip().is_loopback() { return; }
+                    if route == "/api/0.1.0/lark/session" && !peer.ip().is_loopback() { return; }
                     let (out, mut input, transport) = connection::transport(ws);
                     let _guard = connection::ConnectionGuard(out.clone());
                     let mut attached = std::collections::HashMap::new();
                     while let Some(text) = input.recv().await {
-                        if route == "/v4/control" {
+                        if route == "/api/0.1.0/control" {
                             control::handle(&text, &out, &config, &registry, &shutdown).await;
                             continue;
                         }
-                        use fae_agent::protocol::{Message, RequestPayload, ResponseMessage, ServerFrame};
-                        let request: Message = match serde_json::from_str(&text) {
+                        use fae_agent::protocol::{RequestMessage, RequestPayload, ResponseMessage, ServerFrame};
+                        let request = match serde_json::from_str::<RequestMessage>(&text).and_then(|r| r.into_message().map_err(serde::de::Error::custom)) {
                             Ok(request) => request,
                             // Malformed/other-version frames have no trusted correlation envelope.
                             Err(_) => { out.close(); break; }
                         };
                         let Ok(payload) = request.as_request() else { out.close(); break; };
-                        if !payload.path().is_session() {
+                        if !payload.event().is_session() {
                             let response = ResponseMessage::error(&request, fae_agent::protocol::ResponseCode::BadRequest, "Expected session operation").unwrap();
                             out.send(ServerFrame::Response(response));
                             continue;

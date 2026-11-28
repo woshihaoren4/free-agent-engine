@@ -1,5 +1,5 @@
 use fae::{app::client, protocol::*};
-use fae_agent::protocol::VERSION;
+use fae_agent::protocol::API_VERSION;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -78,7 +78,7 @@ impl Service {
                 pid: child.id(),
                 address: "127.0.0.1".parse().unwrap(),
                 port,
-                protocol_version: VERSION,
+                protocol_version: API_VERSION,
                 app_version: "".into(),
                 started_at: "".into(),
                 executable: "fae".into(),

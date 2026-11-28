@@ -6,7 +6,7 @@ pub struct ServerConfig {
     pub pid: u32,
     pub address: IpAddr,
     pub port: u16,
-    pub protocol_version: u16,
+    pub protocol_version: fae_agent::protocol::ProtocolApiVersion,
     pub app_version: String,
     pub started_at: String,
     pub executable: PathBuf,

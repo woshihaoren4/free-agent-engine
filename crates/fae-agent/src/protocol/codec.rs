@@ -1,12 +1,7 @@
+use super::*;
+use crate::{RequestId, SessionId, session::MAX_ID_BYTES};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-
-use crate::{RequestId, SessionId, session::MAX_ID_BYTES};
-
-use super::{
-    Message, MessagePath, MessagePayload, RequestPayload, ResponseBody, ResponseMessage,
-    ResponsePayload, VERSION,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -20,7 +15,6 @@ pub enum ResponseCode {
     Unavailable = 503,
     StorageError = 507,
 }
-
 impl ResponseCode {
     pub const ALL: &'static [Self] = &[
         Self::Success,
@@ -33,51 +27,37 @@ impl ResponseCode {
         Self::StorageError,
     ];
 }
-
 impl Serialize for ResponseCode {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u16(*self as u16)
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u16(*self as u16)
     }
 }
-
 impl<'de> Deserialize<'de> for ResponseCode {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match u16::deserialize(deserializer)? {
-            0 => Ok(Self::Success),
-            400 => Ok(Self::BadRequest),
-            403 => Ok(Self::Forbidden),
-            404 => Ok(Self::NotFound),
-            409 => Ok(Self::Conflict),
-            500 => Ok(Self::InternalError),
-            503 => Ok(Self::Unavailable),
-            507 => Ok(Self::StorageError),
-            code => Err(serde::de::Error::custom(format!(
-                "unregistered response code {code}"
-            ))),
-        }
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let code = u16::deserialize(d)?;
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|v| *v as u16 == code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unregistered response code {code}")))
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
-    #[error("unsupported protocol version {0}; expected {VERSION}")]
-    UnsupportedVersion(u16),
-    #[error("path and payload do not match")]
+    #[error("event and payload do not match")]
     PayloadMismatch,
     #[error("invalid envelope field: {0}")]
     InvalidField(&'static str),
-    #[error("responses with an error code must have data=null")]
+    #[error("responses with an error code must have payload=null")]
     ErrorData,
     #[error("external events cannot be executed as requests")]
     ExternalEvent,
 }
-
 impl ProtocolError {
     pub fn code(&self) -> ResponseCode {
         ResponseCode::BadRequest
     }
 }
-
 fn identifier(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.trim() != value
@@ -88,37 +68,45 @@ fn identifier(value: &str, field: &'static str) -> Result<(), ProtocolError> {
     }
     Ok(())
 }
-
-fn version(value: &Value) -> Result<(), String> {
-    let version = value
-        .get("version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "version must be an unsigned integer".to_string())?;
-    if version != u64::from(VERSION) {
-        return Err(format!(
-            "unsupported protocol version {version}; expected {VERSION}"
-        ));
-    }
-    Ok(())
-}
-
 impl Message {
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.version != VERSION {
-            return Err(ProtocolError::UnsupportedVersion(self.version));
-        }
-        if self.path != self.payload.path() {
+        if self.event != self.payload.event() {
             return Err(ProtocolError::PayloadMismatch);
+        }
+        if let Some(plan) = &self.plan {
+            crate::plugin::validate_definition_id(&plan.plan_id)
+                .map_err(|_| ProtocolError::InvalidField("plan"))?;
+        }
+        if let Some(call) = &self.call {
+            crate::plugin::validate_definition_id(&call.runtime_id)
+                .map_err(|_| ProtocolError::InvalidField("call"))?;
         }
         match &self.payload {
             MessagePayload::Request(request) => {
                 if self.request_id.is_none() {
                     return Err(ProtocolError::InvalidField("request_id"));
                 }
-                let path = request.path();
+                let event = request.event();
+                match event {
+                    RequestEvent::PlanCall
+                        if self.plan.is_none()
+                            || self.call.is_some()
+                            || self.session_id.is_some() =>
+                    {
+                        return Err(ProtocolError::InvalidField("plan/call route"));
+                    }
+                    RequestEvent::RuntimeExec | RequestEvent::RuntimeSelect
+                        if self.call.is_none()
+                            || self.plan.is_some()
+                            || self.session_id.is_some() =>
+                    {
+                        return Err(ProtocolError::InvalidField("runtime route"));
+                    }
+                    _ => {}
+                }
                 request.validate_plugin(self.session_id.as_ref())?;
-                if !path.is_plugin() && path.requires_session() != self.session_id.is_some() {
-                    return Err(ProtocolError::InvalidField("session_id"));
+                if !event.is_plugin() && event.requires_session() != self.session_id.is_some() {
+                    return Err(ProtocolError::InvalidField("session"));
                 }
                 if self.stream_id.is_some() || self.seq.is_some() {
                     return Err(ProtocolError::InvalidField("request stream_id/seq"));
@@ -134,17 +122,15 @@ impl Message {
                 if let RequestPayload::SessionUnsubscribe(request) = request {
                     identifier(&request.subscription_id, "subscription_id")?;
                 }
-                if let RequestPayload::EngineHello(hello) = request {
-                    if !hello.versions.contains(&VERSION) {
-                        return Err(ProtocolError::UnsupportedVersion(
-                            hello.versions.first().copied().unwrap_or(0),
-                        ));
-                    }
+                if let RequestPayload::StreamNext(request) | RequestPayload::StreamClose(request) =
+                    request
+                {
+                    identifier(&request.stream_id, "stream_id")?;
                 }
             }
             MessagePayload::Event(_) => {
                 if self.session_id.is_none() {
-                    return Err(ProtocolError::InvalidField("session_id"));
+                    return Err(ProtocolError::InvalidField("session"));
                 }
                 identifier(
                     self.stream_id
@@ -152,15 +138,13 @@ impl Message {
                         .ok_or(ProtocolError::InvalidField("stream_id"))?,
                     "stream_id",
                 )?;
-                if self.seq.is_none_or(|seq| seq == 0) {
+                if self.seq.is_none_or(|v| v == 0) {
                     return Err(ProtocolError::InvalidField("seq"));
                 }
             }
         }
         Ok(())
     }
-
-    /// Called by a host request dispatcher after decoding; event emission requires a trusted source.
     pub fn as_request(&self) -> Result<&RequestPayload, ProtocolError> {
         self.validate()?;
         match &self.payload {
@@ -169,205 +153,173 @@ impl Message {
         }
     }
 }
-
 impl ResponseMessage {
-    /// Method-discriminated plugin values must be checked against the original request.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.code != ResponseCode::Success && !self.payload.is_null() {
+            return Err(ProtocolError::ErrorData);
+        }
+        if let Some(plan) = &self.plan {
+            identifier(&plan.plan_id, "plan")?;
+        }
+        Ok(())
+    }
     pub fn validate_for(&self, message: &Message) -> Result<(), ProtocolError> {
         self.validate()?;
         let request = message.as_request()?;
-        if Some(&self.request_id) != message.request_id.as_ref()
-            || self.path != request.path().response()
-            || (self.session_id != message.session_id
-                && !(request.path() == super::RequestPath::SessionCreate
-                    && self.payload.code == ResponseCode::Success))
+        let session = self.session.as_ref().map(|s| &s.session_id);
+        if Some(&self.response_id) != message.request_id.as_ref()
+            || self.plan != message.plan
+            || (session != message.session_id.as_ref()
+                && !(request.event() == RequestEvent::SessionCreate
+                    && self.code == ResponseCode::Success))
         {
             return Err(ProtocolError::PayloadMismatch);
         }
-        if self.payload.code == ResponseCode::Success {
+        if self.code == ResponseCode::Success {
+            let decoded = self.decode_for(message)?;
+            if let Some(ResponsePayload::SessionCreate(summary)) = decoded {
+                if session != Some(&summary.session_config.session_id) {
+                    return Err(ProtocolError::InvalidField("created session_id"));
+                }
+            }
+            if let Some(ResponsePayload::SessionExecutionSteer(accepted)) =
+                self.decode_for(message)?
+            {
+                if accepted.request_id != self.response_id {
+                    return Err(ProtocolError::InvalidField("input request_id"));
+                }
+            }
             let hook = match request {
                 RequestPayload::PluginInvoke(p) => Some((&p.point, &p.method)),
                 RequestPayload::PluginNext(p) => Some((&p.point, &p.method)),
                 _ => None,
             };
             if let Some((point, method)) = hook {
-                let value = serde_json::to_value(&self.payload.data)
-                    .map_err(|_| ProtocolError::PayloadMismatch)?;
-                super::validate_hook_value(point, method, &value, true)?;
+                validate_hook_value(point, method, &self.payload, true)?;
             }
         }
         Ok(())
     }
-
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.version != VERSION {
-            return Err(ProtocolError::UnsupportedVersion(self.version));
+    pub fn decode_for(&self, message: &Message) -> Result<Option<ResponsePayload>, ProtocolError> {
+        if self.code != ResponseCode::Success {
+            return Ok(None);
         }
-        let request = self.path.request();
-        if request.requires_session() && self.session_id.is_none() {
-            return Err(ProtocolError::InvalidField("session_id"));
+        if self.payload.is_null()
+            && !matches!(
+                message.as_request()?.event(),
+                RequestEvent::PlanCall
+                    | RequestEvent::RuntimeExec
+                    | RequestEvent::RuntimeSelect
+                    | RequestEvent::StreamNext
+            )
+        {
+            return Ok(None);
         }
-        if !request.is_session() && !request.is_plugin() && self.session_id.is_some() {
-            return Err(ProtocolError::InvalidField("session_id"));
-        }
-        if self.payload.code != ResponseCode::Success && self.payload.data.is_some() {
-            return Err(ProtocolError::ErrorData);
-        }
-        if let Some(payload) = &self.payload.data {
-            if self.path != payload.path() {
-                return Err(ProtocolError::PayloadMismatch);
-            }
-            if let ResponsePayload::SessionCreate(summary) = payload {
-                if self.session_id.as_ref() != Some(&summary.session_config.session_id) {
-                    return Err(ProtocolError::InvalidField("created session_id"));
-                }
-            }
-            if let ResponsePayload::EngineHello(hello) = payload {
-                if hello.version != VERSION {
-                    return Err(ProtocolError::UnsupportedVersion(hello.version));
-                }
-            }
-            if let ResponsePayload::SessionExecutionSteer(accepted) = payload {
-                if accepted.request_id != self.request_id {
-                    return Err(ProtocolError::InvalidField("input request_id"));
-                }
-            }
-        }
-        Ok(())
+        ResponsePayload::decode(message.as_request()?.event(), self.payload.clone())
+            .map(Some)
+            .map_err(|_| ProtocolError::PayloadMismatch)
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationSessionRef {
+    session_id: SessionId,
+    stream_id: String,
+    seq: u64,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireMessage {
-    version: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_version: ProtocolApiVersion,
     request_id: Option<RequestId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    session_id: Option<SessionId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    stream_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    seq: Option<u64>,
-    path: MessagePath,
+    event: MessageEvent,
     payload: Value,
+    session: Value,
+    plan: Option<PlanRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call: Option<RuntimeCallRef>,
 }
-
 impl Serialize for Message {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        WireMessage {
-            version: self.version,
-            request_id: self.request_id.clone(),
-            session_id: self.session_id.clone(),
-            stream_id: self.stream_id.clone(),
-            seq: self.seq,
-            path: self.path,
-            payload: serde_json::to_value(&self.payload).map_err(serde::ser::Error::custom)?,
+        let session = match (&self.session_id, &self.stream_id, self.seq) {
+            (Some(id), Some(stream), Some(seq)) => serde_json::to_value(NotificationSessionRef {
+                session_id: id.clone(),
+                stream_id: stream.clone(),
+                seq,
+            }),
+            (Some(id), _, _) => serde_json::to_value(SessionRef {
+                session_id: id.clone(),
+            }),
+            _ => Ok(Value::Null),
         }
-        .serialize(serializer)
+        .map_err(serde::ser::Error::custom)?;
+        WireMessage {
+            api_version: self.api_version,
+            request_id: self.request_id.clone(),
+            event: self.event,
+            payload: public_payload(self).map_err(serde::ser::Error::custom)?,
+            session,
+            plan: self.plan.clone(),
+            call: self.call.clone(),
+        }
+        .serialize(s)
     }
 }
-
 impl<'de> Deserialize<'de> for Message {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        version(&value).map_err(serde::de::Error::custom)?;
-        let wire: WireMessage =
-            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-        if matches!(wire.path, MessagePath::Request(_))
-            && (value.get("stream_id").is_some() || value.get("seq").is_some())
-        {
-            return Err(serde::de::Error::custom(
-                "request must omit stream_id and seq",
-            ));
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(d)?;
+        for key in [
+            "api_version",
+            "request_id",
+            "event",
+            "payload",
+            "session",
+            "plan",
+        ] {
+            if value.get(key).is_none() {
+                return Err(serde::de::Error::custom(format!("missing {key}")));
+            }
         }
-        let payload = match wire.path {
-            MessagePath::Request(path) => MessagePayload::Request(
-                RequestPayload::decode(path, wire.payload).map_err(serde::de::Error::custom)?,
+        let wire: WireMessage = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        let (session_id, stream_id, seq) = if wire.session.is_null() {
+            (None, None, None)
+        } else if matches!(wire.event, MessageEvent::Event(_)) {
+            let reference: NotificationSessionRef =
+                serde_json::from_value(wire.session).map_err(serde::de::Error::custom)?;
+            (
+                Some(reference.session_id),
+                Some(reference.stream_id),
+                Some(reference.seq),
+            )
+        } else {
+            let reference: SessionRef =
+                serde_json::from_value(wire.session).map_err(serde::de::Error::custom)?;
+            (Some(reference.session_id), None, None)
+        };
+        let adapted = adapt_public_payload(wire.event, wire.plan.as_ref(), wire.payload)
+            .map_err(serde::de::Error::custom)?;
+        let payload = match wire.event {
+            MessageEvent::Request(event) => MessagePayload::Request(
+                RequestPayload::decode(event, adapted).map_err(serde::de::Error::custom)?,
             ),
-            MessagePath::Event(path) => MessagePayload::Event(
-                super::EventPayload::decode(path, wire.payload)
-                    .map_err(serde::de::Error::custom)?,
+            MessageEvent::Event(event) => MessagePayload::Event(
+                EventPayload::decode(event, adapted).map_err(serde::de::Error::custom)?,
             ),
         };
         let message = Self {
-            version: wire.version,
+            api_version: wire.api_version,
             request_id: wire.request_id,
-            session_id: wire.session_id,
-            stream_id: wire.stream_id,
-            seq: wire.seq,
-            path: wire.path,
+            session_id,
+            stream_id,
+            seq,
+            event: wire.event,
             payload,
+            plan: wire.plan,
+            call: wire.call,
         };
         message.validate().map_err(serde::de::Error::custom)?;
         Ok(message)
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireResponse {
-    version: u16,
-    request_id: RequestId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    session_id: Option<SessionId>,
-    path: super::ResponsePath,
-    payload: WireBody,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WireBody {
-    code: ResponseCode,
-    msg: String,
-    // Value deliberately requires the key to exist, even when its value is null.
-    data: Value,
-}
-
-impl Serialize for ResponseMessage {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.validate().map_err(serde::ser::Error::custom)?;
-        WireResponse {
-            version: self.version,
-            request_id: self.request_id.clone(),
-            session_id: self.session_id.clone(),
-            path: self.path,
-            payload: WireBody {
-                code: self.payload.code,
-                msg: self.payload.msg.clone(),
-                data: serde_json::to_value(&self.payload.data)
-                    .map_err(serde::ser::Error::custom)?,
-            },
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ResponseMessage {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        version(&value).map_err(serde::de::Error::custom)?;
-        let wire: WireResponse = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        let data = if wire.payload.data.is_null() {
-            None
-        } else {
-            Some(
-                ResponsePayload::decode(wire.path, wire.payload.data)
-                    .map_err(serde::de::Error::custom)?,
-            )
-        };
-        let response = Self {
-            version: wire.version,
-            request_id: wire.request_id,
-            session_id: wire.session_id,
-            path: wire.path,
-            payload: ResponseBody {
-                code: wire.payload.code,
-                msg: wire.payload.msg,
-                data,
-            },
-        };
-        response.validate().map_err(serde::de::Error::custom)?;
-        Ok(response)
     }
 }

@@ -5,16 +5,11 @@ use super::payload::*;
 use super::plugin::*;
 use crate::SessionConfig;
 
-// One registration fixes the path, the payload schema and the response schema together.
+// One registration fixes the event, payload schema and response schema together.
 macro_rules! requests {
     ($($variant:ident => $suffix:literal, $request:ty, $response:ty;)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum RequestPath {
-            $($variant,)+
-        }
-
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum ResponsePath {
+        pub enum RequestEvent {
             $($variant,)+
         }
 
@@ -30,13 +25,10 @@ macro_rules! requests {
             $($variant($response),)+
         }
 
-        impl RequestPath {
+        impl RequestEvent {
             pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
             pub fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => concat!("/request/", $suffix),)+ }
-            }
-            pub fn response(self) -> ResponsePath {
-                match self { $(Self::$variant => ResponsePath::$variant,)+ }
             }
             pub fn requires_session(self) -> bool {
                 self.as_str().starts_with("/request/session/") && self != Self::SessionCreate
@@ -49,31 +41,21 @@ macro_rules! requests {
             }
         }
 
-        impl ResponsePath {
-            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
-            pub fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => concat!("/response/", $suffix),)+ }
-            }
-            pub fn request(self) -> RequestPath {
-                match self { $(Self::$variant => RequestPath::$variant,)+ }
-            }
-        }
-
         impl RequestPayload {
-            pub fn path(&self) -> RequestPath {
-                match self { $(Self::$variant(_) => RequestPath::$variant,)+ }
+            pub fn event(&self) -> RequestEvent {
+                match self { $(Self::$variant(_) => RequestEvent::$variant,)+ }
             }
-            pub(crate) fn decode(path: RequestPath, value: Value) -> serde_json::Result<Self> {
-                match path { $(RequestPath::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
+            pub(crate) fn decode(event: RequestEvent, value: Value) -> serde_json::Result<Self> {
+                match event { $(RequestEvent::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
             }
         }
 
         impl ResponsePayload {
-            pub fn path(&self) -> ResponsePath {
-                match self { $(Self::$variant(_) => ResponsePath::$variant,)+ }
+            pub fn event(&self) -> RequestEvent {
+                match self { $(Self::$variant(_) => RequestEvent::$variant,)+ }
             }
-            pub(crate) fn decode(path: ResponsePath, value: Value) -> serde_json::Result<Self> {
-                match path { $(ResponsePath::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
+            pub(crate) fn decode(event: RequestEvent, value: Value) -> serde_json::Result<Self> {
+                match event { $(RequestEvent::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
             }
         }
     };
@@ -87,6 +69,11 @@ requests! {
     EnginePluginShow => "engine/plugin/show", PluginShowRequest, PluginShowResult;
     EnginePluginInstall => "engine/plugin/install", PluginInstallRequest, PluginMutationResult;
     EnginePluginUninstall => "engine/plugin/uninstall", PluginUninstallRequest, PluginMutationResult;
+    PlanCall => "plan/call", Value, Value;
+    RuntimeExec => "runtime/exec", Value, Value;
+    RuntimeSelect => "runtime/select", Value, Value;
+    StreamNext => "stream/next", BoundaryStreamRequest, Value;
+    StreamClose => "stream/close", BoundaryStreamRequest, Empty;
     SessionCreate => "session/create", SessionCreateRequest, SessionSummary;
     SessionGet => "session/get", Empty, SessionSummary;
     SessionConfigUpdate => "session/config/update", ConfigUpdateRequest, SessionConfig;
@@ -120,7 +107,7 @@ requests! {
 macro_rules! events {
     ($($variant:ident => $suffix:literal, $payload:ty;)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum EventPath {
+        pub enum NotificationEvent {
             $($variant,)+
         }
 
@@ -130,7 +117,7 @@ macro_rules! events {
             $($variant($payload),)+
         }
 
-        impl EventPath {
+        impl NotificationEvent {
             pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
             pub fn as_str(self) -> &'static str {
                 match self { $(Self::$variant => concat!("/event/", $suffix),)+ }
@@ -138,11 +125,11 @@ macro_rules! events {
         }
 
         impl EventPayload {
-            pub fn path(&self) -> EventPath {
-                match self { $(Self::$variant(_) => EventPath::$variant,)+ }
+            pub fn event(&self) -> NotificationEvent {
+                match self { $(Self::$variant(_) => NotificationEvent::$variant,)+ }
             }
-            pub(crate) fn decode(path: EventPath, value: Value) -> serde_json::Result<Self> {
-                match path { $(EventPath::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
+            pub(crate) fn decode(event: NotificationEvent, value: Value) -> serde_json::Result<Self> {
+                match event { $(NotificationEvent::$variant => serde_json::from_value(value).map(Self::$variant),)+ }
             }
         }
     };
@@ -159,7 +146,7 @@ events! {
     ExecutionFinished => "session/execution/finished", ExecutionFinished;
 }
 
-macro_rules! path_serde {
+macro_rules! event_serde {
     ($($ty:ty),+ $(,)?) => {$(
         impl Serialize for $ty {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -169,20 +156,20 @@ macro_rules! path_serde {
         impl<'de> Deserialize<'de> for $ty {
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let value = String::deserialize(deserializer)?;
-                Self::ALL.iter().copied().find(|path| path.as_str() == value)
-                    .ok_or_else(|| serde::de::Error::custom(format!("unregistered protocol path `{value}`")))
+                Self::ALL.iter().copied().find(|event| event.as_str() == value)
+                    .ok_or_else(|| serde::de::Error::custom(format!("unregistered protocol event `{value}`")))
             }
         }
     )+};
 }
 
-path_serde!(RequestPath, ResponsePath, EventPath);
+event_serde!(RequestEvent, NotificationEvent);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum MessagePath {
-    Request(RequestPath),
-    Event(EventPath),
+pub enum MessageEvent {
+    Request(RequestEvent),
+    Event(NotificationEvent),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,10 +180,10 @@ pub enum MessagePayload {
 }
 
 impl MessagePayload {
-    pub fn path(&self) -> MessagePath {
+    pub fn event(&self) -> MessageEvent {
         match self {
-            Self::Request(payload) => MessagePath::Request(payload.path()),
-            Self::Event(payload) => MessagePath::Event(payload.path()),
+            Self::Request(payload) => MessageEvent::Request(payload.event()),
+            Self::Event(payload) => MessageEvent::Event(payload.event()),
         }
     }
 }

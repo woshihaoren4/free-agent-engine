@@ -41,6 +41,20 @@ pub enum PlanTarget {
     Workflow {
         workflow_id: String,
     },
+    PluginPlan {
+        plan_id: String,
+        config: serde_json::Value,
+    },
+}
+
+impl PlanTarget {
+    pub fn definition_id(&self) -> &str {
+        match self {
+            Self::Agent { agent_id } => agent_id,
+            Self::Workflow { workflow_id } => workflow_id,
+            Self::PluginPlan { plan_id, .. } => plan_id,
+        }
+    }
 }
 
 /// The existing allowlisted Agent execution option. None selects normal execution.

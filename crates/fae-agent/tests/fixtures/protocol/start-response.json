@@ -1,11 +1,9 @@
 {
-  "version": 4,
-  "request_id": "req-start-1",
-  "session_id": "session-1",
-  "path": "/response/session/execution/start",
-  "payload": {
-    "code": 0,
-    "msg": "已受理",
-    "data": {"execution_id": "execution-1", "accepted": true}
-  }
+  "api_version": "0.1.0",
+  "response_id": "req-start-1",
+  "session": {"session_id": "session-1"},
+  "plan": null,
+  "code": 0,
+  "msg": "已受理",
+  "payload": {"execution_id": "execution-1", "accepted": true}
 }

@@ -51,6 +51,17 @@ pub struct ToolResponse {
     once_result: Option<String>,
     stream_chan: Option<Channel<ToolRespItem>>,
     completion: Option<std::sync::Arc<ToolCompletion>>,
+    reader: Option<std::sync::Arc<ToolReader>>,
+}
+struct ToolReader(
+    tokio::sync::Mutex<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<ToolRespItem>> + Send>>,
+    >,
+);
+impl std::fmt::Debug for ToolReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ToolReader")
+    }
 }
 #[derive(Debug)]
 struct ToolCompletion {
@@ -95,6 +106,7 @@ impl Clone for ToolResponse {
             once_result: self.once_result.clone(),
             stream_chan: self.stream_chan.clone(),
             completion: self.completion.clone(),
+            reader: self.reader.clone(),
         }
     }
 }
@@ -107,6 +119,7 @@ impl ToolResponse {
             once_result: Some(res),
             stream_chan: None,
             completion: None,
+            reader: None,
         }
     }
     pub fn with_error(code: i32, msg: String) -> Self {
@@ -119,6 +132,7 @@ impl ToolResponse {
             once_result: Some(err),
             stream_chan: None,
             completion: None,
+            reader: None,
         }
     }
     pub fn with_stream_chan() -> Self {
@@ -127,6 +141,19 @@ impl ToolResponse {
             once_result: None,
             stream_chan: Some(chan),
             completion: None,
+            reader: None,
+        }
+    }
+    pub fn with_stream(
+        stream: impl futures_util::Stream<Item = anyhow::Result<ToolRespItem>> + Send + 'static,
+    ) -> Self {
+        Self {
+            once_result: None,
+            stream_chan: None,
+            completion: None,
+            reader: Some(std::sync::Arc::new(ToolReader(tokio::sync::Mutex::new(
+                Box::pin(stream),
+            )))),
         }
     }
     pub async fn streaming_push(&self, item: String) -> anyhow::Result<()> {
@@ -179,6 +206,9 @@ impl ToolResponse {
         result
     }
     pub(crate) fn track(&mut self, ctx: Ctx, meta: crate::TaskMeta) {
+        if self.completion.is_some() {
+            return;
+        }
         self.completion = Some(std::sync::Arc::new(ToolCompletion {
             ctx,
             meta,
@@ -186,6 +216,16 @@ impl ToolResponse {
         }));
     }
     async fn next_item(&mut self) -> anyhow::Result<ToolRespItem> {
+        if let Some(reader) = &self.reader {
+            use futures_util::StreamExt;
+            return reader
+                .0
+                .try_lock()
+                .map_err(|_| anyhow::anyhow!("tool stream busy"))?
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("tool stream ended"))?;
+        }
         if let Some(res) = self.once_result.take() {
             return Ok(ToolRespItem::Completed(res));
         }

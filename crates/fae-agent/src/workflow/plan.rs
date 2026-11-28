@@ -489,8 +489,7 @@ impl WorkflowPlan {
                         },
                     )
                     .await?;
-                    self.ctx
-                        .set_state(crate::ContextState::succeeded(output.clone()))?;
+                    self.ctx.submit_result(output.clone())?;
                     self.emit_node_completed(self.current.clone(), output.clone(), true)?;
                     self.finished = true;
                     return Ok(PlanNext::End);
@@ -1203,8 +1202,7 @@ impl DagWorkflowPlan {
                         },
                     )
                     .await?;
-                    self.ctx
-                        .set_state(crate::ContextState::succeeded(output.clone()))?;
+                    self.ctx.submit_result(output.clone())?;
                     self.emit_node_completed(node_id.clone(), output.clone(), true)?;
                     self.active_node = None;
                     self.finished = true;

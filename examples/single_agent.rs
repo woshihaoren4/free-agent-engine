@@ -48,7 +48,8 @@ async fn main() -> anyhow::Result<()> {
         let (env, _) = SingleAgentEnv::from_agent_id("workspace-assistant", input);
         let env = env.with_session_id(session.key().session_id.to_string());
         let runner = engine.clone();
-        let job = tokio::spawn(async move { runner.execute_session(execution, env).await });
+        let job =
+            tokio::spawn(async move { fae_engine::execute_session(&runner, execution, env).await });
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { session.stop(&execution_id, "Interrupted".into())?; }

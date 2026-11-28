@@ -348,7 +348,7 @@ mod tests {
             pid: std::process::id(),
             address: "127.0.0.1".parse().unwrap(),
             port: 1666,
-            protocol_version: 1,
+            protocol_version: fae_agent::protocol::API_VERSION,
             app_version: "test".into(),
             started_at: "".into(),
             executable: "fae".into(),

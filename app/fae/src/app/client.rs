@@ -118,7 +118,7 @@ async fn connect_principal(
     route: &str,
     principal: Option<&LarkPrincipal>,
 ) -> anyhow::Result<Socket> {
-    let path = home.join(if route == "/v4/lark/session" {
+    let path = home.join(if route == "/api/0.1.0/lark/session" {
         "lark/lark.token"
     } else {
         "server/server.token"
@@ -156,8 +156,8 @@ pub async fn control(
     config: &ServerConfig,
     body: RequestPayload,
 ) -> anyhow::Result<ResponsePayload> {
-    anyhow::ensure!(!body.path().is_session(), "Expected engine operation");
-    let mut socket = Transport::new(connect(home, config, "/v4/control").await?);
+    anyhow::ensure!(!body.event().is_session(), "Expected engine operation");
+    let mut socket = Transport::new(connect(home, config, "/api/0.1.0/control").await?);
     let request = Message::request(RequestId::new(wd_tools::uuid::v4())?, None, body)?;
     socket.send(&request).await?;
     let response = tokio::time::timeout(Duration::from_secs(10), socket.receive()).await??;
@@ -165,21 +165,15 @@ pub async fn control(
         anyhow::bail!("Expected engine response");
     };
     validate_response(&request, &response)?;
-    response_data(response)
+    response_data(&request, response)
 }
 pub async fn hello(home: &Path, config: &ServerConfig) -> anyhow::Result<HelloResult> {
     anyhow::ensure!(
-        config.protocol_version == VERSION,
+        config.protocol_version == API_VERSION,
         "unsupported_version: stop the old service before upgrading"
     );
-    let ResponsePayload::EngineHello(info) = control(
-        home,
-        config,
-        RequestPayload::EngineHello(HelloRequest {
-            versions: vec![VERSION],
-        }),
-    )
-    .await?
+    let ResponsePayload::EngineHello(info) =
+        control(home, config, RequestPayload::EngineHello(HelloRequest {})).await?
     else {
         anyhow::bail!("Invalid service handshake");
     };
@@ -187,32 +181,26 @@ pub async fn hello(home: &Path, config: &ServerConfig) -> anyhow::Result<HelloRe
         Path::new(&info.instance.home) == home
             && info.instance.pid == config.pid
             && info.instance.id == config.instance_id
-            && info.version == VERSION,
+            && info.api_version == API_VERSION,
         "Service identity mismatch"
     );
     Ok(info)
 }
 fn validate_response(request: &Message, response: &ResponseMessage) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        Some(&response.request_id) == request.request_id.as_ref()
-            && response.path == request.as_request()?.path().response()
-            && (response.session_id == request.session_id
-                || request.path == MessagePath::Request(RequestPath::SessionCreate)),
-        "Service response mismatch"
-    );
+    response.validate_for(request)?;
     Ok(())
 }
-fn response_data(response: ResponseMessage) -> anyhow::Result<ResponsePayload> {
-    if response.payload.code != ResponseCode::Success {
+fn response_data(request: &Message, response: ResponseMessage) -> anyhow::Result<ResponsePayload> {
+    response.validate_for(request)?;
+    if response.code != ResponseCode::Success {
         return Err(ResponseError {
-            code: response.payload.code,
-            message: response.payload.msg,
+            code: response.code,
+            message: response.msg,
         }
         .into());
     }
     response
-        .payload
-        .data
+        .decode_for(request)?
         .ok_or_else(|| anyhow::anyhow!("Missing response data"))
 }
 pub struct Client {
@@ -237,9 +225,9 @@ impl Client {
         resume: Option<SubscribeRequest>,
     ) -> anyhow::Result<Self> {
         let route = if principal.is_some() {
-            "/v4/lark/session"
+            "/api/0.1.0/lark/session"
         } else {
-            "/v4/session"
+            "/api/0.1.0/session"
         };
         let mut socket =
             Transport::new(connect_principal(home, config, route, principal.as_ref()).await?);
@@ -265,25 +253,23 @@ impl Client {
         };
         validate_response(&request, &response)?;
         // Gateway creation derives the thread identity from authenticated host metadata.
-        let response = if response.payload.code == ResponseCode::NotFound
-            && principal.is_some()
-            && resume.is_none()
-        {
-            let request = Message::request(
-                RequestId::new(wd_tools::uuid::v4())?,
-                None,
-                RequestPayload::SessionCreate(create.clone()),
-            )?;
-            socket.send(&request).await?;
-            let ServerFrame::Response(response) = socket.receive().await? else {
-                anyhow::bail!("Expected create response");
+        let (request, response) =
+            if response.code == ResponseCode::NotFound && principal.is_some() && resume.is_none() {
+                let request = Message::request(
+                    RequestId::new(wd_tools::uuid::v4())?,
+                    None,
+                    RequestPayload::SessionCreate(create.clone()),
+                )?;
+                socket.send(&request).await?;
+                let ServerFrame::Response(response) = socket.receive().await? else {
+                    anyhow::bail!("Expected create response");
+                };
+                validate_response(&request, &response)?;
+                (request, response)
+            } else {
+                (request, response)
             };
-            validate_response(&request, &response)?;
-            response
-        } else {
-            response
-        };
-        let info = match response_data(response)? {
+        let info = match response_data(&request, response)? {
             ResponsePayload::SessionGet(info) | ResponsePayload::SessionCreate(info) => info,
             _ => anyhow::bail!("Expected session summary"),
         };
@@ -371,10 +357,10 @@ impl Client {
             let frame = self.socket.receive().await?;
             match frame {
                 ServerFrame::Response(response)
-                    if Some(&response.request_id) == request.request_id.as_ref() =>
+                    if Some(&response.response_id) == request.request_id.as_ref() =>
                 {
                     validate_response(&request, &response)?;
-                    let data = response_data(response)?;
+                    let data = response_data(&request, response)?;
                     match &data {
                         ResponsePayload::SessionExecutionStart(accepted) => {
                             self.info.active_execution = Some(accepted.execution_id.clone())
@@ -443,10 +429,7 @@ impl Client {
             } else {
                 match self.socket.receive().await {
                     Ok(ServerFrame::Event(event)) => event,
-                    Ok(ServerFrame::Response(response)) => {
-                        let _ = response_data(response)?;
-                        continue;
-                    }
+                    Ok(ServerFrame::Response(_)) => continue,
                     Err(error) => {
                         if !reconnect {
                             return Err(error);
@@ -485,9 +468,9 @@ impl Client {
             "resume_expired: service restarted; execution was not rerun"
         );
         let route = if self.principal.is_some() {
-            "/v4/lark/session"
+            "/api/0.1.0/lark/session"
         } else {
-            "/v4/session"
+            "/api/0.1.0/session"
         };
         self.socket = Transport::new(
             connect_principal(&self.home, &config, route, self.principal.as_ref()).await?,

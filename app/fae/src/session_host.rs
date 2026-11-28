@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub enum DefinitionTarget {
     Agent { source: SingleAgentSource },
     Workflow { workflow_id: String, input: Value },
+    PluginPlan { plan_id: String, config: Value },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

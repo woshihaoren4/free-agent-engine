@@ -9,15 +9,20 @@ use crate::{
 
 use super::Content;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryStreamRequest {
+    pub owner_request_id: crate::RequestId,
+    pub stream_id: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Empty {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HelloRequest {
-    pub versions: Vec<u16>,
-}
+pub struct HelloRequest {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +66,7 @@ pub struct EngineCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HelloResult {
-    pub version: u16,
+    pub api_version: super::ProtocolApiVersion,
     pub instance: EngineInstance,
     pub capabilities: EngineCapabilities,
 }

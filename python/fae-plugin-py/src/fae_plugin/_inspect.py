@@ -1,4 +1,4 @@
-"""Candidate-only helper using the shared v4 inspect request and response."""
+"""Candidate-only helper using the shared 0.1.0 inspect envelope."""
 import sys
 import json
 import struct
@@ -15,7 +15,7 @@ def main() -> None:
     if not 0 < size <= MAX_FRAME:
         raise ValueError("Invalid inspect frame length")
     message = validate(json.loads(sys.stdin.buffer.read(size), parse_constant=reject_constant))
-    if message["path"] != "/request/plugin/inspect" or message.get("session_id") is not None:
+    if message["event"] != "/request/plugin/inspect" or message["session"] is not None:
         raise ValueError("Expected an execution-free inspect request")
     payload = message["payload"]
     if set(payload) != {"id", "source"} or payload["id"] != sys.argv[1] or payload["source"] != sys.argv[2]:

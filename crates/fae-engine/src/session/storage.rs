@@ -23,6 +23,7 @@ impl SessionDataSource for SessionFileSource {
         let target = match &config.target {
             PlanTarget::Agent { agent_id } => agent_id,
             PlanTarget::Workflow { workflow_id } => workflow_id,
+            PlanTarget::PluginPlan { plan_id, .. } => plan_id,
         };
         let error = |e: fae_agent::Error| SessionControlError::Invalid(e.to_string());
         let SessionResponse::History { messages, .. } = SessionRuntime::with_host_dir(&self.home)

@@ -64,7 +64,7 @@ async fn atomic_start_and_cleanup_barrier_isolate_late_reports() {
     child
         .invocation_started(&TaskMeta {
             id: "task".into(),
-            plan_id: "plan".into(),
+            plan_run_id: "plan".into(),
             executor: "runtime".into(),
             ..Default::default()
         })
@@ -215,7 +215,9 @@ async fn engine_execution_retains_public_result_across_rounds() {
     let session = SessionCoordinator::new(engine.clone(), data()).unwrap();
     for _ in 0..2 {
         let execution = session.prepare(settings()).unwrap();
-        engine.execute_session(execution, TestEnv).await.unwrap();
+        crate::execute_session(&engine, execution, TestEnv)
+            .await
+            .unwrap();
         let result = session.execution(None).unwrap();
         assert_eq!(result.status, ExecutionStatus::Succeeded);
         assert_eq!(result.outcome, session.execution(None).unwrap().outcome);
@@ -308,7 +310,11 @@ async fn preparation_failure_retains_result_and_releases_slot() {
     let engine = builder.build().await;
     let session = SessionCoordinator::new(engine.clone(), data()).unwrap();
     let execution = session.prepare(settings()).unwrap();
-    assert!(engine.execute_session(execution, FailEnv).await.is_err());
+    assert!(
+        crate::execute_session(&engine, execution, FailEnv)
+            .await
+            .is_err()
+    );
     let view = session.execution(None).unwrap();
     assert_eq!(view.status, ExecutionStatus::Failed);
     assert!(matches!(
@@ -369,7 +375,7 @@ async fn stop_waits_for_actual_plan_abort_before_releasing_slot() {
         abort_started: abort_started.clone(),
         release: release.clone(),
     };
-    let job = tokio::spawn(async move { engine.execute_session(execution, env).await });
+    let job = tokio::spawn(async move { crate::execute_session(&engine, execution, env).await });
     started.notified().await;
     session.stop(&id, "stop".into()).unwrap();
     abort_started.notified().await;
